@@ -1,0 +1,44 @@
+[workspace]
+members = ["primeparts-commit", "primeparts-core"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "Apache-2.0"
+rust-version = "1.92"
+authors = ["Eric Page <genamthi@gmail.com>"]
+
+[workspace.dependencies]
+# Vendored iceberg-rust path deps. The vendor tree's own workspace at
+# native/vendor/iceberg-rust/Cargo.toml stays intact — cargo resolves
+# `workspace = true` references there independently of our workspace.
+iceberg = { path = "../native/vendor/iceberg-rust/crates/iceberg" }
+iceberg-catalog-sql = { path = "../native/vendor/iceberg-rust/crates/catalog/sql" }
+iceberg-catalog-hms = { path = "../native/vendor/iceberg-rust/crates/catalog/hms" }
+
+# Thrift bits used directly when building HMS requests.
+hive_metastore = "0.2"
+volo-thrift = "0.10"
+pilota = "0.11"
+
+# Direct deps used in commit logic.
+anyhow = "1"
+clap = { version = "4.5", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "io-util", "process"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+parquet = { version = "58", default-features = false, features = ["snap", "zstd", "async"] }
+arrow-schema = "58"
+dirs = "6"
+toml = "0.9"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
+
+# Internal.
+primeparts-core = { path = "primeparts-core" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

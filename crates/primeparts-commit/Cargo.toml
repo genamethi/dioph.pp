@@ -1,0 +1,35 @@
+[package]
+name = "primeparts-commit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Native iceberg commit binary: validates a primeparts-generate JSONL manifest, appends data files via SqlCatalog, lazily syncs HMS."
+
+[[bin]]
+name = "primeparts-commit"
+path = "src/main.rs"
+
+[dependencies]
+primeparts-core.workspace = true
+
+iceberg.workspace = true
+iceberg-catalog-sql.workspace = true
+iceberg-catalog-hms.workspace = true
+hive_metastore.workspace = true
+volo-thrift.workspace = true
+pilota.workspace = true
+
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+parquet.workspace = true
+arrow-schema.workspace = true
+dirs.workspace = true
+toml.workspace = true
+sqlx.workspace = true
