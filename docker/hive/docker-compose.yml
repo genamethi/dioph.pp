@@ -1,0 +1,28 @@
+name: hive
+
+services:
+  metastore:
+    image: apache/hive:${HIVE_VERSION}
+    restart: unless-stopped
+    container_name: metastore
+    hostname: metastore
+    environment:
+      DEFAULT_FS: "${DEFAULT_FS}"
+      HIVE_WAREHOUSE_PATH: "${HIVE_WAREHOUSE_PATH}"
+      DB_DRIVER: derby
+      SERVICE_NAME: metastore
+      SERVICE_OPTS: -Xmx1G
+    ports:
+      - '9083:9083'
+    volumes:
+      # Bind-mount warehouse at the same path inside the container so
+      # file:// URIs in existing table metadata resolve identically on
+      # the host and in the container.
+      - type: bind
+        source: ${HIVE_WAREHOUSE_PATH}
+        target: ${HIVE_WAREHOUSE_PATH}
+      # Persist the Derby metastore DB across container restarts.
+      - metastore_db:/opt/hive/data
+
+volumes:
+  metastore_db:

@@ -1,0 +1,77 @@
+[workspace]
+authors = ["Eric Page <genamthi@gmail.com>"]
+channels = ["conda-forge"]
+name = "primeparts"
+platforms = ["linux-64"]
+version = "1.2.0"
+
+[tasks]
+kube-down = "scripts/kube-down.sh"
+kube-up = "scripts/kube-up.sh"
+native-build = "make -C native"
+native-bench-core = "native/build/primeparts-bench-core --start-idx 1 --count 1000000"
+native-bench-materialize = "native/build/primeparts-bench-materialize --start-idx 1 --count 1000000 --chunk-primes 500000"
+native-generate = "native/build/primeparts-generate --start-idx 1 --count 1000000 --temp --chunk-primes 500000 --chunks-per-file 4"
+native-commit = "PYTHONPATH=src python -m primeparts.native_iceberg"
+native-test = "make -C native test"
+completion-zsh = "register-python-argcomplete --shell zsh primeparts"
+completion-bash = "register-python-argcomplete --shell bash primeparts"
+sync-hms = "python scripts/sync_hms.py"
+[tasks.hive]
+cmd = "docker compose up"
+cwd = "docker/hive"
+
+
+
+[tasks.hive.env]
+HIVE_VERSION = "4.2.0"
+DEFAULT_FS = "file:///"
+HIVE_WAREHOUSE_PATH = "/media/extssd/research/dioph.pp/data/iceberg/warehouse"
+
+
+
+[dependencies]
+
+tqdm = ">=4.67.3,<5"
+psutil = ">=7.2.2,<8"
+polars = ">=1.38.1,<2"
+python = "==3.14.4"
+pytest = ">=9.0.2,<10"
+pytest-mock = ">=3.15.1,<4"
+sage = "==10.8"
+vulture = ">=2.16,<3"
+pyiceberg = ">=0.11.1,<0.12"
+sqlalchemy = ">=2.0.49,<3"
+anywidget = ">=0.9"
+pyarrow = ">=18.0"
+thrift = ">=0.22.0,<0.23"
+argcomplete = ">=3.6.3,<4"
+
+[tool.funbuns]
+buffer_size = 10_000_000
+small_primes_filename = "small_primes.parquet"
+lim_sm_p = 100000
+max_power = 64
+notebook_port = 8888
+
+[tool.funbuns.directories]
+data_dir = "/media/extssd/research/dioph.pp/data"
+iceberg_dir = "/media/extssd/research/dioph.pp/data/iceberg"
+log_dir = "logs"
+
+[pypi-dependencies]
+#TODO move these to conda-forge dependencies where possible.
+#I suspect many of these are in conda-forge, but an agent added them with pypi accidentally.
+#giotto-ph and the local install are clear exceptions, they belong here.
+funbuns = { path = ".", editable = true }
+pyhive = ">=0.7.0, <0.8"
+thrift-sasl = ">=0.4.3, <0.5"
+pure-sasl = ">=0.6.2, <0.7"
+
+[environments]
+dev = ["dev"]
+
+
+[feature.dev.dependencies]
+pyinstrument = "*"
+gdb = "*"
