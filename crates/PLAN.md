@@ -245,9 +245,12 @@ JSON exit. Failure → exit code 3.
 - Workspace `crates/Cargo.toml` declares the two member crates.
 - `pixi.toml` adds `vendor-patch`, `commit-build`, and
   `commit = "crates/target/release/primeparts-commit"` tasks.
-- The Python coordinator `run_native_pipeline` cuts over to subprocess-call
-  the new binary in place of `commit_native_manifest`. The TUI's Generate
-  screen (per the existing TUI plan) invokes it directly.
+- The Python coordinator `run_native_pipeline` can cut over to subprocess-call
+  the new binary in place of `commit_native_manifest` once Rust catalog
+  compatibility is resolved. TUI status/read integration should use the
+  native C/C++ `ui_iceberg` ABI in `native/`; a future TUI Generate screen can
+  invoke Rust only for catalog mutation if/when this binary becomes production
+  ready.
 
 ## Phasing within v1
 
@@ -319,4 +322,4 @@ can navigate without searching.
 | `native/vendor/iceberg-rust/crates/catalog/hms/src/catalog.rs:553,632,669` | Three `.get_table()` call sites for Patch B. |
 | `native/vendor/iceberg-rust/bindings/python/project-description.md` | Establishes that `pyiceberg-core` is pyiceberg's accelerator, not a substitute. |
 | `native/vendor/iceberg-rust/bindings/python/src/lib.rs:27-33` | `pyiceberg_core_rust` module registration — only `datafusion_table_provider`, `transform`, `manifest` are exposed. |
-| `.claude/plans/review-the-repo-we-re-floofy-wand.md` | Parallel notcurses TUI plan; commit binary is invoked by the TUI's Generate screen. |
+| `native/include/primeparts/ui_iceberg.h`, `native/src/ui_iceberg.cc` | Existing C ABI over iceberg-cpp reads for TUI/status integration. |

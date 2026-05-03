@@ -85,8 +85,10 @@ test: $(BUILD_DIR)/test_core \
 	$(BUILD_DIR)/primeparts-bench-core --start-idx 1 --count 1000 --threads 2 >/tmp/primeparts-bench-core-smoke.txt
 	$(BUILD_DIR)/primeparts-bench-materialize --start-idx 1 --count 1000 --threads 2 --chunk-primes 500 >/tmp/primeparts-bench-materialize-smoke.txt
 	$(BUILD_DIR)/primeparts-generate --start-idx 1 --count 1000 --temp --chunk-primes 500 --chunks-per-file 1 >/tmp/primeparts-generate-smoke.json
-	WAREHOUSE=$$(python3 -c "import json,sys; d=json.loads(open('/tmp/primeparts-generate-smoke.json').read()); print(d['warehouse_root'])"); \
-	  $(BUILD_DIR)/primeparts-test-ui-iceberg "$$WAREHOUSE" >/tmp/primeparts-test-ui-iceberg-smoke.txt
+	MANIFEST=$$(python3 -c "import json; d=json.loads(open('/tmp/primeparts-generate-smoke.json').read()); print(d['manifest'])"); \
+	  ICEBERG_DIR=$$(dirname "$$MANIFEST"); \
+	  PYTHONPATH=../src python -m primeparts.native_iceberg --manifest "$$MANIFEST" --temp >/tmp/primeparts-native-commit-smoke.json; \
+	  $(BUILD_DIR)/primeparts-test-ui-iceberg "$$ICEBERG_DIR" >/tmp/primeparts-test-ui-iceberg-smoke.txt
 
 clean:
 	rm -rf $(BUILD_DIR)

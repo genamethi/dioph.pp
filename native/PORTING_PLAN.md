@@ -24,6 +24,16 @@ Immediate blocker before the next production native append:
   Fix that checker before relying on `primeparts -n ...` against production,
   because the native coordinator calls it before committing.
 
+Immediate blocker for native TUI/status reads:
+
+- The current production partition spec is `truncate[10000000000](p)`.
+  iceberg-cpp models truncate width as `int32_t`, so
+  `TableMetadataUtil::Read(...)` fails parsing the table metadata with
+  `Failed to parse i from string '10000000000': value out of range`.
+  This breaks the native `ui_iceberg` C ABI until iceberg-cpp is patched,
+  upgraded, bypassed for metadata-only reads, or the partition width is
+  revisited.
+
 Practical deferrals:
 
 - Keep `sync_hms.py` as the HMS sync tool until Rust catalog compatibility is
@@ -234,6 +244,24 @@ Todo:
 
 ## Phase 6: Terminal Workbench
 
+Status as of 2026-05-02:
+
+- The TUI integration surface is in `native/`, not `crates/`.
+- `native/include/primeparts/ui_iceberg.h` defines a small C ABI over
+  iceberg-cpp reads for warehouse status:
+  - open warehouse by directory containing `catalog.db`
+  - read max `p` from manifest upper bounds
+  - read total row counts
+  - list snapshots as JSON
+- `native/src/ui_iceberg.cc` implements that ABI by resolving
+  `metadata_location` from SQLite and reading Iceberg metadata/manifests
+  through iceberg-cpp.
+- `native/tests/test_ui_iceberg.c` is built into
+  `native/build/primeparts-test-ui-iceberg`; `make -C native test` exercises
+  it against a temp native writer smoke warehouse. This currently reaches
+  iceberg-cpp metadata parsing and fails on `truncate[10000000000](p)` as
+  described above.
+
 Direction:
 
 - Build a full-screen terminal UI as an operations and exploration layer, not
@@ -265,6 +293,10 @@ Architecture:
 - Keep UI state separate from data operations. The UI should call stable service
   functions for health checks, generation launch, recovery dry-run/apply,
   scans, and query execution.
+- Prefer the existing `ui_iceberg` C ABI for low-level warehouse metadata reads
+  rather than routing TUI status through the Rust commit experiment. Rust may
+  still own future catalog mutation or compaction commands, but the current
+  native read/status boundary is C/C++.
 - All destructive or warehouse-mutating operations should present the same
   invariant checks as the CLI: refuse writes unless the warehouse is in good
   standing or a specific recovery path has validated the pending files.
