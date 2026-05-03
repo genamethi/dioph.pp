@@ -32,8 +32,9 @@ Remaining operational blockers:
 
 - The Rust commit path still does not interoperate with the current
   PyIceberg-created SQLite catalog schema.
-- The first-screen native TUI now exists, but only as a status-oriented shell
-  (table selector + summary metrics). Operational screens are still pending.
+- The first-screen native TUI exists with actionable ops, but deeper
+  operational workflows are still pending (query/browse execution panes,
+  richer recovery UX, and stronger safeguards).
 
 Practical deferrals:
 
@@ -270,9 +271,16 @@ Status as of 2026-05-03:
   shell with table selection plus three views:
   - status (`1`): summary metrics (`max_p`, rows, snapshot count)
   - snapshots (`2`): current snapshot id + recent snapshot rows
-  - ops/query (`3`): cross-table checks + command-level operational guidance
+  - ops/query (`3`): cross-table checks + executable operations
+    - `c`: `PYTHONPATH=src python -m primeparts.native_iceberg --check-warehouse`
+      (timeout 300s)
+    - `s`: `pixi run sync-hms --dry-run` (timeout 600s)
+    - `S`: `pixi run sync-hms` (timeout 900s, `y` confirmation required)
+    - `g`: background launch `primeparts -n 1000000` (writes
+      `logs/tui_generate.log`, `y` confirmation required)
   Key model: arrows / `h/j/k/l` switch table, `r` or `Enter` refresh, `q`
-  quit, with a reserved status row.
+  quit, with a reserved status row. While a confirmation is pending, only
+  `y`, `n`/Esc, and `q` are accepted.
 - In this environment, native notcurses linkage is ABI-compatible with system
   compilers; use `CC=cc CXX=c++` (now baked into pixi `native-build` and
   `native-test` tasks).
@@ -290,9 +298,10 @@ Initial/next screens:
 - Warehouse status: catalog path, current snapshot IDs, `max_p`,
   `max_commit_seq`, orphan/reuse checks, recent manifests, and recovery actions.
 - Snapshot browser: snapshot lineage + summary drill-down and scrolling history.
-- Generate: configure `num_primes`, `chunk_primes`, `chunks_per_file`,
-  checkpoint size, physical/logical/explicit worker count, temp/production
-  target, and run/pause/stop with live progress.
+- Generate: replace fixed `g` launch defaults with an in-UI parameter form
+  (`num_primes`, `chunk_primes`, `chunks_per_file`, checkpoint size,
+  physical/logical/explicit worker count, temp/production target), then
+  run/pause/stop with live progress.
 - Browse: inspect `funbuns.primes` and `funbuns.decompositions` by `p` range,
   `commit_seq`, `k`, and file group.
 - Filters: saved predicates for `k`, `q_k`, `m_k`, `n_k`, near misses, and
@@ -314,6 +323,9 @@ Architecture:
 - All destructive or warehouse-mutating operations should present the same
   invariant checks as the CLI: refuse writes unless the warehouse is in good
   standing or a specific recovery path has validated the pending files.
+- Current safeguard baseline is explicit confirmation for live `sync-hms` and
+  generation launch plus timeout-bounded blocking ops; expand this into
+  preflight checks and two-step confirmation for high-impact operations.
 - Long-running generation should stay in subprocesses so the UI can survive a
   worker crash and offer recovery.
 
