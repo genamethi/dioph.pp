@@ -266,9 +266,13 @@ Status as of 2026-05-03:
   `native/build/primeparts-test-ui-iceberg`; `make -C native test` exercises
   it against a temp native writer smoke warehouse.
 - `native/src/tui_frontend.c` is the first notcurses frontend and builds to
-  `native/build/primeparts-tui`. Current behavior is a split-pane warehouse
-  status view with `h/j/k/l` (or arrows) navigation, `Enter` refresh, `q`
-  quit, and a reserved status row.
+  `native/build/primeparts-tui`. Current behavior is a split-pane workbench
+  shell with table selection plus three views:
+  - status (`1`): summary metrics (`max_p`, rows, snapshot count)
+  - snapshots (`2`): current snapshot id + recent snapshot rows
+  - ops/query (`3`): cross-table checks + command-level operational guidance
+  Key model: arrows / `h/j/k/l` switch table, `r` or `Enter` refresh, `q`
+  quit, with a reserved status row.
 - In this environment, native notcurses linkage is ABI-compatible with system
   compilers; use `CC=cc CXX=c++` (now baked into pixi `native-build` and
   `native-test` tasks).
@@ -281,10 +285,11 @@ Direction:
   UI process separate from generation workers and preserving `ui_iceberg` as
   the status/read boundary.
 
-Initial screens:
+Initial/next screens:
 
 - Warehouse status: catalog path, current snapshot IDs, `max_p`,
   `max_commit_seq`, orphan/reuse checks, recent manifests, and recovery actions.
+- Snapshot browser: snapshot lineage + summary drill-down and scrolling history.
 - Generate: configure `num_primes`, `chunk_primes`, `chunks_per_file`,
   checkpoint size, physical/logical/explicit worker count, temp/production
   target, and run/pause/stop with live progress.

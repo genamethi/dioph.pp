@@ -10,12 +10,28 @@
 #include "primeparts/ui_iceberg.h"
 
 typedef struct {
+    int64_t snapshot_id;
+    int64_t sequence_number;
+    int64_t timestamp_ms;
+    char operation[32];
+} snapshot_row;
+
+typedef struct {
     const char* key;
     int64_t max_p;
     int64_t total_rows;
     int snapshot_count;
+    int snapshot_rows;
+    int64_t current_snapshot_id;
+    snapshot_row snapshots[12];
     char last_error[256];
 } table_status;
+
+typedef enum {
+    VIEW_STATUS = 0,
+    VIEW_SNAPSHOTS = 1,
+    VIEW_OPS = 2,
+} view_mode;
 
 typedef struct {
     struct notcurses* nc;
@@ -25,6 +41,7 @@ typedef struct {
     pp_uic_handle* handle;
     const char* warehouse_root;
     int selected;
+    view_mode mode;
     table_status tables[2];
     bool had_error;
 } app_state;
@@ -41,10 +58,76 @@ static int count_snapshot_entries(const char* json) {
     return count;
 }
 
+static bool extract_i64(const char* src, const char* key, int64_t* out) {
+    const char* p = strstr(src, key);
+    if (!p) return false;
+    p = strchr(p, ':');
+    if (!p) return false;
+    ++p;
+    while (*p == ' ' || *p == '\t') ++p;
+    char* end = NULL;
+    long long v = strtoll(p, &end, 10);
+    if (end == p) return false;
+    *out = (int64_t)v;
+    return true;
+}
+
+static void extract_operation(const char* src, char* out, size_t out_cap) {
+    const char* p = strstr(src, "\"operation\"");
+    if (!p) {
+        snprintf(out, out_cap, "unknown");
+        return;
+    }
+    p = strchr(p, ':');
+    if (!p) {
+        snprintf(out, out_cap, "unknown");
+        return;
+    }
+    const char* q1 = strchr(p, '"');
+    if (!q1) {
+        snprintf(out, out_cap, "unknown");
+        return;
+    }
+    ++q1;
+    const char* q2 = strchr(q1, '"');
+    if (!q2 || q2 <= q1) {
+        snprintf(out, out_cap, "unknown");
+        return;
+    }
+    size_t n = (size_t)(q2 - q1);
+    if (n >= out_cap) n = out_cap - 1;
+    memcpy(out, q1, n);
+    out[n] = '\0';
+}
+
+static void parse_snapshots(table_status* st, const char* json) {
+    st->snapshot_rows = 0;
+    st->current_snapshot_id = -1;
+    extract_i64(json, "\"current_snapshot_id\"", &st->current_snapshot_id);
+
+    const char* p = json;
+    while (p && *p && st->snapshot_rows < (int)(sizeof(st->snapshots) / sizeof(st->snapshots[0]))) {
+        p = strstr(p, "\"snapshot_id\"");
+        if (!p) break;
+        snapshot_row row = {0};
+        if (!extract_i64(p, "\"snapshot_id\"", &row.snapshot_id)) {
+            ++p;
+            continue;
+        }
+        extract_i64(p, "\"sequence_number\"", &row.sequence_number);
+        extract_i64(p, "\"timestamp_ms\"", &row.timestamp_ms);
+        extract_operation(p, row.operation, sizeof(row.operation));
+        st->snapshots[st->snapshot_rows++] = row;
+        ++p;
+    }
+}
+
 static void set_error(table_status* st, const char* msg) {
     st->max_p = -1;
     st->total_rows = -1;
     st->snapshot_count = 0;
+    st->snapshot_rows = 0;
+    st->current_snapshot_id = -1;
     snprintf(st->last_error, sizeof(st->last_error), "%s", msg ? msg : "unknown error");
 }
 
@@ -69,6 +152,7 @@ static void refresh_table_status(app_state* app, table_status* st) {
         return;
     }
     st->snapshot_count = count_snapshot_entries(snaps);
+    parse_snapshots(st, snaps);
     pp_uic_free_string(snaps);
 }
 
@@ -121,6 +205,76 @@ static void draw_master(app_state* app) {
             focused ? ">" : " ",
             app->tables[i].key);
     }
+
+    ncplane_set_fg_rgb8(app->master, 120, 120, 120);
+    ncplane_set_bg_default(app->master);
+    ncplane_set_styles(app->master, NCSTYLE_NONE);
+    ncplane_putstr_yx(app->master, 6, 0, "Views");
+    for (int i = 0; i < 3; ++i) {
+        bool focused = (app->mode == (view_mode)i);
+        if (focused) {
+            ncplane_set_fg_rgb8(app->master, 20, 20, 20);
+            ncplane_set_bg_rgb8(app->master, 210, 210, 210);
+            ncplane_set_styles(app->master, NCSTYLE_BOLD);
+        } else {
+            ncplane_set_fg_rgb8(app->master, 120, 120, 120);
+            ncplane_set_bg_default(app->master);
+            ncplane_set_styles(app->master, NCSTYLE_NONE);
+        }
+        const char* label = (i == VIEW_STATUS) ? "1 status"
+                          : (i == VIEW_SNAPSHOTS) ? "2 snapshots"
+                                                  : "3 ops/query";
+        ncplane_printf_yx(app->master, 7 + i, 0, "%s", label);
+    }
+}
+
+static void draw_status_view(app_state* app, table_status* st) {
+    ncplane_printf_yx(app->detail, 3, 0, "[ok] max_p: %" PRId64, st->max_p);
+    ncplane_printf_yx(app->detail, 4, 0, "[ok] total_rows: %" PRId64, st->total_rows);
+    ncplane_printf_yx(app->detail, 5, 0, "[ok] snapshots: %d", st->snapshot_count);
+}
+
+static void draw_snapshots_view(app_state* app, table_status* st) {
+    ncplane_printf_yx(
+        app->detail, 3, 0, "current_snapshot_id: %" PRId64, st->current_snapshot_id);
+    ncplane_printf_yx(app->detail, 4, 0, "showing %d/%d snapshots", st->snapshot_rows, st->snapshot_count);
+    for (int i = 0; i < st->snapshot_rows; ++i) {
+        const snapshot_row* row = &st->snapshots[i];
+        ncplane_printf_yx(
+            app->detail,
+            6 + i,
+            0,
+            "#%d sid=%" PRId64 " seq=%" PRId64 " ts=%" PRId64 " op=%s",
+            i + 1,
+            row->snapshot_id,
+            row->sequence_number,
+            row->timestamp_ms,
+            row->operation);
+    }
+}
+
+static void draw_ops_view(app_state* app, table_status* st) {
+    table_status* other = &app->tables[(app->selected + 1) % 2];
+    ncplane_putstr_yx(app->detail, 3, 0, "Warehouse query checks");
+    if (!st->last_error[0] && !other->last_error[0]) {
+        int64_t delta = st->max_p - other->max_p;
+        ncplane_printf_yx(app->detail, 4, 0, "max_p delta vs %s: %" PRId64, other->key, delta);
+        if (st->total_rows > 0) {
+            ncplane_printf_yx(
+                app->detail,
+                5,
+                0,
+                "rows/snapshot: %" PRId64,
+                st->snapshot_count > 0 ? (st->total_rows / st->snapshot_count) : st->total_rows);
+        }
+    } else {
+        ncplane_putstr_yx(app->detail, 4, 0, "cross-table query unavailable due to table error");
+    }
+
+    ncplane_putstr_yx(app->detail, 7, 0, "Generation controls (manual execution)");
+    ncplane_putstr_yx(app->detail, 8, 0, "run: primeparts -n <N>");
+    ncplane_putstr_yx(app->detail, 9, 0, "check: PYTHONPATH=src python -m primeparts.native_iceberg --check-warehouse");
+    ncplane_putstr_yx(app->detail, 10, 0, "sync: pixi run sync-hms --dry-run");
 }
 
 static void draw_detail(app_state* app) {
@@ -136,9 +290,13 @@ static void draw_detail(app_state* app) {
         ncplane_printf_yx(app->detail, 3, 0, "[!] %s", st->last_error);
         return;
     }
-    ncplane_printf_yx(app->detail, 3, 0, "[ok] max_p: %" PRId64, st->max_p);
-    ncplane_printf_yx(app->detail, 4, 0, "[ok] total_rows: %" PRId64, st->total_rows);
-    ncplane_printf_yx(app->detail, 5, 0, "[ok] snapshots: %d", st->snapshot_count);
+    if (app->mode == VIEW_STATUS) {
+        draw_status_view(app, st);
+    } else if (app->mode == VIEW_SNAPSHOTS) {
+        draw_snapshots_view(app, st);
+    } else {
+        draw_ops_view(app, st);
+    }
 }
 
 static void draw_status(app_state* app) {
@@ -151,13 +309,13 @@ static void draw_status(app_state* app) {
             app->status,
             0,
             0,
-            "[!] h/j/k/l or arrows navigate | Enter refresh | q quit");
+            "[!] arrows table | 1/2/3 view | r refresh | Enter refresh | q quit");
     } else {
         ncplane_putstr_yx(
             app->status,
             0,
             0,
-            "[ok] h/j/k/l or arrows navigate | Enter refresh | q quit");
+            "[ok] arrows table | 1/2/3 view | r refresh | Enter refresh | q quit");
     }
 }
 
@@ -255,6 +413,16 @@ int main(int argc, char** argv) {
             case NCKEY_LEFT:
                 app.selected = (app.selected + 1) % 2;
                 break;
+            case '1':
+                app.mode = VIEW_STATUS;
+                break;
+            case '2':
+                app.mode = VIEW_SNAPSHOTS;
+                break;
+            case '3':
+                app.mode = VIEW_OPS;
+                break;
+            case 'r':
             case NCKEY_ENTER:
             case '\n':
             case '\r':
