@@ -34,6 +34,12 @@ typedef enum {
     VIEW_OPS = 2,
 } view_mode;
 
+typedef enum {
+    CONFIRM_NONE = 0,
+    CONFIRM_SYNC_LIVE = 1,
+    CONFIRM_GENERATE_BG = 2,
+} confirm_mode;
+
 typedef struct {
     struct notcurses* nc;
     struct ncplane* master;
@@ -51,7 +57,11 @@ typedef struct {
     char op_last_cmd[192];
     char op_lines[6][160];
     int op_line_count;
+    confirm_mode pending_confirm;
 } app_state;
+
+static void draw(app_state* app);
+static void refresh_status(app_state* app);
 
 static void clear_op_lines(app_state* app) {
     app->op_line_count = 0;
@@ -114,6 +124,35 @@ static int launch_generation_bg(app_state* app) {
         "%s",
         app->op_failed ? "failed to launch generation" : "generation launch requested");
     return rc;
+}
+
+static void set_pending_confirm(app_state* app, confirm_mode mode, const char* message) {
+    app->pending_confirm = mode;
+    app->op_failed = false;
+    snprintf(app->op_status, sizeof(app->op_status), "%s", message);
+    clear_op_lines(app);
+}
+
+static void clear_pending_confirm(app_state* app) {
+    app->pending_confirm = CONFIRM_NONE;
+}
+
+static void cancel_pending_confirm(app_state* app) {
+    clear_pending_confirm(app);
+    app->op_failed = false;
+    snprintf(app->op_status, sizeof(app->op_status), "operation cancelled");
+    clear_op_lines(app);
+}
+
+static void run_op_with_refresh(app_state* app, struct notcurses* nc, const char* status_msg, const char* cmd) {
+    app->op_busy = true;
+    app->op_failed = false;
+    snprintf(app->op_status, sizeof(app->op_status), "%s", status_msg);
+    draw(app);
+    notcurses_render(nc);
+    run_shell_capture(app, cmd);
+    refresh_status(app);
+    app->op_busy = false;
 }
 
 static int count_snapshot_entries(const char* json) {
@@ -346,6 +385,7 @@ static void draw_ops_view(app_state* app, table_status* st) {
     ncplane_putstr_yx(app->detail, 9, 0, "c check warehouse");
     ncplane_putstr_yx(app->detail, 10, 0, "s sync-hms --dry-run");
     ncplane_putstr_yx(app->detail, 11, 0, "S sync-hms");
+    ncplane_putstr_yx(app->detail, 12, 0, "confirm prompt: y run | n/Esc cancel");
     ncplane_printf_yx(app->detail, 13, 0, "last command: %s", app->op_last_cmd[0] ? app->op_last_cmd : "(none)");
     ncplane_printf_yx(app->detail, 14, 0, "last status: %s", app->op_status[0] ? app->op_status : "(none)");
     for (int i = 0; i < app->op_line_count; ++i) {
@@ -380,7 +420,13 @@ static void draw_status(app_state* app) {
     ncplane_set_fg_rgb8(app->status, 0, 0, 0);
     ncplane_set_bg_rgb8(app->status, 200, 200, 200);
     ncplane_set_styles(app->status, NCSTYLE_BOLD);
-    if (app->op_busy) {
+    if (app->pending_confirm != CONFIRM_NONE) {
+        ncplane_putstr_yx(
+            app->status,
+            0,
+            0,
+            "[?] confirmation pending | y confirm | n/Esc cancel | arrows table | 1/2/3 view | q quit");
+    } else if (app->op_busy) {
         ncplane_putstr_yx(
             app->status,
             0,
@@ -462,6 +508,7 @@ int main(int argc, char** argv) {
     };
     app.op_status[0] = '\0';
     app.op_last_cmd[0] = '\0';
+    app.pending_confirm = CONFIRM_NONE;
     clear_op_lines(&app);
 
     if (layout(&app) < 0) {
@@ -482,6 +529,38 @@ int main(int argc, char** argv) {
         ncinput in = {0};
         uint32_t key = notcurses_get_blocking(nc, &in);
         if (key == (uint32_t)-1) break;
+
+        if (app.pending_confirm != CONFIRM_NONE) {
+            if (key == 'y' || key == 'Y') {
+                confirm_mode mode = app.pending_confirm;
+                clear_pending_confirm(&app);
+                if (mode == CONFIRM_SYNC_LIVE) {
+                    run_op_with_refresh(
+                        &app,
+                        nc,
+                        "running sync-hms",
+                        "timeout 900s pixi run sync-hms 2>&1");
+                } else if (mode == CONFIRM_GENERATE_BG) {
+                    app.op_busy = true;
+                    app.op_failed = false;
+                    snprintf(app.op_status, sizeof(app.op_status), "launching generation");
+                    draw(&app);
+                    notcurses_render(nc);
+                    launch_generation_bg(&app);
+                    refresh_status(&app);
+                    app.op_busy = false;
+                }
+            } else if (key == 'n' || key == 'N' || key == NCKEY_ESC) {
+                cancel_pending_confirm(&app);
+            } else if (key == 'q') {
+                running = false;
+            }
+            if (!running) break;
+            draw(&app);
+            notcurses_render(nc);
+            continue;
+        }
+
         switch (key) {
             case 'q':
                 running = false;
@@ -514,44 +593,30 @@ int main(int argc, char** argv) {
                 refresh_status(&app);
                 break;
             case 'c':
-                app.op_busy = true;
-                app.op_failed = false;
-                snprintf(app.op_status, sizeof(app.op_status), "running warehouse check");
-                draw(&app);
-                notcurses_render(nc);
-                run_shell_capture(&app, "PYTHONPATH=src python -m primeparts.native_iceberg --check-warehouse 2>&1");
-                refresh_status(&app);
-                app.op_busy = false;
+                run_op_with_refresh(
+                    &app,
+                    nc,
+                    "running warehouse check",
+                    "timeout 300s PYTHONPATH=src python -m primeparts.native_iceberg --check-warehouse 2>&1");
                 break;
             case 's':
-                app.op_busy = true;
-                app.op_failed = false;
-                snprintf(app.op_status, sizeof(app.op_status), "running sync-hms dry-run");
-                draw(&app);
-                notcurses_render(nc);
-                run_shell_capture(&app, "pixi run sync-hms --dry-run 2>&1");
-                refresh_status(&app);
-                app.op_busy = false;
+                run_op_with_refresh(
+                    &app,
+                    nc,
+                    "running sync-hms dry-run",
+                    "timeout 600s pixi run sync-hms --dry-run 2>&1");
                 break;
             case 'S':
-                app.op_busy = true;
-                app.op_failed = false;
-                snprintf(app.op_status, sizeof(app.op_status), "running sync-hms");
-                draw(&app);
-                notcurses_render(nc);
-                run_shell_capture(&app, "pixi run sync-hms 2>&1");
-                refresh_status(&app);
-                app.op_busy = false;
+                set_pending_confirm(
+                    &app,
+                    CONFIRM_SYNC_LIVE,
+                    "confirm live HMS sync: press y to run, n to cancel");
                 break;
             case 'g':
-                app.op_busy = true;
-                app.op_failed = false;
-                snprintf(app.op_status, sizeof(app.op_status), "launching generation");
-                draw(&app);
-                notcurses_render(nc);
-                launch_generation_bg(&app);
-                refresh_status(&app);
-                app.op_busy = false;
+                set_pending_confirm(
+                    &app,
+                    CONFIRM_GENERATE_BG,
+                    "confirm generation launch: press y to run, n to cancel");
                 break;
             case NCKEY_RESIZE:
                 layout(&app);
