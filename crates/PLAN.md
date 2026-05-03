@@ -1,5 +1,43 @@
 # Plan: `primeparts-commit` (Rust) — slice B′
 
+## Status as of 2026-05-02
+
+Implemented and committed in `015a497`:
+
+- `primeparts-commit` crate exists with manifest parsing, footer validation,
+  warehouse-standing prompt/settings, SqlCatalog append, snapshot property
+  aggregation, and HMS lazy-sync code.
+- `primeparts-core` exists with shared parquet footer/DataFile helpers.
+- Vendor patch machinery exists and the Rust HMS code is written against
+  `get_table_req`.
+- `pixi run commit-build` / `cargo test -p primeparts-commit` build the crate.
+
+Current production status:
+
+- The Rust commit path is **not** the production commit path yet. The real
+  append path remains `python -m primeparts.native_iceberg`.
+- The Rust `SqlCatalog` path now has an explicit `LocalFsStorageFactory`, but
+  it still does not interoperate with the current PyIceberg-created SQLite
+  catalog schema: it fails with `no such column: iceberg_type` before it can
+  append files or run HMS sync.
+- The Python path remains the source of truth for registering files into
+  `catalog.db`; `scripts/sync_hms.py` remains the sync-only tool for HMS.
+- A one-shot `primeparts-compact` crate was added after this plan and used to
+  rewrite the production warehouse into `p_trunc=10^10` partitions and ~1 GiB
+  ZSTD files. That compact crate is operational but not part of this original
+  slice-B′ plan.
+
+Decision points left open:
+
+- Decide whether to adapt Rust to PyIceberg's existing SQLite schema, migrate
+  the catalog DB to the Rust SQL catalog schema, or keep Rust commit as a
+  future-only path for fresh catalogs.
+- Decide whether Rust needs a sync-only HMS subcommand. The current Rust HMS
+  implementation is only reached after a successful Rust catalog append.
+- Update `warehouse_standing()` for the compacted `p_trunc=...` layout before
+  using production native generation again; the old health check assumes
+  `commit_seq=...` partition directories.
+
 ## Background
 
 **Two-catalog topology.** primeparts maintains two iceberg catalogs in
@@ -253,7 +291,9 @@ read; confirm before committing them to a `.patch` file.
 ## Out of scope for v1
 
 - Tests / golden fixture — deferred to a later session.
-- Compaction binary (`primeparts-compact`) — separate plan, after v1.
+- Compaction binary (`primeparts-compact`) — originally out of scope, but now
+  implemented as an operational one-shot crate after this plan and used for
+  the May 2026 warehouse compaction.
 - Porting `warehouse_standing` to Rust — v2.
 - Removing pyiceberg conda dep — v2 (porting `warehouse_standing` +
   recovery + repair).

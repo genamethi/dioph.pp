@@ -1,0 +1,27 @@
+[package]
+name = "primeparts-compact"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "One-shot warehouse compaction: walks per-commit parquet files in p-order and rewrites them into ~1 GiB files with 256 MiB row groups, partitioned by truncate(p, W)."
+
+[[bin]]
+name = "primeparts-compact"
+path = "src/main.rs"
+
+[dependencies]
+primeparts-core.workspace = true
+
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+parquet.workspace = true
+arrow-schema.workspace = true
+arrow-array.workspace = true
+arrow-select.workspace = true
+walkdir.workspace = true

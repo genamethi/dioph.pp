@@ -1,5 +1,26 @@
 # Remaining consumers to port off `blocks/`
 
+## Status as of 2026-05-02
+
+This document is historical for the current checkout. The modules listed below
+under `src/funbuns/...` are no longer tracked source files in this repository;
+only stale `__pycache__` artifacts remain under `src/primeparts/__pycache__`.
+Do not use this as an active punch list without first re-inventorying the
+current `src/primeparts/` tree.
+
+Current tracked Python source is much smaller and already has Iceberg scan
+helpers:
+
+- `src/primeparts/iceberg_schema.py::scan_primes`
+- `src/primeparts/iceberg_schema.py::scan_decompositions`
+- `src/primeparts/iceberg_query.py`
+
+Decision point:
+
+- If old analysis modules are restored from history, port them directly to the
+  Iceberg helpers above. Otherwise archive this document and replace it with a
+  current analysis/query roadmap.
+
 Context: the iceberg ingest cutover (step 7 of the migration plan, finished
 2026-04-14) wired `core.PPConsumer.save_callback` directly to
 `iceberg_schema.IcebergWriter.flush`. New data lands in the iceberg

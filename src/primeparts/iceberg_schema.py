@@ -7,7 +7,7 @@ Two tables:
     funbuns.primes          — one row per p (including k=0), universe of primes
     funbuns.decompositions  — fact table, one row per (p, m_k, n_k, q_k) with q_k>0
 
-Both are partitioned by identity(commit_seq) and sorted by (p) / (p, m_k).
+Both are partitioned by truncate(p, 10^10) and sorted by (p) / (p, m_k).
 The sort declaration is advisory in PyIceberg 0.11.1 — we enforce it on the
 writer side via pre-sort and validation.
 
@@ -84,7 +84,7 @@ from pyiceberg.partitioning import PartitionField, PartitionSpec
 from pyiceberg.schema import Schema
 from pyiceberg.table import Table
 from pyiceberg.table.sorting import SortDirection, SortField, SortOrder
-from pyiceberg.transforms import IdentityTransform
+from pyiceberg.transforms import IdentityTransform, TruncateTransform
 from pyiceberg.types import IntegerType, LongType, NestedField
 
 from . import __version__ as _PACKAGE_VERSION  # noqa: F401  # re-exported via build_file_kv
@@ -116,10 +116,10 @@ DECOMP_SCHEMA = Schema(
 )
 
 PRIMES_PARTITION_SPEC = PartitionSpec(
-    PartitionField(source_id=3, field_id=1000, transform=IdentityTransform(), name="commit_seq")
+    PartitionField(source_id=1, field_id=1000, transform=TruncateTransform(10**10), name="p_trunc")
 )
 DECOMP_PARTITION_SPEC = PartitionSpec(
-    PartitionField(source_id=5, field_id=1000, transform=IdentityTransform(), name="commit_seq")
+    PartitionField(source_id=1, field_id=1000, transform=TruncateTransform(10**10), name="p_trunc")
 )
 
 PRIMES_SORT_ORDER = SortOrder(

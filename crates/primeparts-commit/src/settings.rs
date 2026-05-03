@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -41,8 +41,8 @@ pub fn load() -> Result<Settings> {
     if !path.exists() {
         return Ok(Settings::default());
     }
-    let s = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let s =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     toml::from_str(&s).with_context(|| format!("parsing {}", path.display()))
 }
 

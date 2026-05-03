@@ -17,7 +17,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::catalog::{append_files, open_sql_catalog};
 use crate::manifest::{group_by_table, parse_jsonl, verify_against_footer};
-use crate::settings::{load as load_settings, resolve_check, WarehouseStandingCheck};
+use crate::settings::{WarehouseStandingCheck, load as load_settings, resolve_check};
 
 #[derive(Parser, Debug)]
 #[command(name = "primeparts-commit")]
@@ -35,7 +35,11 @@ struct Args {
     )]
     sqlite: String,
 
-    #[arg(long, env = "FUNBUNS_HMS_URI", default_value = "thrift://localhost:9083")]
+    #[arg(
+        long,
+        env = "FUNBUNS_HMS_URI",
+        default_value = "thrift://localhost:9083"
+    )]
     hms: String,
 
     #[arg(long)]
@@ -60,7 +64,9 @@ const EXIT_HMS_SYNC_FAIL: u8 = 5;
 #[tokio::main]
 async fn main() -> ExitCode {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .with_writer(std::io::stderr)
         .init();
     match run().await {
@@ -92,7 +98,11 @@ async fn run() -> Result<u8> {
 
     let settings = load_settings().unwrap_or_default();
     let env_var = std::env::var("PRIMEPARTS_WAREHOUSE_STANDING").ok();
-    let mode = resolve_check(&settings, env_var.as_deref(), args.warehouse_standing.as_deref())?;
+    let mode = resolve_check(
+        &settings,
+        env_var.as_deref(),
+        args.warehouse_standing.as_deref(),
+    )?;
     let should_check = match mode {
         WarehouseStandingCheck::AlwaysAsk => prompt::confirm("Run warehouse-standing pre-check?")?,
         WarehouseStandingCheck::AlwaysRun => true,

@@ -100,7 +100,7 @@ conn = hive.Connection(host='localhost', port=31140, username='hive',
 kubectl -n hivemr3 port-forward hivemr3-metastore-0 9850:9850 &
 FUNBUNS_HMS_URI=thrift://localhost:9850 pixi run python ...
 # The `get_table` vs `get_table_req` shim is applied via
-# `funbuns._patches`, which is imported by `funbuns.__init__`.
+# `primeparts._patches`. Import it explicitly in scripts that use HMS directly.
 ```
 
 ### Config changes → pod propagation
@@ -208,7 +208,15 @@ pixi run sync-hms                  # push new metadata_location to HMS
 `scripts/sync_hms.py` reads the current `metadata_location` from sqlite
 and bumps HMS's table property to match via
 `alter_table_with_environment_context`. No parquet is rewritten;
-idempotent (safe to re-run). Override endpoints via env:
+idempotent (safe to re-run).
+
+Status as of 2026-05-02: the script explicitly imports
+`primeparts._patches` so PyIceberg's HMS 4 `get_table` compatibility patch is
+active. If an HMS table is missing entirely, it registers the table from the
+SQLite catalog's current metadata location; after that, later runs only update
+the HMS pointer when SQLite advances.
+
+Override endpoints via env:
 
 - `FUNBUNS_CATALOG_URI` — sqlite URI (default points at extssd)
 - `FUNBUNS_HMS_URI` — thrift URI (default `thrift://localhost:9083`)

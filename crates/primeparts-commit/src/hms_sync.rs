@@ -9,7 +9,7 @@
 
 use std::net::{SocketAddr, ToSocketAddrs};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use hive_metastore::{
     EnvironmentContext, GetTableRequest, ThriftHiveMetastoreClient,
     ThriftHiveMetastoreClientBuilder,

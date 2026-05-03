@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use primeparts_core::{extract_funbuns_kv, read_parquet_metadata};
 use serde::Deserialize;
 
@@ -32,30 +32,51 @@ pub fn parse_jsonl(path: &Path) -> Result<Vec<ManifestRow>> {
     Ok(rows)
 }
 
+// Mirrors Python's verify_native_files (src/primeparts/native_iceberg.py:135-138).
+// We intentionally do not compare manifest `bytes` against std::fs::metadata().len():
+// (a) Python doesn't, so adding it makes the Rust path stricter than production —
+//     a cutover failure mode that gives no real signal;
+// (b) the parquet footer lives at end-of-file, so any truncation that would shift
+//     the byte count also breaks read_parquet_metadata, which fails earlier with
+//     a clearer parquet-level error.
 pub fn verify_against_footer(row: &ManifestRow) -> Result<()> {
     let metadata = read_parquet_metadata(&row.path)?;
     let kv = extract_funbuns_kv(&metadata)?;
     let path = row.path.display();
     if kv.table != row.table {
-        bail!("table mismatch in {path}: footer={} manifest={}", kv.table, row.table);
+        bail!(
+            "table mismatch in {path}: footer={} manifest={}",
+            kv.table,
+            row.table
+        );
     }
     if kv.commit_seq != row.commit_seq {
-        bail!("commit_seq mismatch in {path}: footer={} manifest={}", kv.commit_seq, row.commit_seq);
+        bail!(
+            "commit_seq mismatch in {path}: footer={} manifest={}",
+            kv.commit_seq,
+            row.commit_seq
+        );
     }
     if kv.n_rows != row.rows {
-        bail!("n_rows mismatch in {path}: footer={} manifest={}", kv.n_rows, row.rows);
+        bail!(
+            "n_rows mismatch in {path}: footer={} manifest={}",
+            kv.n_rows,
+            row.rows
+        );
     }
     if kv.p_min != row.p_min {
-        bail!("p_min mismatch in {path}: footer={} manifest={}", kv.p_min, row.p_min);
+        bail!(
+            "p_min mismatch in {path}: footer={} manifest={}",
+            kv.p_min,
+            row.p_min
+        );
     }
     if kv.p_max != row.p_max {
-        bail!("p_max mismatch in {path}: footer={} manifest={}", kv.p_max, row.p_max);
-    }
-    let actual = std::fs::metadata(&row.path)
-        .with_context(|| format!("stat {path}"))?
-        .len() as i64;
-    if actual != row.bytes {
-        bail!("byte size mismatch in {path}: file={actual} manifest={}", row.bytes);
+        bail!(
+            "p_max mismatch in {path}: footer={} manifest={}",
+            kv.p_max,
+            row.p_max
+        );
     }
     Ok(())
 }

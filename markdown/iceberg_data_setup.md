@@ -84,22 +84,23 @@ sorts before the parquet write and validators reject unsorted batches.
 
 ## Partitioning
 
-Both tables use identity partitioning on `commit_seq`:
+Status as of 2026-05-02: the production warehouse has been compacted and now
+uses `truncate[10000000000](p)` partitioning for both tables:
 
 ```
-funbuns/primes/data/commit_seq=N/primes_sNNNNNN_000.parquet
-funbuns/decompositions/data/commit_seq=N/decompositions_sNNNNNN_000.parquet
+funbuns/primes/data/p_trunc=N/primes_compact_000000.parquet
+funbuns/decompositions/data/p_trunc=N/decompositions_compact_000000.parquet
 ```
 
-Note: commit_seqs 0–503 were written by the legacy compactor under the
-old `batch_id=N/` directory name and still live there on disk. The
-iceberg column rename (`batch_id` → `commit_seq`) is a schema-only
-operation and preserves field_ids, so the old directories remain
-readable through the manifest; only newly appended commit_seqs use the
-new path. A batch is the atomic unit of ingest. Post-cutover,
-`core.PPConsumer` flushes one commit_seq per buffer drain (target size
-governed by `buffer_size`), directly from worker result aggregation —
-there is no staging step.
+`commit_seq` remains a table column and resume/snapshot property; it is no
+longer the physical partition transform in the compacted warehouse. Code that
+walks data directories must not infer commit sequence from directory names.
+Use Iceberg metadata/manifests instead.
+
+Historical note: before the May 2026 compaction, the warehouse used
+`commit_seq=N/` directories, with even older seed data under `batch_id=N/`.
+That description is now only relevant to the backup directory
+`/media/extssd/research/dioph.pp/data/iceberg.OLD.20260502_002102`.
 
 ## Filesystem layout
 
@@ -109,16 +110,14 @@ there is no staging step.
 └── warehouse/
     └── funbuns/
         ├── primes/
-        │   ├── data/commit_seq=N/*.parquet   # new appends
-        │   ├── data/batch_id=N/*.parquet     # legacy compactor output (0–503)
+        │   ├── data/p_trunc=N/*.parquet
         │   └── metadata/
         │       ├── NNNNN-<uuid>.metadata.json
         │       ├── <uuid>-m0.avro      # manifests
         │       ├── snap-<snap-id>-*.avro
         │       └── current.metadata.json.txt
         └── decompositions/
-            ├── data/commit_seq=N/*.parquet
-            ├── data/batch_id=N/*.parquet
+            ├── data/p_trunc=N/*.parquet
             └── metadata/
                 └── ... (same shape)
 ```
@@ -177,7 +176,7 @@ built by `build_file_kv()` and preserved through the `add_files` path:
 | `funbuns.algorithm_version`  | funbuns package version at write time          |
 | `funbuns.algorithm_git_sha`  | short git SHA of the writer                     |
 | `funbuns.table`              | `primes` or `decompositions`                    |
-| `funbuns.commit_seq`         | matches the partition directory                 |
+| `funbuns.commit_seq`         | source/generation sequence; no longer the partition directory in compacted production data |
 | `funbuns.p_min`, `funbuns.p_max` | p range in this file                        |
 | `funbuns.n_rows`             | row count                                       |
 | `funbuns.n_primes`           | distinct primes (== n_rows for `primes`)        |

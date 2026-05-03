@@ -1,7 +1,7 @@
 use std::io::{self, BufRead, Write};
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 pub fn confirm(message: &str) -> Result<bool> {
     let stderr = io::stderr();

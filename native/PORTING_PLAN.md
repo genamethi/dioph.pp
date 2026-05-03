@@ -1,5 +1,37 @@
 # Native Port Plan
 
+## Status as of 2026-05-02
+
+The native generation path remains C/C++ for data production plus Python for
+catalog commit. `primeparts-commit` exists as a Rust experiment/porting slice,
+but it is not the production commit path because its SqlCatalog layer does not
+yet interoperate with the current PyIceberg-created SQLite catalog schema.
+
+The production warehouse has been compacted in place:
+
+- Current canonical warehouse:
+  `/media/extssd/research/dioph.pp/data/iceberg`
+- Old backup:
+  `/media/extssd/research/dioph.pp/data/iceberg.OLD.20260502_002102`
+- Partitioning is now `truncate[10000000000](p)` with partition directory
+  names `p_trunc=...`, not `commit_seq=...`.
+- The compacted tables are registered in SQLite and HMS is synced.
+
+Immediate blocker before the next production native append:
+
+- `warehouse_standing()` still assumes the old `commit_seq=...` directory
+  layout and reports false errors on the compacted `p_trunc=...` layout.
+  Fix that checker before relying on `primeparts -n ...` against production,
+  because the native coordinator calls it before committing.
+
+Practical deferrals:
+
+- Keep `sync_hms.py` as the HMS sync tool until Rust catalog compatibility is
+  resolved.
+- Keep Python/PyIceberg as the commit bridge for production appends.
+- Treat the Rust commit binary as a partial port and test target, not as a
+  replacement, until it can append against the live SQLite catalog.
+
 ## Current Slice
 
 Implemented:

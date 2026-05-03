@@ -3,7 +3,7 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use parquet::file::metadata::{ParquetMetaData, ParquetMetaDataReader};
 
 #[derive(Debug, Clone)]
@@ -18,8 +18,7 @@ pub struct FooterKv {
 }
 
 pub fn read_parquet_metadata(path: &Path) -> Result<Arc<ParquetMetaData>> {
-    let file = File::open(path)
-        .with_context(|| format!("opening parquet {}", path.display()))?;
+    let file = File::open(path).with_context(|| format!("opening parquet {}", path.display()))?;
     let metadata = ParquetMetaDataReader::new()
         .parse_and_finish(&file)
         .with_context(|| format!("reading parquet metadata from {}", path.display()))?;

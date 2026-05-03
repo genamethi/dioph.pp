@@ -57,10 +57,14 @@ multiprocessing path.
 ```text
 primeparts -n N
     └── primeparts-generate         # C core + iceberg-cpp Parquet
-        └── data/.../funbuns/{primes,decompositions}/data/commit_seq=N/*.parquet
+        └── data/.../funbuns/{primes,decompositions}/data/<partition>/*.parquet
         └── native_files.jsonl
     └── commit_native_manifest      # PyIceberg add_files
 ```
+
+As of the May 2026 compaction, production table partition directories are
+`p_trunc=...`. Older examples and the native generator's pre-compaction append
+layout used `commit_seq=...`; do not infer resume state from directory names.
 
 Production native runs are checkpointed by the Python coordinator. Each
 checkpoint starts a fresh `primeparts-generate` process, writes a bounded

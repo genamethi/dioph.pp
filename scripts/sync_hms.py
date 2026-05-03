@@ -24,10 +24,11 @@ import argparse
 import os
 import sys
 
-import primeparts # applies pyiceberg + HMS Thrift patches  # noqa: F401
+import primeparts._patches  # applies pyiceberg + HMS Thrift patches  # noqa: F401
 
 from pyiceberg.catalog.hive import HiveCatalog
 from pyiceberg.catalog.sql import SqlCatalog
+from hive_metastore.ttypes import NoSuchObjectException
 
 
 SQLITE_URI = os.environ.get(
@@ -94,7 +95,16 @@ def main() -> int:
     for db, tbl in TABLES:
         t = sql_cat.load_table((db, tbl))
         want = _strip_scheme(t.metadata_location)
-        htbl = _hms_get_table(hive_cat, db, tbl)
+        try:
+            htbl = _hms_get_table(hive_cat, db, tbl)
+        except NoSuchObjectException:
+            print(f"{db}.{tbl}: missing in HMS -> register {_short(want)}")
+            if args.dry_run:
+                continue
+            hive_cat.create_namespace_if_not_exists(db)
+            hive_cat.register_table((db, tbl), t.metadata_location)
+            print("  registered")
+            continue
         have = _strip_scheme(htbl.parameters.get("metadata_location", ""))
 
         if have == want:
