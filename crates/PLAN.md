@@ -34,9 +34,9 @@ Decision points left open:
   future-only path for fresh catalogs.
 - Decide whether Rust needs a sync-only HMS subcommand. The current Rust HMS
   implementation is only reached after a successful Rust catalog append.
-- Update `warehouse_standing()` for the compacted `p_trunc=...` layout before
-  using production native generation again; the old health check assumes
-  `commit_seq=...` partition directories.
+- `warehouse_standing()` has been updated for the compacted `p_trunc=...`
+  layout, so the Python/native production preflight is no longer blocked on
+  the old `commit_seq=...` directory assumption.
 
 ## Background
 

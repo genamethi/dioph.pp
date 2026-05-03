@@ -17,22 +17,23 @@ The production warehouse has been compacted in place:
   names `p_trunc=...`, not `commit_seq=...`.
 - The compacted tables are registered in SQLite and HMS is synced.
 
-Immediate blocker before the next production native append:
+Recent unblockers:
 
-- `warehouse_standing()` still assumes the old `commit_seq=...` directory
-  layout and reports false errors on the compacted `p_trunc=...` layout.
-  Fix that checker before relying on `primeparts -n ...` against production,
-  because the native coordinator calls it before committing.
+- `warehouse_standing()` is now layout-aware. It accepts the compacted
+  `p_trunc=...` warehouse, still flags legacy `commit_seq=...` collisions,
+  and allows `commit_seq` to remain snapshot-summary-only when compacted files
+  omit manifest bounds for that column.
+- The native `ui_iceberg` C ABI no longer depends on iceberg-cpp parsing the
+  `truncate[10000000000](p)` partition spec. It reads metadata JSON directly
+  for snapshot/status fields and still uses iceberg-cpp for manifest-list
+  Avro reads.
 
-Immediate blocker for native TUI/status reads:
+Remaining operational blockers:
 
-- The current production partition spec is `truncate[10000000000](p)`.
-  iceberg-cpp models truncate width as `int32_t`, so
-  `TableMetadataUtil::Read(...)` fails parsing the table metadata with
-  `Failed to parse i from string '10000000000': value out of range`.
-  This breaks the native `ui_iceberg` C ABI until iceberg-cpp is patched,
-  upgraded, bypassed for metadata-only reads, or the partition width is
-  revisited.
+- The Rust commit path still does not interoperate with the current
+  PyIceberg-created SQLite catalog schema.
+- No interactive TUI frontend exists yet; only the low-level read/status ABI
+  and smoke harness are in place.
 
 Practical deferrals:
 
@@ -65,8 +66,9 @@ Implemented:
 - `primeparts-bench-core` for materialization-free hot-loop throughput testing.
 - `primeparts-generate` for temp warehouse data-file writes:
   C core materialization, threaded in-process file groups, C++ Arrow wrapping,
-  and iceberg-cpp Parquet output in the existing
-  `funbuns/{primes,decompositions}/data/commit_seq=...` layout.
+  and iceberg-cpp Parquet output. Physical file paths may still use
+  `commit_seq=...` for newly written local files even though the production
+  Iceberg partition spec is now `truncate(p, 10^10)`.
 - `python -m primeparts.native_iceberg` / `primeparts-commit` bridge
   that validates `native_files.jsonl` and registers the native Parquet files
   through PyIceberg.
@@ -74,6 +76,8 @@ Implemented:
 Verified:
 
 - `pixi run native-test`
+- `warehouse_standing()` returns OK against the compacted production
+  warehouse at `/media/extssd/research/dioph.pp/data/iceberg`.
 - Native C output matches Sage for the first 100 prime ranks.
 - Core-only throughput on this machine:
   `native/build/primeparts-bench-core --start-idx 1 --count 100000000 --threads 24`

@@ -277,7 +277,12 @@ def scan_decompositions(cat: Catalog | None = None) -> pl.LazyFrame:
 
 
 def table_manifest_bounds(tbl: Table) -> tuple[int | None, int | None]:
-    """Return ``(max_commit_seq, max_p)`` from Iceberg manifest metrics."""
+    """Return ``(max_commit_seq, max_p)`` from Iceberg manifest metrics.
+
+    Compacted `p_trunc=...` files can leave ``commit_seq`` bounds null while
+    still preserving `p` bounds, so the first element may be ``None`` even for
+    a healthy table.
+    """
     files = pl.from_arrow(tbl.inspect.files().select(["readable_metrics"]))
     if files.height == 0:
         return None, None
@@ -360,16 +365,27 @@ def _referenced_file_frame(tbl: Table) -> pl.DataFrame:
     files = pl.from_arrow(tbl.inspect.files().select(["file_path", "readable_metrics"]))
     if files.height == 0:
         return pl.DataFrame(
-            {"file_path": [], "commit_seq": [], "p_min": [], "p_max": [], "partition_dir": []},
+            {
+                "file_path": [],
+                "commit_seq": [],
+                "p_min": [],
+                "p_max": [],
+                "partition_dir": [],
+                "partition_name": [],
+                "partition_layout": [],
+            },
             schema={
                 "file_path": pl.Utf8,
                 "commit_seq": pl.Int64,
                 "p_min": pl.Int64,
                 "p_max": pl.Int64,
                 "partition_dir": pl.Utf8,
+                "partition_name": pl.Utf8,
+                "partition_layout": pl.Utf8,
             },
         )
-    return files.select(
+    return (
+        files.select(
         pl.col("file_path").cast(pl.Utf8),
         pl.col("readable_metrics")
         .struct.field("commit_seq")
@@ -391,6 +407,18 @@ def _referenced_file_frame(tbl: Table) -> pl.DataFrame:
         .str.replace(r"^file://", "")
         .str.replace(r"/[^/]+$", "")
         .alias("partition_dir")
+        )
+        .with_columns(
+            pl.col("partition_dir").str.extract(r"([^/]+)$", 1).alias("partition_name")
+        )
+        .with_columns(
+            pl.when(pl.col("partition_name").str.starts_with("commit_seq="))
+            .then(pl.lit("commit_seq"))
+            .when(pl.col("partition_name").str.starts_with("p_trunc="))
+            .then(pl.lit("p_trunc"))
+            .otherwise(pl.lit("other"))
+            .alias("partition_layout")
+        )
     )
 
 
@@ -455,7 +483,11 @@ def warehouse_standing(
         reused_commit_seqs = []
         if referenced_frame.height:
             reused_commit_seqs = (
-                referenced_frame.group_by("commit_seq")
+                referenced_frame.filter(
+                    pl.col("partition_layout") == "commit_seq",
+                    pl.col("commit_seq").is_not_null(),
+                )
+                .group_by("commit_seq")
                 .agg(
                     pl.len().alias("files"),
                     pl.col("partition_dir").n_unique().alias("partition_dirs"),
@@ -466,6 +498,17 @@ def warehouse_standing(
                 .sort("commit_seq")
                 .to_dicts()
             )
+        layout_counts: dict[str, int] = {}
+        if referenced_frame.height:
+            layout_counts = {
+                str(row["partition_layout"]): int(row["files"])
+                for row in referenced_frame.group_by("partition_layout")
+                .agg(pl.len().alias("files"))
+                .to_dicts()
+            }
+        has_manifest_commit_seq_metrics = bool(
+            referenced_frame.height and referenced_frame["commit_seq"].is_not_null().any()
+        )
 
         tables[table_name] = {
             "exists": True,
@@ -477,6 +520,8 @@ def warehouse_standing(
             "local_data_files": len(local),
             "orphan_files": len(orphan_files),
             "orphan_examples": [str(p) for p in orphan_files[:5]],
+            "partition_layout_counts": layout_counts,
+            "has_manifest_commit_seq_metrics": has_manifest_commit_seq_metrics,
             "reused_commit_seqs": reused_commit_seqs[:10],
         }
 
@@ -492,10 +537,17 @@ def warehouse_standing(
                 f"({len(reused_commit_seqs)} value(s); examples: {examples})"
             )
 
+        if manifest_cs is None and has_manifest_commit_seq_metrics:
+            errors.append(f"{ident} has commit_seq metrics in manifests but no max commit_seq")
+
         if manifest_cs is None:
             if summary_cs is not None:
-                errors.append(f"{ident} has snapshot summary commit_seq but no manifest files")
-            continue
+                if has_manifest_commit_seq_metrics:
+                    errors.append(
+                        f"{ident} has snapshot summary commit_seq but no manifest max_commit_seq"
+                    )
+            if manifest_p is None:
+                continue
 
         if summary_cs is None or summary_p is None:
             errors.append(f"{ident} is missing funbuns resume snapshot properties")
@@ -503,17 +555,17 @@ def warehouse_standing(
 
         if not allow_stale_summary:
             if table_name == "primes":
-                if summary_cs != manifest_cs:
+                if manifest_cs is not None and summary_cs != manifest_cs:
                     errors.append(
                         f"{ident} summary max_commit_seq={summary_cs} but "
                         f"manifest max_commit_seq={manifest_cs}"
                     )
-                if summary_p != manifest_p:
+                if manifest_p is not None and summary_p != manifest_p:
                     errors.append(
                         f"{ident} summary max_p={summary_p} but manifest max_p={manifest_p}"
                     )
             else:
-                if summary_cs < manifest_cs:
+                if manifest_cs is not None and summary_cs < manifest_cs:
                     errors.append(
                         f"{ident} summary max_commit_seq={summary_cs} is below "
                         f"manifest max_commit_seq={manifest_cs}"

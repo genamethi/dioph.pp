@@ -40,8 +40,9 @@ void pp_uic_free_string(char* s);
 
 /* `table` must be "primes" or "decompositions". */
 
-/* Maximum value of column `p` in the current snapshot. Computed from
- * manifest upper_bounds (no data scan). Returns -1 on error or empty. */
+/* Maximum value of column `p` in the current snapshot. Reads the required
+ * `funbuns.max_p` snapshot summary, with a manifest upper_bounds fallback
+ * for older metadata. Returns -1 on error or empty. */
 int64_t pp_uic_max_p(pp_uic_handle* h, const char* table);
 
 /* Total record count in the current snapshot, summed from manifest list
