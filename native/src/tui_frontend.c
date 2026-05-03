@@ -54,10 +54,13 @@ typedef struct {
     bool op_busy;
     bool op_failed;
     char op_status[160];
-    char op_last_cmd[192];
+    char op_last_cmd[384];
     char op_lines[6][160];
     int op_line_count;
     confirm_mode pending_confirm;
+    int64_t gen_num_primes;
+    int64_t gen_batch_size;
+    int gen_threads;
 } app_state;
 
 static void draw(app_state* app);
@@ -111,12 +114,28 @@ static int run_shell_capture(app_state* app, const char* cmd) {
 }
 
 static int launch_generation_bg(app_state* app) {
-    const char* cmd = "sh -lc 'mkdir -p logs && nohup primeparts -n 1000000 > logs/tui_generate.log 2>&1 &'";
+    char cmd[320];
+    snprintf(
+        cmd,
+        sizeof(cmd),
+        "sh -lc 'mkdir -p logs && nohup primeparts -n %" PRId64 " -b %" PRId64 " --threads %d > logs/tui_generate.log 2>&1 &'",
+        app->gen_num_primes,
+        app->gen_batch_size,
+        app->gen_threads);
     snprintf(app->op_last_cmd, sizeof(app->op_last_cmd), "%s", cmd);
     clear_op_lines(app);
     push_op_line(app, "generation launched in background");
+    char cfg[160];
+    snprintf(
+        cfg,
+        sizeof(cfg),
+        "config: -n %" PRId64 " -b %" PRId64 " --threads %d",
+        app->gen_num_primes,
+        app->gen_batch_size,
+        app->gen_threads);
+    push_op_line(app, cfg);
     push_op_line(app, "log: logs/tui_generate.log");
-    int rc = system(cmd);
+    int rc = system(app->op_last_cmd);
     app->op_failed = (rc != 0);
     snprintf(
         app->op_status,
@@ -381,15 +400,24 @@ static void draw_ops_view(app_state* app, table_status* st) {
     }
 
     ncplane_putstr_yx(app->detail, 7, 0, "Actions");
-    ncplane_putstr_yx(app->detail, 8, 0, "g launch generation (-n 1,000,000, background)");
+    ncplane_putstr_yx(app->detail, 8, 0, "g launch generation (background; uses settings below)");
     ncplane_putstr_yx(app->detail, 9, 0, "c check warehouse");
     ncplane_putstr_yx(app->detail, 10, 0, "s sync-hms --dry-run");
     ncplane_putstr_yx(app->detail, 11, 0, "S sync-hms");
     ncplane_putstr_yx(app->detail, 12, 0, "confirm prompt: y run | n/Esc cancel");
-    ncplane_printf_yx(app->detail, 13, 0, "last command: %s", app->op_last_cmd[0] ? app->op_last_cmd : "(none)");
-    ncplane_printf_yx(app->detail, 14, 0, "last status: %s", app->op_status[0] ? app->op_status : "(none)");
+    ncplane_printf_yx(
+        app->detail,
+        13,
+        0,
+        "settings: -n=%" PRId64 "  -b=%" PRId64 "  --threads=%d",
+        app->gen_num_primes,
+        app->gen_batch_size,
+        app->gen_threads);
+    ncplane_putstr_yx(app->detail, 14, 0, "adjust: +/- primes(1M), {/} batch(250k), </> threads(1)");
+    ncplane_printf_yx(app->detail, 15, 0, "last command: %s", app->op_last_cmd[0] ? app->op_last_cmd : "(none)");
+    ncplane_printf_yx(app->detail, 16, 0, "last status: %s", app->op_status[0] ? app->op_status : "(none)");
     for (int i = 0; i < app->op_line_count; ++i) {
-        ncplane_printf_yx(app->detail, 16 + i, 0, "> %s", app->op_lines[i]);
+        ncplane_printf_yx(app->detail, 18 + i, 0, "> %s", app->op_lines[i]);
     }
 }
 
@@ -509,6 +537,9 @@ int main(int argc, char** argv) {
     app.op_status[0] = '\0';
     app.op_last_cmd[0] = '\0';
     app.pending_confirm = CONFIRM_NONE;
+    app.gen_num_primes = 1000000;
+    app.gen_batch_size = 500000;
+    app.gen_threads = 24;
     clear_op_lines(&app);
 
     if (layout(&app) < 0) {
@@ -617,6 +648,49 @@ int main(int argc, char** argv) {
                     &app,
                     CONFIRM_GENERATE_BG,
                     "confirm generation launch: press y to run, n to cancel");
+                break;
+            case '+':
+                if (app.gen_num_primes <= INT64_MAX - 1000000) {
+                    app.gen_num_primes += 1000000;
+                }
+                snprintf(app.op_status, sizeof(app.op_status), "updated -n to %" PRId64, app.gen_num_primes);
+                app.op_failed = false;
+                break;
+            case '-':
+                if (app.gen_num_primes > 1000000) {
+                    app.gen_num_primes -= 1000000;
+                }
+                if (app.gen_num_primes < app.gen_batch_size) {
+                    app.gen_batch_size = app.gen_num_primes;
+                }
+                snprintf(app.op_status, sizeof(app.op_status), "updated -n to %" PRId64, app.gen_num_primes);
+                app.op_failed = false;
+                break;
+            case '}':
+                if (app.gen_batch_size <= app.gen_num_primes - 250000) {
+                    app.gen_batch_size += 250000;
+                }
+                if (app.gen_batch_size < 250000) app.gen_batch_size = 250000;
+                snprintf(app.op_status, sizeof(app.op_status), "updated -b to %" PRId64, app.gen_batch_size);
+                app.op_failed = false;
+                break;
+            case '{':
+                if (app.gen_batch_size > 250000) {
+                    app.gen_batch_size -= 250000;
+                }
+                if (app.gen_batch_size < 250000) app.gen_batch_size = 250000;
+                snprintf(app.op_status, sizeof(app.op_status), "updated -b to %" PRId64, app.gen_batch_size);
+                app.op_failed = false;
+                break;
+            case '>':
+                if (app.gen_threads < 1024) app.gen_threads += 1;
+                snprintf(app.op_status, sizeof(app.op_status), "updated --threads to %d", app.gen_threads);
+                app.op_failed = false;
+                break;
+            case '<':
+                if (app.gen_threads > 1) app.gen_threads -= 1;
+                snprintf(app.op_status, sizeof(app.op_status), "updated --threads to %d", app.gen_threads);
+                app.op_failed = false;
                 break;
             case NCKEY_RESIZE:
                 layout(&app);

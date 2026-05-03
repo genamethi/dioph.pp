@@ -276,8 +276,13 @@ Status as of 2026-05-03:
       (timeout 300s)
     - `s`: `pixi run sync-hms --dry-run` (timeout 600s)
     - `S`: `pixi run sync-hms` (timeout 900s, `y` confirmation required)
-    - `g`: background launch `primeparts -n 1000000` (writes
-      `logs/tui_generate.log`, `y` confirmation required)
+    - `g`: background launch `primeparts -n ... -b ... --threads ...` with
+      values from in-TUI settings (writes `logs/tui_generate.log`, `y`
+      confirmation required)
+    - ops-view settings keys:
+      - `+` / `-` adjust `-n` by 1,000,000
+      - `}` / `{` adjust `-b` by 250,000
+      - `>` / `<` adjust `--threads` by 1
   Key model: arrows / `h/j/k/l` switch table, `r` or `Enter` refresh, `q`
   quit, with a reserved status row. While a confirmation is pending, only
   `y`, `n`/Esc, and `q` are accepted.
