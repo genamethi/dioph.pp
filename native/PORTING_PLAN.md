@@ -276,16 +276,14 @@ Status as of 2026-05-03:
       (timeout 300s)
     - `s`: `pixi run sync-hms --dry-run` (timeout 600s)
     - `S`: `pixi run sync-hms` (timeout 900s, `y` confirmation required)
-    - `g`: background launch `primeparts -n ... -b ... --threads ...` with
-      values from in-TUI settings (writes `logs/tui_generate.log`, `y`
-      confirmation required)
-    - ops-view settings keys:
-      - `+` / `-` adjust `-n` by 1,000,000
-      - `}` / `{` adjust `-b` by 250,000
-      - `>` / `<` adjust `--threads` by 1
+    - `g`: opens a generation settings modal for `-n`, `-b`, and
+      `--threads`; `Enter` launches, `Esc` cancels, and the launched job
+      writes `logs/tui_generate.log`
   Key model: arrows / `h/j/k/l` switch table, `r` or `Enter` refresh, `q`
-  quit, with a reserved status row. While a confirmation is pending, only
-  `y`, `n`/Esc, and `q` are accepted.
+  quit, with a reserved status row. While the live sync confirmation is
+  pending, only `y`, `n`/Esc, and `q` are accepted. While the generation
+  modal is open, `Tab` / `j` / arrows move fields, digits append, `Backspace`
+  deletes, `Enter` launches, and `Esc` cancels.
 - In this environment, native notcurses linkage is ABI-compatible with system
   compilers; use `CC=cc CXX=c++` (now baked into pixi `native-build` and
   `native-test` tasks).
@@ -328,9 +326,10 @@ Architecture:
 - All destructive or warehouse-mutating operations should present the same
   invariant checks as the CLI: refuse writes unless the warehouse is in good
   standing or a specific recovery path has validated the pending files.
-- Current safeguard baseline is explicit confirmation for live `sync-hms` and
-  generation launch plus timeout-bounded blocking ops; expand this into
-  preflight checks and two-step confirmation for high-impact operations.
+- Current safeguard baseline is explicit confirmation for live `sync-hms`,
+  a generation settings modal for `g`, and timeout-bounded blocking ops;
+  expand this into preflight checks and two-step confirmation for high-impact
+  operations.
 - Long-running generation should stay in subprocesses so the UI can survive a
   worker crash and offer recovery.
 

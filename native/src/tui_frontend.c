@@ -45,6 +45,7 @@ typedef struct {
     struct ncplane* master;
     struct ncplane* detail;
     struct ncplane* status;
+    struct ncplane* modal;
     pp_uic_handle* handle;
     const char* warehouse_root;
     int selected;
@@ -61,10 +62,113 @@ typedef struct {
     int64_t gen_num_primes;
     int64_t gen_batch_size;
     int gen_threads;
+    bool gen_modal_active;
+    int gen_modal_field;
+    unsigned modal_rows;
+    unsigned modal_cols;
+    char gen_modal_num[32];
+    char gen_modal_batch[32];
+    char gen_modal_threads[16];
+    char gen_modal_msg[160];
 } app_state;
 
 static void draw(app_state* app);
 static void refresh_status(app_state* app);
+
+static void set_modal_message(app_state* app, const char* msg) {
+    snprintf(app->gen_modal_msg, sizeof(app->gen_modal_msg), "%s", msg ? msg : "");
+}
+
+static void sync_generation_buffers(app_state* app) {
+    snprintf(app->gen_modal_num, sizeof(app->gen_modal_num), "%" PRId64, app->gen_num_primes);
+    snprintf(app->gen_modal_batch, sizeof(app->gen_modal_batch), "%" PRId64, app->gen_batch_size);
+    snprintf(app->gen_modal_threads, sizeof(app->gen_modal_threads), "%d", app->gen_threads);
+}
+
+static bool parse_generation_buffers(app_state* app) {
+    char* end = NULL;
+    long long num = strtoll(app->gen_modal_num, &end, 10);
+    if (end == app->gen_modal_num || *end != '\0' || num <= 0) {
+        set_modal_message(app, "num primes must be a positive integer");
+        return false;
+    }
+    long long batch = strtoll(app->gen_modal_batch, &end, 10);
+    if (end == app->gen_modal_batch || *end != '\0' || batch <= 0) {
+        set_modal_message(app, "batch size must be a positive integer");
+        return false;
+    }
+    long long threads = strtoll(app->gen_modal_threads, &end, 10);
+    if (end == app->gen_modal_threads || *end != '\0' || threads <= 0) {
+        set_modal_message(app, "threads must be a positive integer");
+        return false;
+    }
+    if (batch > num) {
+        batch = num;
+    }
+    app->gen_num_primes = (int64_t)num;
+    app->gen_batch_size = (int64_t)batch;
+    app->gen_threads = (int)threads;
+    return true;
+}
+
+static void open_generation_modal(app_state* app) {
+    app->gen_modal_active = true;
+    app->gen_modal_field = 0;
+    sync_generation_buffers(app);
+    set_modal_message(app, "Tab to move fields | Enter to launch | Esc cancels");
+    snprintf(app->op_status, sizeof(app->op_status), "editing generation settings");
+}
+
+static void close_generation_modal(app_state* app) {
+    app->gen_modal_active = false;
+    app->gen_modal_field = 0;
+    app->gen_modal_msg[0] = '\0';
+}
+
+static char* active_generation_field(app_state* app) {
+    switch (app->gen_modal_field) {
+        case 0: return app->gen_modal_num;
+        case 1: return app->gen_modal_batch;
+        default: return app->gen_modal_threads;
+    }
+}
+
+static size_t active_generation_field_cap(app_state* app) {
+    switch (app->gen_modal_field) {
+        case 0: return sizeof(app->gen_modal_num);
+        case 1: return sizeof(app->gen_modal_batch);
+        default: return sizeof(app->gen_modal_threads);
+    }
+}
+
+static void append_generation_digit(app_state* app, char digit) {
+    char* field = active_generation_field(app);
+    size_t cap = active_generation_field_cap(app);
+    size_t len = strlen(field);
+    if (len + 1 >= cap) return;
+    if (len == 1 && field[0] == '0') {
+        field[0] = digit;
+        field[1] = '\0';
+        return;
+    }
+    field[len] = digit;
+    field[len + 1] = '\0';
+}
+
+static void backspace_generation_field(app_state* app) {
+    char* field = active_generation_field(app);
+    size_t len = strlen(field);
+    if (len == 0) return;
+    field[len - 1] = '\0';
+}
+
+static void advance_generation_field(app_state* app) {
+    app->gen_modal_field = (app->gen_modal_field + 1) % 3;
+}
+
+static void retreat_generation_field(app_state* app) {
+    app->gen_modal_field = (app->gen_modal_field + 2) % 3;
+}
 
 static void clear_op_lines(app_state* app) {
     app->op_line_count = 0;
@@ -305,7 +409,94 @@ static int layout(app_state* app) {
     ncplane_move_yx(app->detail, 0, split);
     ncplane_resize_simple(app->status, 1, cols);
     ncplane_move_yx(app->status, rows - 1, 0);
+    if (app->modal) {
+        if (rows < 11 || cols < 48) {
+            app->modal_rows = 0;
+            app->modal_cols = 0;
+            return 0;
+        }
+        app->modal_cols = cols > 2 ? cols - 2 : cols;
+        if (app->modal_cols > 72) app->modal_cols = 72;
+        if (app->modal_cols < 48) app->modal_cols = 48;
+        app->modal_rows = rows > 2 ? rows - 2 : rows;
+        if (app->modal_rows > 15) app->modal_rows = 15;
+        if (app->modal_rows < 11) app->modal_rows = 11;
+        unsigned modal_y = (rows > app->modal_rows) ? (rows - app->modal_rows) / 2 : 0;
+        unsigned modal_x = (cols > app->modal_cols) ? (cols - app->modal_cols) / 2 : 0;
+        ncplane_resize_simple(app->modal, app->modal_rows, app->modal_cols);
+        ncplane_move_yx(app->modal, modal_y, modal_x);
+    }
     return 0;
+}
+
+static void draw_generation_modal(app_state* app) {
+    if (!app->modal) return;
+    if (!app->gen_modal_active) {
+        ncplane_erase(app->modal);
+        return;
+    }
+    ncplane_erase(app->modal);
+    ncplane_set_fg_rgb8(app->modal, 240, 240, 240);
+    ncplane_set_bg_rgb8(app->modal, 18, 18, 20);
+    ncplane_set_styles(app->modal, NCSTYLE_BOLD);
+
+    unsigned rows = app->modal_rows;
+    unsigned cols = app->modal_cols;
+    if (rows < 11 || cols < 48) return;
+
+    char border[128];
+    char middle[128];
+    size_t i = 0;
+    border[i++] = '+';
+    for (; i + 1 < cols && i < sizeof(border) - 1; ++i) border[i] = '-';
+    border[i++] = '+';
+    border[i] = '\0';
+
+    middle[0] = '|';
+    for (unsigned j = 1; j + 1 < cols && j < sizeof(middle) - 1; ++j) middle[j] = ' ';
+    middle[(cols > 1 ? cols - 1 : 0)] = '|';
+    middle[(cols > 1 ? cols : 1)] = '\0';
+
+    ncplane_putstr_yx(app->modal, 0, 0, border);
+    for (unsigned y = 1; y + 1 < rows; ++y) {
+        ncplane_putstr_yx(app->modal, y, 0, middle);
+    }
+    ncplane_putstr_yx(app->modal, rows - 1, 0, border);
+
+    ncplane_putstr_yx(app->modal, 1, 2, "Generation Settings");
+    ncplane_putstr_yx(app->modal, 2, 2, "Enter values directly, then press Enter to launch.");
+
+    const bool active0 = app->gen_modal_field == 0;
+    const bool active1 = app->gen_modal_field == 1;
+    const bool active2 = app->gen_modal_field == 2;
+
+    if (active0) {
+        ncplane_set_bg_rgb8(app->modal, 80, 80, 110);
+    } else {
+        ncplane_set_bg_rgb8(app->modal, 40, 40, 48);
+    }
+    ncplane_putstr_yx(app->modal, 4, 2, "num primes: ");
+    ncplane_putstr_yx(app->modal, 4, 14, app->gen_modal_num);
+
+    if (active1) {
+        ncplane_set_bg_rgb8(app->modal, 80, 80, 110);
+    } else {
+        ncplane_set_bg_rgb8(app->modal, 40, 40, 48);
+    }
+    ncplane_putstr_yx(app->modal, 6, 2, "batch size: ");
+    ncplane_putstr_yx(app->modal, 6, 14, app->gen_modal_batch);
+
+    if (active2) {
+        ncplane_set_bg_rgb8(app->modal, 80, 80, 110);
+    } else {
+        ncplane_set_bg_rgb8(app->modal, 40, 40, 48);
+    }
+    ncplane_putstr_yx(app->modal, 8, 2, "threads:    ");
+    ncplane_putstr_yx(app->modal, 8, 14, app->gen_modal_threads);
+
+    ncplane_set_bg_rgb8(app->modal, 18, 18, 20);
+    ncplane_putstr_yx(app->modal, rows - 4, 2, app->gen_modal_msg[0] ? app->gen_modal_msg : "");
+    ncplane_putstr_yx(app->modal, rows - 3, 2, "Tab/j/k: move  Backspace: delete  Enter: launch  Esc: cancel");
 }
 
 static void draw_master(app_state* app) {
@@ -400,11 +591,11 @@ static void draw_ops_view(app_state* app, table_status* st) {
     }
 
     ncplane_putstr_yx(app->detail, 7, 0, "Actions");
-    ncplane_putstr_yx(app->detail, 8, 0, "g launch generation (background; uses settings below)");
+    ncplane_putstr_yx(app->detail, 8, 0, "g open generation settings modal");
     ncplane_putstr_yx(app->detail, 9, 0, "c check warehouse");
     ncplane_putstr_yx(app->detail, 10, 0, "s sync-hms --dry-run");
     ncplane_putstr_yx(app->detail, 11, 0, "S sync-hms");
-    ncplane_putstr_yx(app->detail, 12, 0, "confirm prompt: y run | n/Esc cancel");
+    ncplane_putstr_yx(app->detail, 12, 0, "modal: Tab field | digits edit | Enter launch | Esc cancel");
     ncplane_printf_yx(
         app->detail,
         13,
@@ -413,7 +604,6 @@ static void draw_ops_view(app_state* app, table_status* st) {
         app->gen_num_primes,
         app->gen_batch_size,
         app->gen_threads);
-    ncplane_putstr_yx(app->detail, 14, 0, "adjust: +/- primes(1M), {/} batch(250k), </> threads(1)");
     ncplane_printf_yx(app->detail, 15, 0, "last command: %s", app->op_last_cmd[0] ? app->op_last_cmd : "(none)");
     ncplane_printf_yx(app->detail, 16, 0, "last status: %s", app->op_status[0] ? app->op_status : "(none)");
     for (int i = 0; i < app->op_line_count; ++i) {
@@ -448,7 +638,13 @@ static void draw_status(app_state* app) {
     ncplane_set_fg_rgb8(app->status, 0, 0, 0);
     ncplane_set_bg_rgb8(app->status, 200, 200, 200);
     ncplane_set_styles(app->status, NCSTYLE_BOLD);
-    if (app->pending_confirm != CONFIRM_NONE) {
+    if (app->gen_modal_active) {
+        ncplane_putstr_yx(
+            app->status,
+            0,
+            0,
+            "[?] generation modal open | Enter launch | Esc cancel | Tab field | q quit");
+    } else if (app->pending_confirm != CONFIRM_NONE) {
         ncplane_putstr_yx(
             app->status,
             0,
@@ -479,6 +675,7 @@ static void draw(app_state* app) {
     draw_master(app);
     draw_detail(app);
     draw_status(app);
+    draw_generation_modal(app);
 }
 
 int main(int argc, char** argv) {
@@ -511,11 +708,13 @@ int main(int argc, char** argv) {
     struct ncplane* master = ncplane_create(std, &base);
     struct ncplane* detail = ncplane_create(std, &base);
     struct ncplane* status = ncplane_create(std, &base);
-    if (!master || !detail || !status) {
+    struct ncplane* modal = ncplane_create(std, &base);
+    if (!master || !detail || !status || !modal) {
         fprintf(stderr, "[!] could not create UI planes\n");
         if (master) ncplane_destroy(master);
         if (detail) ncplane_destroy(detail);
         if (status) ncplane_destroy(status);
+        if (modal) ncplane_destroy(modal);
         notcurses_stop(nc);
         pp_uic_close(h);
         return 1;
@@ -526,6 +725,7 @@ int main(int argc, char** argv) {
         .master = master,
         .detail = detail,
         .status = status,
+        .modal = modal,
         .handle = h,
         .warehouse_root = argv[1],
         .selected = 0,
@@ -540,6 +740,8 @@ int main(int argc, char** argv) {
     app.gen_num_primes = 1000000;
     app.gen_batch_size = 500000;
     app.gen_threads = 24;
+    app.modal_rows = 0;
+    app.modal_cols = 0;
     clear_op_lines(&app);
 
     if (layout(&app) < 0) {
@@ -547,6 +749,7 @@ int main(int argc, char** argv) {
         ncplane_destroy(master);
         ncplane_destroy(detail);
         ncplane_destroy(status);
+        ncplane_destroy(modal);
         notcurses_stop(nc);
         pp_uic_close(h);
         return 1;
@@ -560,6 +763,40 @@ int main(int argc, char** argv) {
         ncinput in = {0};
         uint32_t key = notcurses_get_blocking(nc, &in);
         if (key == (uint32_t)-1) break;
+
+        if (app.gen_modal_active) {
+            if (key == '\t' || key == 'j' || key == NCKEY_DOWN || key == NCKEY_RIGHT) {
+                advance_generation_field(&app);
+            } else if (key == 'k' || key == NCKEY_UP || key == NCKEY_LEFT) {
+                retreat_generation_field(&app);
+            } else if (key >= '0' && key <= '9') {
+                append_generation_digit(&app, (char)key);
+            } else if (key == 127 || key == 8) {
+                backspace_generation_field(&app);
+            } else if (key == NCKEY_ENTER || key == '\n' || key == '\r') {
+                if (parse_generation_buffers(&app)) {
+                    close_generation_modal(&app);
+                    app.op_busy = true;
+                    app.op_failed = false;
+                    snprintf(app.op_status, sizeof(app.op_status), "launching generation");
+                    draw(&app);
+                    notcurses_render(nc);
+                    launch_generation_bg(&app);
+                    refresh_status(&app);
+                    app.op_busy = false;
+                }
+            } else if (key == 'q') {
+                running = false;
+            } else if (key == NCKEY_ESC) {
+                close_generation_modal(&app);
+                snprintf(app.op_status, sizeof(app.op_status), "generation launch cancelled");
+                app.op_failed = false;
+            }
+            if (!running) break;
+            draw(&app);
+            notcurses_render(nc);
+            continue;
+        }
 
         if (app.pending_confirm != CONFIRM_NONE) {
             if (key == 'y' || key == 'Y') {
@@ -644,53 +881,7 @@ int main(int argc, char** argv) {
                     "confirm live HMS sync: press y to run, n to cancel");
                 break;
             case 'g':
-                set_pending_confirm(
-                    &app,
-                    CONFIRM_GENERATE_BG,
-                    "confirm generation launch: press y to run, n to cancel");
-                break;
-            case '+':
-                if (app.gen_num_primes <= INT64_MAX - 1000000) {
-                    app.gen_num_primes += 1000000;
-                }
-                snprintf(app.op_status, sizeof(app.op_status), "updated -n to %" PRId64, app.gen_num_primes);
-                app.op_failed = false;
-                break;
-            case '-':
-                if (app.gen_num_primes > 1000000) {
-                    app.gen_num_primes -= 1000000;
-                }
-                if (app.gen_num_primes < app.gen_batch_size) {
-                    app.gen_batch_size = app.gen_num_primes;
-                }
-                snprintf(app.op_status, sizeof(app.op_status), "updated -n to %" PRId64, app.gen_num_primes);
-                app.op_failed = false;
-                break;
-            case '}':
-                if (app.gen_batch_size <= app.gen_num_primes - 250000) {
-                    app.gen_batch_size += 250000;
-                }
-                if (app.gen_batch_size < 250000) app.gen_batch_size = 250000;
-                snprintf(app.op_status, sizeof(app.op_status), "updated -b to %" PRId64, app.gen_batch_size);
-                app.op_failed = false;
-                break;
-            case '{':
-                if (app.gen_batch_size > 250000) {
-                    app.gen_batch_size -= 250000;
-                }
-                if (app.gen_batch_size < 250000) app.gen_batch_size = 250000;
-                snprintf(app.op_status, sizeof(app.op_status), "updated -b to %" PRId64, app.gen_batch_size);
-                app.op_failed = false;
-                break;
-            case '>':
-                if (app.gen_threads < 1024) app.gen_threads += 1;
-                snprintf(app.op_status, sizeof(app.op_status), "updated --threads to %d", app.gen_threads);
-                app.op_failed = false;
-                break;
-            case '<':
-                if (app.gen_threads > 1) app.gen_threads -= 1;
-                snprintf(app.op_status, sizeof(app.op_status), "updated --threads to %d", app.gen_threads);
-                app.op_failed = false;
+                open_generation_modal(&app);
                 break;
             case NCKEY_RESIZE:
                 layout(&app);
@@ -706,6 +897,7 @@ int main(int argc, char** argv) {
     ncplane_destroy(master);
     ncplane_destroy(detail);
     ncplane_destroy(status);
+    ncplane_destroy(modal);
     notcurses_stop(nc);
     pp_uic_close(h);
     return 0;
