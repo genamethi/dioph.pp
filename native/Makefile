@@ -1,6 +1,6 @@
 PREFIX ?= ../.pixi/envs/default
 PKG_CONFIG ?= $(PREFIX)/bin/pkg-config
-PKG_CONFIG_PATH ?= $(PREFIX)/lib/pkgconfig
+PKG_CONFIG_PATH ?= $(PREFIX)/lib/pkgconfig:/usr/local/lib/pkgconfig:/usr/lib/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig
 CC = $(PREFIX)/bin/cc
 CXX = $(PREFIX)/bin/c++
 ICEBERG_CPP_BUILD ?= vendor/iceberg-cpp-build
@@ -11,6 +11,9 @@ CFLAGS += -std=c11 -D_POSIX_C_SOURCE=200809L -O3 -g -fPIC -Wall -Wextra -Wpedant
 CXXFLAGS += -std=c++23 -O3 -g -fPIC -Wall -Wextra -Wpedantic
 LDFLAGS += -L$(PREFIX)/lib -Wl,-rpath,$(abspath $(PREFIX)/lib)
 LDLIBS += $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --libs primecount primesieve gmp flint) -lpari -lm
+NOTCURSES_LDLIBS ?= $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --libs notcurses-core 2>/dev/null || PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --libs notcurses 2>/dev/null)
+NOTCURSES_CPPFLAGS ?= $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --cflags notcurses-core 2>/dev/null || PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --cflags notcurses 2>/dev/null)
+NOTCURSES_RPATH ?= -Wl,-rpath,/usr/local/lib
 ICEBERG_CPPFLAGS += -I$(ICEBERG_CPP_INSTALL)/include -I$(ICEBERG_CPP_BUILD)/_deps/nanoarrow-src/src
 ICEBERG_LDFLAGS += -L$(ICEBERG_CPP_BUILD)/src/iceberg -L$(ICEBERG_CPP_BUILD)/_deps/nanoarrow-build \
 	-Wl,-rpath,$(abspath $(ICEBERG_CPP_BUILD)/src/iceberg) \
@@ -25,6 +28,7 @@ GENERATE_OBJ := $(BUILD_DIR)/generate.o
 UI_ICEBERG_OBJ := $(BUILD_DIR)/ui_iceberg.o
 TEST_OBJ := $(BUILD_DIR)/test_core.o
 TEST_UI_ICEBERG_OBJ := $(BUILD_DIR)/test_ui_iceberg.o
+TUI_FRONTEND_OBJ := $(BUILD_DIR)/tui_frontend.o
 
 .PHONY: all clean test
 
@@ -58,6 +62,9 @@ $(TEST_OBJ): tests/test_core.c include/primeparts/core.h | $(BUILD_DIR)
 $(TEST_UI_ICEBERG_OBJ): tests/test_ui_iceberg.c include/primeparts/ui_iceberg.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
+$(TUI_FRONTEND_OBJ): src/tui_frontend.c include/primeparts/ui_iceberg.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(NOTCURSES_CPPFLAGS) $(CFLAGS) -c $< -o $@
+
 $(BUILD_DIR)/libprimeparts_core.so: $(CORE_OBJ)
 	$(CC) -shared $(LDFLAGS) $^ $(LDLIBS) -o $@
 
@@ -72,6 +79,9 @@ $(BUILD_DIR)/primeparts-generate: $(CORE_OBJ) $(GENERATE_OBJ)
 
 $(BUILD_DIR)/primeparts-test-ui-iceberg: $(UI_ICEBERG_OBJ) $(TEST_UI_ICEBERG_OBJ)
 	$(CXX) $(LDFLAGS) $(ICEBERG_LDFLAGS) $^ $(ICEBERG_LDLIBS) -lsqlite3 -o $@
+
+$(BUILD_DIR)/primeparts-tui: $(UI_ICEBERG_OBJ) $(TUI_FRONTEND_OBJ)
+	$(CXX) $(LDFLAGS) $(ICEBERG_LDFLAGS) $(NOTCURSES_RPATH) $^ $(ICEBERG_LDLIBS) $(NOTCURSES_LDLIBS) -lsqlite3 -o $@
 
 $(BUILD_DIR)/test_core: $(CORE_OBJ) $(TEST_OBJ)
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -pthread -o $@

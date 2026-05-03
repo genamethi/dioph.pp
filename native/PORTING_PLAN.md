@@ -1,6 +1,6 @@
 # Native Port Plan
 
-## Status as of 2026-05-02
+## Status as of 2026-05-03
 
 The native generation path remains C/C++ for data production plus Python for
 catalog commit. `primeparts-commit` exists as a Rust experiment/porting slice,
@@ -32,8 +32,8 @@ Remaining operational blockers:
 
 - The Rust commit path still does not interoperate with the current
   PyIceberg-created SQLite catalog schema.
-- No interactive TUI frontend exists yet; only the low-level read/status ABI
-  and smoke harness are in place.
+- The first-screen native TUI now exists, but only as a status-oriented shell
+  (table selector + summary metrics). Operational screens are still pending.
 
 Practical deferrals:
 
@@ -76,8 +76,10 @@ Implemented:
 Verified:
 
 - `pixi run native-test`
+- `pixi run native-build`
 - `warehouse_standing()` returns OK against the compacted production
   warehouse at `/media/extssd/research/dioph.pp/data/iceberg`.
+- `make -C native build/primeparts-tui CC=cc CXX=c++` builds the notcurses UI.
 - Native C output matches Sage for the first 100 prime ranks.
 - Core-only throughput on this machine:
   `native/build/primeparts-bench-core --start-idx 1 --count 100000000 --threads 24`
@@ -248,7 +250,7 @@ Todo:
 
 ## Phase 6: Terminal Workbench
 
-Status as of 2026-05-02:
+Status as of 2026-05-03:
 
 - The TUI integration surface is in `native/`, not `crates/`.
 - `native/include/primeparts/ui_iceberg.h` defines a small C ABI over
@@ -262,19 +264,22 @@ Status as of 2026-05-02:
   through iceberg-cpp.
 - `native/tests/test_ui_iceberg.c` is built into
   `native/build/primeparts-test-ui-iceberg`; `make -C native test` exercises
-  it against a temp native writer smoke warehouse. This currently reaches
-  iceberg-cpp metadata parsing and fails on `truncate[10000000000](p)` as
-  described above.
+  it against a temp native writer smoke warehouse.
+- `native/src/tui_frontend.c` is the first notcurses frontend and builds to
+  `native/build/primeparts-tui`. Current behavior is a split-pane warehouse
+  status view with `h/j/k/l` (or arrows) navigation, `Enter` refresh, `q`
+  quit, and a reserved status row.
+- In this environment, native notcurses linkage is ABI-compatible with system
+  compilers; use `CC=cc CXX=c++` (now baked into pixi `native-build` and
+  `native-test` tasks).
 
 Direction:
 
 - Build a full-screen terminal UI as an operations and exploration layer, not
   as part of the generation hot path.
-- Prefer a modern ncurses-style framework such as Textual/Rich for the first
-  version: it gives tables, async workers, keyboard navigation, progress panes,
-  and structured layout while keeping query/generation code in ordinary Python
-  modules. A pure `curses` frontend remains possible later if dependency
-  minimization matters.
+- Continue the native notcurses path for the terminal workbench, keeping the
+  UI process separate from generation workers and preserving `ui_iceberg` as
+  the status/read boundary.
 
 Initial screens:
 

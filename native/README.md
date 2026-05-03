@@ -23,6 +23,7 @@ prime batches:
 | `primeparts-generate` | Stage 1 — generate primes + materialize columns + write zstd Parquet via iceberg-cpp + emit `native_files.jsonl`. Threaded. |
 | `primeparts-bench-core` | Hot-loop count-only benchmark (no row materialization). |
 | `primeparts-bench-materialize` | Columnar materialization benchmark (no Parquet write). |
+| `primeparts-tui` | First-screen notcurses warehouse status frontend backed by `ui_iceberg`. |
 
 The Stage 2 catalog/metadata commit is Python — `primeparts-commit` (a.k.a.
 `python -m primeparts.native_iceberg`). It reads the manifest, validates
@@ -43,9 +44,10 @@ not needed. The generation path will refuse to skip past or overwrite them.
 Build and smoke test:
 
 ```sh
-make -C native
-make -C native test
+pixi run native-build
+pixi run native-test
 native/build/primeparts-bench-core --start-idx 1 --count 1000000
+native/build/primeparts-tui /media/extssd/research/dioph.pp/data/iceberg
 ```
 
 ## Production pipeline
