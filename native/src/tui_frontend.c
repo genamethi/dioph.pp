@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 
 #include <notcurses/notcurses.h>
 
@@ -44,7 +45,76 @@ typedef struct {
     view_mode mode;
     table_status tables[2];
     bool had_error;
+    bool op_busy;
+    bool op_failed;
+    char op_status[160];
+    char op_last_cmd[192];
+    char op_lines[6][160];
+    int op_line_count;
 } app_state;
+
+static void clear_op_lines(app_state* app) {
+    app->op_line_count = 0;
+    for (int i = 0; i < 6; ++i) {
+        app->op_lines[i][0] = '\0';
+    }
+}
+
+static void push_op_line(app_state* app, const char* line) {
+    if (!line || !*line || app->op_line_count >= 6) return;
+    snprintf(app->op_lines[app->op_line_count], sizeof(app->op_lines[0]), "%s", line);
+    app->op_line_count += 1;
+}
+
+static int run_shell_capture(app_state* app, const char* cmd) {
+    snprintf(app->op_last_cmd, sizeof(app->op_last_cmd), "%s", cmd);
+    clear_op_lines(app);
+    FILE* fp = popen(cmd, "r");
+    if (!fp) {
+        app->op_failed = true;
+        snprintf(app->op_status, sizeof(app->op_status), "failed to launch command");
+        return -1;
+    }
+
+    char buf[320];
+    while (fgets(buf, sizeof(buf), fp) != NULL && app->op_line_count < 6) {
+        size_t n = strlen(buf);
+        while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) {
+            buf[--n] = '\0';
+        }
+        if (n > 0) push_op_line(app, buf);
+    }
+
+    int rc = pclose(fp);
+    int exit_code = -1;
+    if (WIFEXITED(rc)) {
+        exit_code = WEXITSTATUS(rc);
+    }
+    app->op_failed = (exit_code != 0);
+    snprintf(
+        app->op_status,
+        sizeof(app->op_status),
+        "%s (exit=%d)",
+        app->op_failed ? "operation failed" : "operation ok",
+        exit_code);
+    return exit_code;
+}
+
+static int launch_generation_bg(app_state* app) {
+    const char* cmd = "sh -lc 'mkdir -p logs && nohup primeparts -n 1000000 > logs/tui_generate.log 2>&1 &'";
+    snprintf(app->op_last_cmd, sizeof(app->op_last_cmd), "%s", cmd);
+    clear_op_lines(app);
+    push_op_line(app, "generation launched in background");
+    push_op_line(app, "log: logs/tui_generate.log");
+    int rc = system(cmd);
+    app->op_failed = (rc != 0);
+    snprintf(
+        app->op_status,
+        sizeof(app->op_status),
+        "%s",
+        app->op_failed ? "failed to launch generation" : "generation launch requested");
+    return rc;
+}
 
 static int count_snapshot_entries(const char* json) {
     int count = 0;
@@ -271,10 +341,16 @@ static void draw_ops_view(app_state* app, table_status* st) {
         ncplane_putstr_yx(app->detail, 4, 0, "cross-table query unavailable due to table error");
     }
 
-    ncplane_putstr_yx(app->detail, 7, 0, "Generation controls (manual execution)");
-    ncplane_putstr_yx(app->detail, 8, 0, "run: primeparts -n <N>");
-    ncplane_putstr_yx(app->detail, 9, 0, "check: PYTHONPATH=src python -m primeparts.native_iceberg --check-warehouse");
-    ncplane_putstr_yx(app->detail, 10, 0, "sync: pixi run sync-hms --dry-run");
+    ncplane_putstr_yx(app->detail, 7, 0, "Actions");
+    ncplane_putstr_yx(app->detail, 8, 0, "g launch generation (-n 1,000,000, background)");
+    ncplane_putstr_yx(app->detail, 9, 0, "c check warehouse");
+    ncplane_putstr_yx(app->detail, 10, 0, "s sync-hms --dry-run");
+    ncplane_putstr_yx(app->detail, 11, 0, "S sync-hms");
+    ncplane_printf_yx(app->detail, 13, 0, "last command: %s", app->op_last_cmd[0] ? app->op_last_cmd : "(none)");
+    ncplane_printf_yx(app->detail, 14, 0, "last status: %s", app->op_status[0] ? app->op_status : "(none)");
+    for (int i = 0; i < app->op_line_count; ++i) {
+        ncplane_printf_yx(app->detail, 16 + i, 0, "> %s", app->op_lines[i]);
+    }
 }
 
 static void draw_detail(app_state* app) {
@@ -304,18 +380,24 @@ static void draw_status(app_state* app) {
     ncplane_set_fg_rgb8(app->status, 0, 0, 0);
     ncplane_set_bg_rgb8(app->status, 200, 200, 200);
     ncplane_set_styles(app->status, NCSTYLE_BOLD);
-    if (app->had_error) {
+    if (app->op_busy) {
         ncplane_putstr_yx(
             app->status,
             0,
             0,
-            "[!] arrows table | 1/2/3 view | r refresh | Enter refresh | q quit");
+            "[..] operation running | arrows table | 1/2/3 view | g/c/s/S run ops | r refresh | q quit");
+    } else if (app->had_error || app->op_failed) {
+        ncplane_putstr_yx(
+            app->status,
+            0,
+            0,
+            "[!] arrows table | 1/2/3 view | g/c/s/S run ops | r refresh | Enter refresh | q quit");
     } else {
         ncplane_putstr_yx(
             app->status,
             0,
             0,
-            "[ok] arrows table | 1/2/3 view | r refresh | Enter refresh | q quit");
+            "[ok] arrows table | 1/2/3 view | g/c/s/S run ops | r refresh | Enter refresh | q quit");
     }
 }
 
@@ -378,6 +460,9 @@ int main(int argc, char** argv) {
             {.key = "decompositions"},
         },
     };
+    app.op_status[0] = '\0';
+    app.op_last_cmd[0] = '\0';
+    clear_op_lines(&app);
 
     if (layout(&app) < 0) {
         fprintf(stderr, "[!] terminal too small\n");
@@ -427,6 +512,46 @@ int main(int argc, char** argv) {
             case '\n':
             case '\r':
                 refresh_status(&app);
+                break;
+            case 'c':
+                app.op_busy = true;
+                app.op_failed = false;
+                snprintf(app.op_status, sizeof(app.op_status), "running warehouse check");
+                draw(&app);
+                notcurses_render(nc);
+                run_shell_capture(&app, "PYTHONPATH=src python -m primeparts.native_iceberg --check-warehouse 2>&1");
+                refresh_status(&app);
+                app.op_busy = false;
+                break;
+            case 's':
+                app.op_busy = true;
+                app.op_failed = false;
+                snprintf(app.op_status, sizeof(app.op_status), "running sync-hms dry-run");
+                draw(&app);
+                notcurses_render(nc);
+                run_shell_capture(&app, "pixi run sync-hms --dry-run 2>&1");
+                refresh_status(&app);
+                app.op_busy = false;
+                break;
+            case 'S':
+                app.op_busy = true;
+                app.op_failed = false;
+                snprintf(app.op_status, sizeof(app.op_status), "running sync-hms");
+                draw(&app);
+                notcurses_render(nc);
+                run_shell_capture(&app, "pixi run sync-hms 2>&1");
+                refresh_status(&app);
+                app.op_busy = false;
+                break;
+            case 'g':
+                app.op_busy = true;
+                app.op_failed = false;
+                snprintf(app.op_status, sizeof(app.op_status), "launching generation");
+                draw(&app);
+                notcurses_render(nc);
+                launch_generation_bg(&app);
+                refresh_status(&app);
+                app.op_busy = false;
                 break;
             case NCKEY_RESIZE:
                 layout(&app);
