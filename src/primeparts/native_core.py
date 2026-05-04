@@ -20,7 +20,6 @@ from pathlib import Path
 from typing import Any
 
 
-_DEFAULT_CHUNKS_PER_FILE = 4
 _DEFAULT_CHECKPOINT_PRIMES = 250_000_000
 
 
@@ -111,7 +110,6 @@ def _find_generate_binary() -> Path:
 def _checkpoint_primes(
     num_primes: int,
     batch_size: int,
-    chunks_per_file: int,
     temp: bool,
     requested: int | None = None,
 ) -> int:
@@ -130,7 +128,7 @@ def _checkpoint_primes(
         else:
             value = _DEFAULT_CHECKPOINT_PRIMES
 
-    group_primes = max(1, int(batch_size) * int(chunks_per_file))
+    group_primes = max(1, int(batch_size))
     value = max(group_primes, value)
     return (value // group_primes) * group_primes
 
@@ -158,13 +156,13 @@ def setup_native_mode(args, config):
 
     if args.temp:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        temp_root = get_temp_dir() / f"iceberg_temp_native_{ts}"
+        temp_root = get_temp_dir() / f"iceberg_temp_{ts}"
         warehouse = temp_root / "warehouse"
-        manifest = temp_root / "native_files.jsonl"
+        manifest = temp_root / "files.jsonl"
     else:
         warehouse = get_warehouse_dir()
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        manifest = warehouse.parent / f"native_files_{ts}.jsonl"
+        manifest = warehouse.parent / f"files_{ts}.jsonl"
         temp_root = None
 
     if args.temp:
@@ -197,7 +195,6 @@ def _run_native_segment(
     commit_seq: int,
     num_primes: int,
     batch_size: int,
-    chunks_per_file: int,
     threads: int | None,
     warehouse: Path,
     manifest: Path,
@@ -210,7 +207,6 @@ def _run_native_segment(
         "--warehouse", str(warehouse),
         "--manifest", str(manifest),
         "--chunk-primes", str(batch_size),
-        "--chunks-per-file", str(chunks_per_file),
     ]
     if threads is not None and threads > 0:
         cmd += ["--threads", str(threads)]
@@ -245,7 +241,6 @@ def run_native_pipeline(
     commit_seq: int,
     num_primes: int,
     batch_size: int,
-    chunks_per_file: int,
     checkpoint_primes: int | None,
     threads: int | None,
     warehouse: Path,
@@ -256,8 +251,6 @@ def run_native_pipeline(
     """Spawn primeparts-generate and register the manifest via PyIceberg.
 
     ``batch_size`` maps to ``--chunk-primes`` (the materialization chunk).
-    ``chunks_per_file`` maps to native file-group width; the generator can
-    use at most ``min(threads, chunks_per_file)`` workers for one group.
     ``commit_seq`` is coordinator-owned internal state. It is passed through
     the environment rather than exposed as a native CLI flag, because direct
     defaulting to zero caused production label reuse.
@@ -268,15 +261,11 @@ def run_native_pipeline(
     binary = _find_generate_binary()
 
     print(f"Processing {num_primes:,} primes starting from {init_p:,}")
-    print(
-        f"Threads: {threads or 'auto'}, chunk_primes: {batch_size:,}, "
-        f"chunks_per_file: {chunks_per_file:,}"
-    )
+    print(f"Threads: {threads or 'auto'}, chunk_primes: {batch_size:,}")
 
     checkpoint_primes = _checkpoint_primes(
         num_primes,
         batch_size,
-        chunks_per_file,
         temp,
         checkpoint_primes,
     )
@@ -311,7 +300,6 @@ def run_native_pipeline(
             commit_seq=current_commit_seq,
             num_primes=segment_count,
             batch_size=batch_size,
-            chunks_per_file=chunks_per_file,
             threads=threads,
             warehouse=warehouse,
             manifest=segment_manifest,
@@ -388,6 +376,5 @@ def run_native_pipeline(
         "total_batches": total_files,
         "init_p": init_p,
         "batch_size": batch_size,
-        "chunks_per_file": chunks_per_file,
         "start_idx": start_idx,
     }

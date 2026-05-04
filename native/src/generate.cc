@@ -273,7 +273,7 @@ void usage(FILE* stream) {
       "Native C core + iceberg-cpp Parquet writer.\n"
       "\n"
       "Options:\n"
-      "  --temp                    Create /media/extssd/research/dioph.pp/data/tmp/iceberg_temp_native_<ts>/warehouse\n"
+      "  --temp                    Create /media/extssd/research/dioph.pp/data/tmp/iceberg_temp_<ts>/warehouse\n"
       "  --warehouse PATH          Warehouse root to write under\n"
       "  --manifest PATH           JSONL file list to write\n"
       "  --chunk-primes N          Materialization chunk size (default: 500000)\n"
@@ -365,7 +365,7 @@ fs::path default_temp_root() {
   fs::path data_dir = env != nullptr && env[0] != '\0'
                           ? fs::path(env)
                           : fs::path("/media/extssd/research/dioph.pp/data");
-  return data_dir / "tmp" / ("iceberg_temp_native_" + utc_timestamp_compact());
+  return data_dir / "tmp" / ("iceberg_temp_" + utc_timestamp_compact());
 }
 
 std::string json_escape(std::string_view text) {
@@ -808,10 +808,10 @@ bool parse_args(int argc, char** argv, Options* options) {
     fs::path temp_root = default_temp_root();
     options->warehouse = temp_root / "warehouse";
     if (options->manifest.empty()) {
-      options->manifest = temp_root / "native_files.jsonl";
+      options->manifest = temp_root / "files.jsonl";
     }
   } else if (options->manifest.empty()) {
-    options->manifest = options->warehouse / "native_files.jsonl";
+    options->manifest = options->warehouse / "files.jsonl";
   }
   if (options->threads == 0) {
     unsigned hw = std::thread::hardware_concurrency();
@@ -1035,10 +1035,10 @@ int pp_gen_run(const pp_gen_options* options,
     fs::path temp_root = default_temp_root();
     internal.warehouse = temp_root / "warehouse";
     if (internal.manifest.empty()) {
-      internal.manifest = temp_root / "native_files.jsonl";
+      internal.manifest = temp_root / "files.jsonl";
     }
   } else if (internal.manifest.empty()) {
-    internal.manifest = internal.warehouse / "native_files.jsonl";
+    internal.manifest = internal.warehouse / "files.jsonl";
   }
   if (internal.threads == 0) {
     unsigned hw = std::thread::hardware_concurrency();

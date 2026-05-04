@@ -1,4 +1,6 @@
 #include <inttypes.h>
+#include <limits.h>
+#include <time.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -6,8 +8,11 @@
 #include <string.h>
 #include <sys/wait.h>
 
+#include <unistd.h>
 #include <notcurses/notcurses.h>
 
+#include "primeparts/core.h"
+#include "primeparts/generate.h"
 #include "primeparts/ui_iceberg.h"
 
 typedef struct {
@@ -37,13 +42,15 @@ typedef enum {
 typedef enum {
     CONFIRM_NONE = 0,
     CONFIRM_SYNC_LIVE = 1,
-    CONFIRM_GENERATE_BG = 2,
 } confirm_mode;
 
 typedef struct {
     struct notcurses* nc;
     struct ncplane* master;
     struct ncplane* detail;
+    struct ncplane* output;
+    struct ncplane* divider_left;
+    struct ncplane* divider_right;
     struct ncplane* status;
     struct ncplane* modal;
     pp_uic_handle* handle;
@@ -56,7 +63,7 @@ typedef struct {
     bool op_failed;
     char op_status[160];
     char op_last_cmd[384];
-    char op_lines[6][160];
+    char op_lines[20][160];
     int op_line_count;
     confirm_mode pending_confirm;
     int64_t gen_num_primes;
@@ -72,26 +79,90 @@ typedef struct {
     char gen_modal_msg[160];
 } app_state;
 
+static const int64_t GEN_NUM_SCALE = 100000000;
+
 static void draw(app_state* app);
 static void refresh_status(app_state* app);
+
+static const char* skip_ws(const char* s) {
+    while (*s == ' ' || *s == '\t') ++s;
+    return s;
+}
+
+static void rstrip_inplace(char* s) {
+    size_t n = strlen(s);
+    while (n > 0 && (s[n - 1] == '\n' || s[n - 1] == '\r' || s[n - 1] == ' ' || s[n - 1] == '\t')) {
+        s[--n] = '\0';
+    }
+}
+
+static bool parse_warehouse_root_from_config(const char* cfg_path, char* out, size_t out_cap) {
+    FILE* fp = fopen(cfg_path, "r");
+    if (!fp) return false;
+    char line[1024];
+    bool found = false;
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        rstrip_inplace(line);
+        const char* p = skip_ws(line);
+        if (*p == '\0' || *p == '#') continue;
+        const char* key = "warehouse_root=";
+        size_t keylen = strlen(key);
+        if (strncmp(p, key, keylen) == 0) {
+            p = skip_ws(p + keylen);
+            if (*p == '\0') continue;
+            snprintf(out, out_cap, "%s", p);
+            found = true;
+            break;
+        }
+    }
+    fclose(fp);
+    return found;
+}
+
+static bool resolve_warehouse_root(int argc, char** argv, char* out, size_t out_cap, char* cfg_path, size_t cfg_cap) {
+    if (argc >= 2 && argv[1] && argv[1][0]) {
+        snprintf(out, out_cap, "%s", argv[1]);
+        cfg_path[0] = '\0';
+        return true;
+    }
+
+    const char* env_wh = getenv("PRIMEPARTS_WAREHOUSE_ROOT");
+    if (env_wh && *env_wh) {
+        snprintf(out, out_cap, "%s", env_wh);
+        cfg_path[0] = '\0';
+        return true;
+    }
+
+    const char* home = getenv("HOME");
+    if (!home || !*home) return false;
+    snprintf(cfg_path, cfg_cap, "%s/.config/primeparts/tui.conf", home);
+    return parse_warehouse_root_from_config(cfg_path, out, out_cap);
+}
 
 static void set_modal_message(app_state* app, const char* msg) {
     snprintf(app->gen_modal_msg, sizeof(app->gen_modal_msg), "%s", msg ? msg : "");
 }
 
 static void sync_generation_buffers(app_state* app) {
-    snprintf(app->gen_modal_num, sizeof(app->gen_modal_num), "%" PRId64, app->gen_num_primes);
+    int64_t units = app->gen_num_primes / GEN_NUM_SCALE;
+    if (units <= 0) units = 1;
+    snprintf(app->gen_modal_num, sizeof(app->gen_modal_num), "%" PRId64, units);
     snprintf(app->gen_modal_batch, sizeof(app->gen_modal_batch), "%" PRId64, app->gen_batch_size);
     snprintf(app->gen_modal_threads, sizeof(app->gen_modal_threads), "%d", app->gen_threads);
 }
 
 static bool parse_generation_buffers(app_state* app) {
     char* end = NULL;
-    long long num = strtoll(app->gen_modal_num, &end, 10);
-    if (end == app->gen_modal_num || *end != '\0' || num <= 0) {
-        set_modal_message(app, "num primes must be a positive integer");
+    long long num_units = strtoll(app->gen_modal_num, &end, 10);
+    if (end == app->gen_modal_num || *end != '\0' || num_units <= 0) {
+        set_modal_message(app, "n-units must be a positive integer (n * 100M)");
         return false;
     }
+    if (num_units > (LLONG_MAX / GEN_NUM_SCALE)) {
+        set_modal_message(app, "n-units too large");
+        return false;
+    }
+    long long num = num_units * GEN_NUM_SCALE;
     long long batch = strtoll(app->gen_modal_batch, &end, 10);
     if (end == app->gen_modal_batch || *end != '\0' || batch <= 0) {
         set_modal_message(app, "batch size must be a positive integer");
@@ -172,20 +243,24 @@ static void retreat_generation_field(app_state* app) {
 
 static void clear_op_lines(app_state* app) {
     app->op_line_count = 0;
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < 20; ++i) {
         app->op_lines[i][0] = '\0';
     }
 }
 
 static void push_op_line(app_state* app, const char* line) {
-    if (!line || !*line || app->op_line_count >= 6) return;
-    snprintf(app->op_lines[app->op_line_count], sizeof(app->op_lines[0]), "%s", line);
-    app->op_line_count += 1;
+    if (!line || !*line) return;
+    if (app->op_line_count < 20) {
+        snprintf(app->op_lines[app->op_line_count], sizeof(app->op_lines[0]), "%.159s", line);
+        app->op_line_count += 1;
+        return;
+    }
+    memmove(app->op_lines, app->op_lines + 1, sizeof(app->op_lines[0]) * 19);
+    snprintf(app->op_lines[19], sizeof(app->op_lines[0]), "%.159s", line);
 }
 
 static int run_shell_capture(app_state* app, const char* cmd) {
     snprintf(app->op_last_cmd, sizeof(app->op_last_cmd), "%s", cmd);
-    clear_op_lines(app);
     FILE* fp = popen(cmd, "r");
     if (!fp) {
         app->op_failed = true;
@@ -194,7 +269,7 @@ static int run_shell_capture(app_state* app, const char* cmd) {
     }
 
     char buf[320];
-    while (fgets(buf, sizeof(buf), fp) != NULL && app->op_line_count < 6) {
+    while (fgets(buf, sizeof(buf), fp) != NULL && app->op_line_count < 20) {
         size_t n = strlen(buf);
         while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) {
             buf[--n] = '\0';
@@ -217,36 +292,157 @@ static int run_shell_capture(app_state* app, const char* cmd) {
     return exit_code;
 }
 
-static int launch_generation_bg(app_state* app) {
-    char cmd[320];
-    snprintf(
-        cmd,
-        sizeof(cmd),
-        "sh -lc 'mkdir -p logs && nohup primeparts -n %" PRId64 " -b %" PRId64 " --threads %d > logs/tui_generate.log 2>&1 &'",
-        app->gen_num_primes,
-        app->gen_batch_size,
-        app->gen_threads);
-    snprintf(app->op_last_cmd, sizeof(app->op_last_cmd), "%s", cmd);
+static bool resolve_rust_commit_binary(char* out, size_t cap) {
+    const char* candidates[] = {
+        "primeparts-commit",
+        "target/release/primeparts-commit",
+        "target/debug/primeparts-commit",
+        "../target/release/primeparts-commit",
+        "../target/debug/primeparts-commit",
+        "crates/target/release/primeparts-commit",
+        "crates/target/debug/primeparts-commit",
+        "../crates/target/release/primeparts-commit",
+        "../crates/target/debug/primeparts-commit",
+    };
+    for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); ++i) {
+        if (access(candidates[i], X_OK) == 0) {
+            snprintf(out, cap, "%s", candidates[i]);
+            return true;
+        }
+    }
+    return false;
+}
+
+static void utc_timestamp_compact(char* out, size_t cap) {
+    time_t t = time(NULL);
+    struct tm tm;
+    gmtime_r(&t, &tm);
+    strftime(out, cap, "%Y%m%d_%H%M%S", &tm);
+}
+
+static void generation_log_callback(void* user_data, const char* line) {
+    app_state* app = (app_state*)user_data;
+    if (!app || !line || !*line) return;
+    push_op_line(app, line);
+    draw(app);
+    notcurses_render(app->nc);
+}
+
+static int launch_generation_via_abi(app_state* app) {
     clear_op_lines(app);
-    push_op_line(app, "generation launched in background");
-    char cfg[160];
+    push_op_line(app, "starting native generation (ABI)");
+    char cfg[PATH_MAX + 64];
     snprintf(
         cfg,
         sizeof(cfg),
-        "config: -n %" PRId64 " -b %" PRId64 " --threads %d",
+        "config: -n %" PRId64 " --chunk-primes %" PRId64 " --threads %d",
         app->gen_num_primes,
         app->gen_batch_size,
         app->gen_threads);
     push_op_line(app, cfg);
-    push_op_line(app, "log: logs/tui_generate.log");
-    int rc = system(app->op_last_cmd);
-    app->op_failed = (rc != 0);
+    int64_t max_p = pp_uic_max_p(app->handle, "primes");
+    int64_t existing_prime_rows = pp_uic_total_rows(app->handle, "primes");
+    if (max_p < 0 && existing_prime_rows < 0) {
+        app->op_failed = true;
+        snprintf(app->op_status, sizeof(app->op_status), "failed to read generation resume point");
+        push_op_line(app, pp_uic_last_error(app->handle));
+        return 1;
+    }
+    int64_t start_idx = 1;
+    if (max_p >= 0) {
+        int64_t next_p = pp_next_prime(max_p);
+        if (next_p < 0) {
+            app->op_failed = true;
+            snprintf(app->op_status, sizeof(app->op_status), "failed to compute next prime");
+            push_op_line(app, "primesieve failed while resolving generation resume point");
+            return 1;
+        }
+        int64_t next_p_rank = pp_prime_pi(next_p);
+        if (next_p_rank < 0) {
+            app->op_failed = true;
+            snprintf(app->op_status, sizeof(app->op_status), "failed to compute next prime rank");
+            push_op_line(app, "primecount failed while resolving generation resume point");
+            return 1;
+        }
+        start_idx = next_p_rank;
+        if (existing_prime_rows >= 0 && existing_prime_rows + 1 != start_idx) {
+            char resume_note[160];
+            snprintf(
+                resume_note,
+                sizeof(resume_note),
+                "resume adjusted from row count %" PRId64 " to next prime rank %" PRId64,
+                existing_prime_rows + 1,
+                start_idx);
+            push_op_line(app, resume_note);
+        }
+    } else if (existing_prime_rows >= 0) {
+        start_idx = existing_prime_rows + 1;
+    }
+    int64_t max_commit_seq = pp_uic_max_commit_seq(app->handle, "primes");
+    if (max_commit_seq < 0 && existing_prime_rows > 0) {
+        app->op_failed = true;
+        snprintf(app->op_status, sizeof(app->op_status), "failed to read max_commit_seq");
+        push_op_line(app, pp_uic_last_error(app->handle));
+        return 1;
+    }
+    int32_t commit_seq_start = (max_commit_seq >= 0) ? (int32_t)(max_commit_seq + 1) : 0;
+    char ts[32];
+    utc_timestamp_compact(ts, sizeof(ts));
+    char warehouse_path[PATH_MAX];
+    char manifest_path[PATH_MAX];
+    snprintf(warehouse_path, sizeof(warehouse_path), "%s/warehouse", app->warehouse_root);
+    snprintf(manifest_path, sizeof(manifest_path), "%s/files_tui_%s.jsonl", app->warehouse_root, ts);
+    pp_gen_options opts = {
+        .start_idx = start_idx,
+        .count = app->gen_num_primes,
+        .chunk_primes = app->gen_batch_size,
+        .threads = app->gen_threads,
+        .commit_seq_start = commit_seq_start,
+        .temp = 0,
+        .warehouse = warehouse_path,
+        .manifest = manifest_path,
+    };
+    pp_gen_callbacks cb = {
+        .on_log = generation_log_callback,
+        .user_data = app,
+    };
+    pp_gen_result result = {0};
+    int rc = pp_gen_run(&opts, &cb, &result);
+    if (rc != 0) {
+        app->op_failed = true;
+        snprintf(app->op_status, sizeof(app->op_status), "native generation failed");
+        push_op_line(app, pp_gen_last_error());
+        return rc;
+    }
+    snprintf(cfg, sizeof(cfg), "native manifest: %s", manifest_path);
+    push_op_line(app, cfg);
+    char commit_bin[PATH_MAX];
+    if (!resolve_rust_commit_binary(commit_bin, sizeof(commit_bin))) {
+        app->op_failed = true;
+        snprintf(app->op_status, sizeof(app->op_status), "primeparts-commit binary not found");
+        push_op_line(app, "build it with: cargo build -p primeparts-commit (from crates/)");
+        return 1;
+    }
+    char cmd[PATH_MAX * 3 + 512];
+    char sqlite_uri[PATH_MAX + 16];
+    snprintf(sqlite_uri, sizeof(sqlite_uri), "sqlite:///%s/catalog.db", app->warehouse_root);
+    snprintf(
+        cmd,
+        sizeof(cmd),
+        "%s --manifest '%s' --warehouse '%s' --sqlite '%s' --warehouse-standing skip 2>&1",
+        commit_bin,
+        manifest_path,
+        warehouse_path,
+        sqlite_uri);
+    int commit_exit = run_shell_capture(app, cmd);
+    refresh_status(app);
+    app->op_failed = (commit_exit != 0);
     snprintf(
         app->op_status,
         sizeof(app->op_status),
         "%s",
-        app->op_failed ? "failed to launch generation" : "generation launch requested");
-    return rc;
+        app->op_failed ? "native generation ok; commit failed" : "native generation + commit ok");
+    return app->op_failed ? 1 : 0;
 }
 
 static void set_pending_confirm(app_state* app, confirm_mode mode, const char* message) {
@@ -271,11 +467,41 @@ static void run_op_with_refresh(app_state* app, struct notcurses* nc, const char
     app->op_busy = true;
     app->op_failed = false;
     snprintf(app->op_status, sizeof(app->op_status), "%s", status_msg);
+    clear_op_lines(app);
     draw(app);
     notcurses_render(nc);
     run_shell_capture(app, cmd);
     refresh_status(app);
     app->op_busy = false;
+}
+
+static bool build_rust_hms_sync_cmd(
+    app_state* app,
+    bool dry_run,
+    char* cmd,
+    size_t cmd_cap) {
+    char commit_bin[PATH_MAX];
+    if (!resolve_rust_commit_binary(commit_bin, sizeof(commit_bin))) {
+        app->op_failed = true;
+        snprintf(app->op_status, sizeof(app->op_status), "primeparts-commit binary not found");
+        clear_op_lines(app);
+        push_op_line(app, "build it with: cargo build -p primeparts-commit");
+        return false;
+    }
+
+    char warehouse_path[PATH_MAX];
+    char sqlite_uri[PATH_MAX + 16];
+    snprintf(warehouse_path, sizeof(warehouse_path), "%s/warehouse", app->warehouse_root);
+    snprintf(sqlite_uri, sizeof(sqlite_uri), "sqlite:///%s/catalog.db", app->warehouse_root);
+    snprintf(
+        cmd,
+        cmd_cap,
+        "%s --sync-hms-only --warehouse '%s' --sqlite '%s'%s 2>&1",
+        commit_bin,
+        warehouse_path,
+        sqlite_uri,
+        dry_run ? " --dry-run" : "");
+    return true;
 }
 
 static int count_snapshot_entries(const char* json) {
@@ -400,17 +626,31 @@ static int layout(app_state* app) {
     notcurses_term_dim_yx(app->nc, &rows, &cols);
     if (rows < 8 || cols < 40) return -1;
     unsigned body_rows = rows - 1;
-    unsigned split = cols / 3;
-    if (split < 20) split = 20;
-    if (cols - split < 20) split = cols - 20;
-    ncplane_resize_simple(app->master, body_rows, split);
+    unsigned left = cols / 5;
+    if (left < 22) left = 22;
+    if (left > 32) left = 32;
+    unsigned right = cols / 3;
+    if (right < 44) right = 44;
+    unsigned needed = left + right + 2 + 28;
+    if (cols < needed) {
+        if (right > 36) right = 36;
+        if (left > 20) left = 20;
+    }
+    unsigned center = cols - left - right - 2;
+    ncplane_resize_simple(app->master, body_rows, left);
     ncplane_move_yx(app->master, 0, 0);
-    ncplane_resize_simple(app->detail, body_rows, cols - split);
-    ncplane_move_yx(app->detail, 0, split);
+    ncplane_resize_simple(app->divider_left, body_rows, 1);
+    ncplane_move_yx(app->divider_left, 0, left);
+    ncplane_resize_simple(app->detail, body_rows, center);
+    ncplane_move_yx(app->detail, 0, left + 1);
+    ncplane_resize_simple(app->divider_right, body_rows, 1);
+    ncplane_move_yx(app->divider_right, 0, left + 1 + center);
+    ncplane_resize_simple(app->output, body_rows, right);
+    ncplane_move_yx(app->output, 0, left + 2 + center);
     ncplane_resize_simple(app->status, 1, cols);
     ncplane_move_yx(app->status, rows - 1, 0);
     if (app->modal) {
-        if (rows < 11 || cols < 48) {
+        if (rows < 13 || cols < 56) {
             app->modal_rows = 0;
             app->modal_cols = 0;
             return 0;
@@ -419,14 +659,27 @@ static int layout(app_state* app) {
         if (app->modal_cols > 72) app->modal_cols = 72;
         if (app->modal_cols < 48) app->modal_cols = 48;
         app->modal_rows = rows > 2 ? rows - 2 : rows;
-        if (app->modal_rows > 15) app->modal_rows = 15;
-        if (app->modal_rows < 11) app->modal_rows = 11;
+        if (app->modal_rows > 17) app->modal_rows = 17;
+        if (app->modal_rows < 13) app->modal_rows = 13;
         unsigned modal_y = (rows > app->modal_rows) ? (rows - app->modal_rows) / 2 : 0;
         unsigned modal_x = (cols > app->modal_cols) ? (cols - app->modal_cols) / 2 : 0;
         ncplane_resize_simple(app->modal, app->modal_rows, app->modal_cols);
         ncplane_move_yx(app->modal, modal_y, modal_x);
     }
     return 0;
+}
+
+static void draw_divider(struct ncplane* p) {
+    ncplane_erase(p);
+    ncplane_set_fg_rgb8(p, 90, 90, 90);
+    ncplane_set_bg_default(p);
+    unsigned rows = 0;
+    unsigned cols = 0;
+    ncplane_dim_yx(p, &rows, &cols);
+    (void)cols;
+    for (unsigned y = 0; y < rows; ++y) {
+        ncplane_putstr_yx(p, y, 0, "|");
+    }
 }
 
 static void draw_generation_modal(app_state* app) {
@@ -442,7 +695,7 @@ static void draw_generation_modal(app_state* app) {
 
     unsigned rows = app->modal_rows;
     unsigned cols = app->modal_cols;
-    if (rows < 11 || cols < 48) return;
+    if (rows < 13 || cols < 56) return;
 
     char border[128];
     char middle[128];
@@ -464,7 +717,7 @@ static void draw_generation_modal(app_state* app) {
     ncplane_putstr_yx(app->modal, rows - 1, 0, border);
 
     ncplane_putstr_yx(app->modal, 1, 2, "Generation Settings");
-    ncplane_putstr_yx(app->modal, 2, 2, "Enter values directly, then press Enter to launch.");
+    ncplane_putstr_yx(app->modal, 2, 2, "num units are n*100M (1=100M, 10=1B).");
 
     const bool active0 = app->gen_modal_field == 0;
     const bool active1 = app->gen_modal_field == 1;
@@ -475,7 +728,7 @@ static void draw_generation_modal(app_state* app) {
     } else {
         ncplane_set_bg_rgb8(app->modal, 40, 40, 48);
     }
-    ncplane_putstr_yx(app->modal, 4, 2, "num primes: ");
+    ncplane_putstr_yx(app->modal, 4, 2, "num units: ");
     ncplane_putstr_yx(app->modal, 4, 14, app->gen_modal_num);
 
     if (active1) {
@@ -593,21 +846,46 @@ static void draw_ops_view(app_state* app, table_status* st) {
     ncplane_putstr_yx(app->detail, 7, 0, "Actions");
     ncplane_putstr_yx(app->detail, 8, 0, "g open generation settings modal");
     ncplane_putstr_yx(app->detail, 9, 0, "c check warehouse");
-    ncplane_putstr_yx(app->detail, 10, 0, "s sync-hms --dry-run");
-    ncplane_putstr_yx(app->detail, 11, 0, "S sync-hms");
+    ncplane_putstr_yx(app->detail, 10, 0, "s rust hms sync --dry-run");
+    ncplane_putstr_yx(app->detail, 11, 0, "S rust hms sync");
     ncplane_putstr_yx(app->detail, 12, 0, "modal: Tab field | digits edit | Enter launch | Esc cancel");
     ncplane_printf_yx(
         app->detail,
         13,
         0,
-        "settings: -n=%" PRId64 "  -b=%" PRId64 "  --threads=%d",
+        "settings: n_units=%" PRId64 " (-n=%" PRId64 ")  --chunk-primes=%" PRId64,
+        app->gen_num_primes / GEN_NUM_SCALE,
         app->gen_num_primes,
-        app->gen_batch_size,
+        app->gen_batch_size);
+    ncplane_printf_yx(
+        app->detail,
+        14,
+        0,
+        "native: --threads=%d",
         app->gen_threads);
     ncplane_printf_yx(app->detail, 15, 0, "last command: %s", app->op_last_cmd[0] ? app->op_last_cmd : "(none)");
     ncplane_printf_yx(app->detail, 16, 0, "last status: %s", app->op_status[0] ? app->op_status : "(none)");
     for (int i = 0; i < app->op_line_count; ++i) {
         ncplane_printf_yx(app->detail, 18 + i, 0, "> %s", app->op_lines[i]);
+    }
+}
+
+static void draw_output(app_state* app) {
+    ncplane_erase(app->output);
+    ncplane_set_fg_default(app->output);
+    ncplane_set_bg_default(app->output);
+    ncplane_set_styles(app->output, NCSTYLE_NONE);
+    ncplane_putstr_yx(app->output, 0, 0, "Output");
+    ncplane_printf_yx(app->output, 1, 0, "status: %s", app->op_status[0] ? app->op_status : "(none)");
+    ncplane_putstr_yx(app->output, 3, 0, "native/commit output");
+    if (app->op_line_count == 0) {
+        ncplane_putstr_yx(app->output, 5, 0, "(no output yet)");
+        return;
+    }
+    int shown = app->op_line_count < 12 ? app->op_line_count : 12;
+    int start = app->op_line_count - shown;
+    for (int i = 0; i < shown; ++i) {
+        ncplane_printf_yx(app->output, 5 + i, 0, "%s", app->op_lines[start + i]);
     }
 }
 
@@ -673,19 +951,38 @@ static void draw_status(app_state* app) {
 
 static void draw(app_state* app) {
     draw_master(app);
+    draw_divider(app->divider_left);
     draw_detail(app);
+    draw_divider(app->divider_right);
+    draw_output(app);
     draw_status(app);
     draw_generation_modal(app);
 }
 
 int main(int argc, char** argv) {
-    if (argc != 2) {
-        fprintf(stderr, "usage: %s <warehouse_root>\n", argv[0]);
+    if (argc > 2) {
+        fprintf(stderr, "usage: %s [warehouse_root]\n", argv[0]);
         return 2;
     }
-    pp_uic_handle* h = pp_uic_open(argv[1]);
+    char warehouse_root[PATH_MAX];
+    char config_path[PATH_MAX];
+    if (!resolve_warehouse_root(argc, argv, warehouse_root, sizeof(warehouse_root), config_path, sizeof(config_path))) {
+        if (config_path[0]) {
+            fprintf(stderr,
+                    "[!] no warehouse root configured.\n"
+                    "Set PRIMEPARTS_WAREHOUSE_ROOT, pass [warehouse_root], or create %s with:\n"
+                    "warehouse_root=/media/extssd/research/dioph.pp/data/iceberg\n",
+                    config_path);
+        } else {
+            fprintf(stderr,
+                    "[!] no warehouse root configured.\n"
+                    "Set PRIMEPARTS_WAREHOUSE_ROOT or pass [warehouse_root].\n");
+        }
+        return 2;
+    }
+    pp_uic_handle* h = pp_uic_open(warehouse_root);
     if (!h) {
-        fprintf(stderr, "[!] pp_uic_open(%s) returned NULL\n", argv[1]);
+        fprintf(stderr, "[!] pp_uic_open(%s) returned NULL\n", warehouse_root);
         return 1;
     }
     const char* open_err = pp_uic_last_error(h);
@@ -707,12 +1004,18 @@ int main(int argc, char** argv) {
     ncplane_options base = {.rows = 1, .cols = 1};
     struct ncplane* master = ncplane_create(std, &base);
     struct ncplane* detail = ncplane_create(std, &base);
+    struct ncplane* output = ncplane_create(std, &base);
+    struct ncplane* divider_left = ncplane_create(std, &base);
+    struct ncplane* divider_right = ncplane_create(std, &base);
     struct ncplane* status = ncplane_create(std, &base);
     struct ncplane* modal = ncplane_create(std, &base);
-    if (!master || !detail || !status || !modal) {
+    if (!master || !detail || !output || !divider_left || !divider_right || !status || !modal) {
         fprintf(stderr, "[!] could not create UI planes\n");
         if (master) ncplane_destroy(master);
         if (detail) ncplane_destroy(detail);
+        if (output) ncplane_destroy(output);
+        if (divider_left) ncplane_destroy(divider_left);
+        if (divider_right) ncplane_destroy(divider_right);
         if (status) ncplane_destroy(status);
         if (modal) ncplane_destroy(modal);
         notcurses_stop(nc);
@@ -724,10 +1027,13 @@ int main(int argc, char** argv) {
         .nc = nc,
         .master = master,
         .detail = detail,
+        .output = output,
+        .divider_left = divider_left,
+        .divider_right = divider_right,
         .status = status,
         .modal = modal,
         .handle = h,
-        .warehouse_root = argv[1],
+        .warehouse_root = warehouse_root,
         .selected = 0,
         .tables = {
             {.key = "primes"},
@@ -737,9 +1043,10 @@ int main(int argc, char** argv) {
     app.op_status[0] = '\0';
     app.op_last_cmd[0] = '\0';
     app.pending_confirm = CONFIRM_NONE;
-    app.gen_num_primes = 1000000;
-    app.gen_batch_size = 500000;
-    app.gen_threads = 24;
+    app.gen_num_primes = 100000000;
+    app.gen_batch_size = 1000000;
+    long logical_cores = sysconf(_SC_NPROCESSORS_ONLN);
+    app.gen_threads = (logical_cores > 1) ? (logical_cores / 2) : 1;
     app.modal_rows = 0;
     app.modal_cols = 0;
     clear_op_lines(&app);
@@ -748,6 +1055,9 @@ int main(int argc, char** argv) {
         fprintf(stderr, "[!] terminal too small\n");
         ncplane_destroy(master);
         ncplane_destroy(detail);
+        ncplane_destroy(output);
+        ncplane_destroy(divider_left);
+        ncplane_destroy(divider_right);
         ncplane_destroy(status);
         ncplane_destroy(modal);
         notcurses_stop(nc);
@@ -763,6 +1073,9 @@ int main(int argc, char** argv) {
         ncinput in = {0};
         uint32_t key = notcurses_get_blocking(nc, &in);
         if (key == (uint32_t)-1) break;
+        if (in.evtype == NCTYPE_RELEASE || in.evtype == NCTYPE_REPEAT) {
+            continue;
+        }
 
         if (app.gen_modal_active) {
             if (key == '\t' || key == 'j' || key == NCKEY_DOWN || key == NCKEY_RIGHT) {
@@ -771,7 +1084,7 @@ int main(int argc, char** argv) {
                 retreat_generation_field(&app);
             } else if (key >= '0' && key <= '9') {
                 append_generation_digit(&app, (char)key);
-            } else if (key == 127 || key == 8) {
+            } else if (key == NCKEY_BACKSPACE || key == NCKEY_DEL || key == 127 || key == 8) {
                 backspace_generation_field(&app);
             } else if (key == NCKEY_ENTER || key == '\n' || key == '\r') {
                 if (parse_generation_buffers(&app)) {
@@ -781,7 +1094,7 @@ int main(int argc, char** argv) {
                     snprintf(app.op_status, sizeof(app.op_status), "launching generation");
                     draw(&app);
                     notcurses_render(nc);
-                    launch_generation_bg(&app);
+                    launch_generation_via_abi(&app);
                     refresh_status(&app);
                     app.op_busy = false;
                 }
@@ -803,20 +1116,10 @@ int main(int argc, char** argv) {
                 confirm_mode mode = app.pending_confirm;
                 clear_pending_confirm(&app);
                 if (mode == CONFIRM_SYNC_LIVE) {
-                    run_op_with_refresh(
-                        &app,
-                        nc,
-                        "running sync-hms",
-                        "timeout 900s pixi run sync-hms 2>&1");
-                } else if (mode == CONFIRM_GENERATE_BG) {
-                    app.op_busy = true;
-                    app.op_failed = false;
-                    snprintf(app.op_status, sizeof(app.op_status), "launching generation");
-                    draw(&app);
-                    notcurses_render(nc);
-                    launch_generation_bg(&app);
-                    refresh_status(&app);
-                    app.op_busy = false;
+                    char cmd[PATH_MAX * 2 + 256];
+                    if (build_rust_hms_sync_cmd(&app, false, cmd, sizeof(cmd))) {
+                        run_op_with_refresh(&app, nc, "running rust hms sync", cmd);
+                    }
                 }
             } else if (key == 'n' || key == 'N' || key == NCKEY_ESC) {
                 cancel_pending_confirm(&app);
@@ -843,6 +1146,7 @@ int main(int argc, char** argv) {
             case 'h':
             case NCKEY_UP:
             case NCKEY_LEFT:
+                /* Two-table selector: up/left toggles the same as down/right. */
                 app.selected = (app.selected + 1) % 2;
                 break;
             case '1':
@@ -865,15 +1169,16 @@ int main(int argc, char** argv) {
                     &app,
                     nc,
                     "running warehouse check",
-                    "timeout 300s PYTHONPATH=src python -m primeparts.native_iceberg --check-warehouse 2>&1");
+                    "timeout 300s pixi run python -m primeparts.native_iceberg --check-warehouse 2>&1");
                 break;
             case 's':
-                run_op_with_refresh(
-                    &app,
-                    nc,
-                    "running sync-hms dry-run",
-                    "timeout 600s pixi run sync-hms --dry-run 2>&1");
+            {
+                char cmd[PATH_MAX * 2 + 256];
+                if (build_rust_hms_sync_cmd(&app, true, cmd, sizeof(cmd))) {
+                    run_op_with_refresh(&app, nc, "running rust hms sync dry-run", cmd);
+                }
                 break;
+            }
             case 'S':
                 set_pending_confirm(
                     &app,
@@ -896,6 +1201,9 @@ int main(int argc, char** argv) {
 
     ncplane_destroy(master);
     ncplane_destroy(detail);
+    ncplane_destroy(output);
+    ncplane_destroy(divider_left);
+    ncplane_destroy(divider_right);
     ncplane_destroy(status);
     ncplane_destroy(modal);
     notcurses_stop(nc);
