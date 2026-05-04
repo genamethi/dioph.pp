@@ -47,7 +47,20 @@ Build and smoke test:
 pixi run native-build
 pixi run native-test
 native/build/primeparts-bench-core --start-idx 1 --count 1000000
-native/build/primeparts-tui /media/extssd/research/dioph.pp/data/iceberg
+native/build/primeparts-tui
+```
+
+`primeparts-tui` warehouse root resolution order:
+
+1. CLI argument: `native/build/primeparts-tui /path/to/iceberg`
+2. Env var: `PRIMEPARTS_WAREHOUSE_ROOT=/path/to/iceberg`
+3. Config file: `~/.config/primeparts/tui.conf`
+
+Config file format:
+
+```ini
+# ~/.config/primeparts/tui.conf
+warehouse_root=/media/extssd/research/dioph.pp/data/iceberg
 ```
 
 `primeparts-tui` controls:
@@ -119,20 +132,8 @@ pressure on cache, memory bandwidth, allocator arenas, and writer buffers.
 Benchmark `-p 12` versus `-p 24` on the target machine before making logical
 cores the normal production setting.
 
-One caveat matters: `primeparts-generate` can use at most
-`min(threads, chunks_per_file)` workers for one file group. The coordinator
-therefore defaults `chunks_per_file=max(4, threads)`. Override it when tuning
-file size or memory:
-
-```sh
-primeparts -n 1000000000 -b 100000 -p 12 --cpf 12
-primeparts -n 1000000000 --chunk-primes 500000 --threads 24 --cpf 24
-```
-
-Larger `chunks_per_file` improves CPU utilization and produces larger Parquet
-files. Smaller values reduce per-group memory and make checkpoint progress more
-granular. For production, keep `chunks_per_file >= threads` unless deliberately
-throttling memory.
+`primeparts-generate` now chooses file-group width internally from thread and
+chunk settings. The user-facing controls are thread count and chunk size:
 
 Useful native CLI aliases:
 
@@ -140,14 +141,13 @@ Useful native CLI aliases:
 |---|---|---|
 | `--threads` | `-p`, `--processes` | Native worker thread count. |
 | `--chunk-primes` | `-b`, `--batch-size` | Materialized prime chunk size. |
-| `--cpf` | `--native-chunks-per-file` | Chunks per native file group. |
 | `--ckpt` | `--checkpoint-primes` | Production checkpoint size in primes. |
 | `--logical` | `--logical-cores` | Use logical core count when `-p` is omitted. |
 
 Example bounded run:
 
 ```sh
-primeparts -n 1000000000 --chunk-primes 500000 --threads 12 --cpf 12 --ckpt 100000000
+primeparts -n 1000000000 --chunk-primes 500000 --threads 12 --ckpt 100000000
 ```
 
 ## Shell completion
@@ -179,17 +179,15 @@ native/build/primeparts-generate \
   --count 10000000 \
   --temp \
   --chunk-primes 500000 \
-  --chunks-per-file 24 \
   --threads 24
 
 PYTHONPATH=src python -m primeparts.native_iceberg \
-  --manifest data/tmp/iceberg_temp_native_YYYYMMDD_HHMMSS/native_files.jsonl \
+  --manifest /media/extssd/research/dioph.pp/data/tmp/iceberg_temp_native_YYYYMMDD_HHMMSS/native_files.jsonl \
   --temp
 ```
 
-`--chunks-per-file` is the main memory/file-size control: `24` materialized
-`500k` chunks at the current 64-bit tail produced two Parquet files totaling
-about `109MB` and ran at `2.24M primes/s` on this machine.
+On this machine, a temp run with `--chunk-primes 500000 --threads 24` produced
+about `109MB` of Parquet and ran around `2.24M primes/s`.
 
 ## Recovery and warehouse health
 

@@ -1,4 +1,5 @@
 #include "primeparts/core.h"
+#include "primeparts/generate.h"
 
 #include <arrow/api.h>
 #include <arrow/c/bridge.h>
@@ -7,6 +8,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cinttypes>
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -42,7 +44,6 @@ namespace fs = std::filesystem;
 namespace {
 
 constexpr int64_t kDefaultChunkPrimes = 500000;
-constexpr int64_t kDefaultChunksPerFile = 4;
 
 // --- BEGIN timing instrumentation (remove with single revert) ---
 // Aggregated phase totals across all threads; nanoseconds.
@@ -50,13 +51,25 @@ std::atomic<int64_t> g_compute_ns{0};
 std::atomic<int64_t> g_arrow_build_ns{0};
 std::atomic<int64_t> g_write_ns{0};
 std::atomic<int64_t> g_materialize_wall_ns{0};
+thread_local std::string g_last_error;
 // --- END timing instrumentation ---
+
+void set_last_error(std::string msg) { g_last_error = std::move(msg); }
+
+void log_line(const pp_gen_callbacks* callbacks, const char* fmt, ...) {
+  if (!callbacks || !callbacks->on_log) return;
+  char buf[512];
+  va_list args;
+  va_start(args, fmt);
+  std::vsnprintf(buf, sizeof(buf), fmt, args);
+  va_end(args);
+  callbacks->on_log(callbacks->user_data, buf);
+}
 
 struct Options {
   int64_t start_idx = 0;
   int64_t count = -1;
   int64_t chunk_primes = kDefaultChunkPrimes;
-  int64_t chunks_per_file = kDefaultChunksPerFile;
   int64_t threads = 0;
   int32_t commit_seq = 0;
   bool temp = false;
@@ -260,12 +273,11 @@ void usage(FILE* stream) {
       "Native C core + iceberg-cpp Parquet writer.\n"
       "\n"
       "Options:\n"
-      "  --temp                    Create data/tmp/iceberg_temp_native_<ts>/warehouse\n"
+      "  --temp                    Create /media/extssd/research/dioph.pp/data/tmp/iceberg_temp_native_<ts>/warehouse\n"
       "  --warehouse PATH          Warehouse root to write under\n"
       "  --manifest PATH           JSONL file list to write\n"
       "  --chunk-primes N          Materialization chunk size (default: 500000)\n"
-      "  --chunks-per-file N       Materialized chunks per Parquet file (default: 4)\n"
-      "  --threads N               Materialization threads per file group (default: hw)\n"
+      "  --threads N               Materialization threads (default: hw)\n"
       "  --help                    Show this help\n");
 }
 
@@ -350,7 +362,9 @@ std::string utc_timestamp_iso() {
 
 fs::path default_temp_root() {
   const char* env = std::getenv("FUNBUNS_DATA_DIR");
-  fs::path data_dir = env != nullptr && env[0] != '\0' ? fs::path(env) : fs::path("data");
+  fs::path data_dir = env != nullptr && env[0] != '\0'
+                          ? fs::path(env)
+                          : fs::path("/media/extssd/research/dioph.pp/data");
   return data_dir / "tmp" / ("iceberg_temp_native_" + utc_timestamp_compact());
 }
 
@@ -420,31 +434,38 @@ std::shared_ptr<iceberg::Schema> decomp_schema() {
 }
 
 std::shared_ptr<arrow::Array> int64_array(const int64_t* values, int64_t length) {
-  auto data = arrow::ArrayData::Make(
-      arrow::int64(), length,
-      std::vector<std::shared_ptr<arrow::Buffer>>{
-          nullptr, arrow::Buffer::Wrap(values, length)},
-      0);
-  return arrow::MakeArray(data);
+  arrow::Int64Builder builder;
+  if (length > 0) {
+    auto status = builder.AppendValues(values, length);
+    if (!status.ok()) {
+      return nullptr;
+    }
+  }
+  std::shared_ptr<arrow::Array> out;
+  if (!builder.Finish(&out).ok()) {
+    return nullptr;
+  }
+  return out;
 }
 
 std::shared_ptr<arrow::Array> int32_array(const int32_t* values, int64_t length) {
-  auto data = arrow::ArrayData::Make(
-      arrow::int32(), length,
-      std::vector<std::shared_ptr<arrow::Buffer>>{
-          nullptr, arrow::Buffer::Wrap(values, length)},
-      0);
-  return arrow::MakeArray(data);
+  arrow::Int32Builder builder;
+  if (length > 0) {
+    auto status = builder.AppendValues(values, length);
+    if (!status.ok()) {
+      return nullptr;
+    }
+  }
+  std::shared_ptr<arrow::Array> out;
+  if (!builder.Finish(&out).ok()) {
+    return nullptr;
+  }
+  return out;
 }
 
 std::shared_ptr<arrow::Array> commit_seq_array(int32_t commit_seq, int64_t length) {
   std::vector<int32_t> values(static_cast<size_t>(length), commit_seq);
-  auto data = arrow::ArrayData::Make(
-      arrow::int32(), length,
-      std::vector<std::shared_ptr<arrow::Buffer>>{
-          nullptr, arrow::Buffer::FromVector(std::move(values))},
-      0);
-  return arrow::MakeArray(data);
+  return int32_array(values.data(), length);
 }
 
 std::shared_ptr<arrow::RecordBatch> make_primes_batch(const pp_batch_result& batch,
@@ -481,6 +502,10 @@ std::shared_ptr<arrow::RecordBatch> make_decomp_batch(const pp_batch_result& bat
 bool write_record_batch(iceberg::Writer& writer,
                         const std::shared_ptr<arrow::RecordBatch>& batch,
                         std::string* error) {
+  if (!batch) {
+    *error = "failed to build arrow record batch";
+    return false;
+  }
   ArrowArray exported{};
   auto status = arrow::ExportRecordBatch(*batch, &exported);
   if (!status.ok()) {
@@ -595,8 +620,9 @@ bool materialize_group(int64_t* next_idx, int64_t end_idx, const Options& option
   int64_t remaining_total = end_idx - *next_idx;
   int64_t chunk_count =
       (remaining_total + options.chunk_primes - 1) / options.chunk_primes;
-  if (chunk_count > options.chunks_per_file) {
-    chunk_count = options.chunks_per_file;
+  int64_t max_group_chunks = options.threads > 0 ? options.threads : 1;
+  if (chunk_count > max_group_chunks) {
+    chunk_count = max_group_chunks;
   }
 
   std::vector<int64_t> starts(static_cast<size_t>(chunk_count));
@@ -690,6 +716,18 @@ fs::path table_file_path(const fs::path& warehouse, const std::string& table,
          ("commit_seq=" + std::to_string(commit_seq)) / name;
 }
 
+bool table_file_exists(const fs::path& warehouse, int32_t commit_seq) {
+  return fs::exists(table_file_path(warehouse, "primes", commit_seq)) ||
+         fs::exists(table_file_path(warehouse, "decompositions", commit_seq));
+}
+
+int32_t next_unused_commit_seq(const fs::path& warehouse, int32_t commit_seq) {
+  while (table_file_exists(warehouse, commit_seq)) {
+    ++commit_seq;
+  }
+  return commit_seq;
+}
+
 void append_manifest(std::ofstream& out, const WrittenFile& file) {
   out << "{\"table\":\"" << json_escape(file.table) << "\","
       << "\"path\":\"" << json_escape(fs::absolute(file.path).string()) << "\","
@@ -705,7 +743,6 @@ bool parse_args(int argc, char** argv, Options* options) {
       {"start-idx", required_argument, nullptr, 1000},
       {"count", required_argument, nullptr, 'n'},
       {"chunk-primes", required_argument, nullptr, 'c'},
-      {"chunks-per-file", required_argument, nullptr, 1001},
       {"threads", required_argument, nullptr, 1003},
       {"warehouse", required_argument, nullptr, 'w'},
       {"manifest", required_argument, nullptr, 'm'},
@@ -715,7 +752,7 @@ bool parse_args(int argc, char** argv, Options* options) {
   };
 
   int opt;
-  while ((opt = getopt_long(argc, argv, "n:c:w:m:t:h", long_options, nullptr)) != -1) {
+  while ((opt = getopt_long(argc, argv, "n:c:w:m:h", long_options, nullptr)) != -1) {
     switch (opt) {
       case 1000:
         if (!parse_i64(optarg, &options->start_idx)) {
@@ -735,14 +772,7 @@ bool parse_args(int argc, char** argv, Options* options) {
           return false;
         }
         break;
-      case 1001:
-        if (!parse_i64(optarg, &options->chunks_per_file)) {
-          std::fprintf(stderr, "invalid --chunks-per-file: %s\n", optarg);
-          return false;
-        }
-        break;
       case 1003:
-      case 't':
         if (!parse_i64(optarg, &options->threads)) {
           std::fprintf(stderr, "invalid --threads: %s\n", optarg);
           return false;
@@ -766,7 +796,7 @@ bool parse_args(int argc, char** argv, Options* options) {
   }
 
   if (options->start_idx <= 0 || options->count < 0 || options->chunk_primes <= 0 ||
-      options->chunks_per_file <= 0 || options->threads < 0) {
+      options->threads < 0) {
     usage(stderr);
     return false;
   }
@@ -795,16 +825,17 @@ bool parse_args(int argc, char** argv, Options* options) {
 
 }  // namespace
 
-int main(int argc, char** argv) {
-  Options options;
-  if (!parse_args(argc, argv, &options)) {
-    return 2;
-  }
-
+int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp_gen_result* out) {
   std::string error;
+  if (out) {
+    std::memset(out, 0, sizeof(*out));
+    out->start_idx = options.start_idx;
+    out->count = options.count;
+  }
   int init_status = pp_init();
   if (init_status != PP_OK) {
-    std::cerr << "pp_init failed: " << pp_status_message(init_status) << "\n";
+    set_last_error(std::string("pp_init failed: ") + pp_status_message(init_status));
+    log_line(callbacks, "%s", g_last_error.c_str());
     return 1;
   }
 
@@ -815,7 +846,8 @@ int main(int argc, char** argv) {
     fs::create_directories(options.manifest.parent_path());
     std::ofstream manifest(options.manifest, std::ios::out | std::ios::trunc);
     if (!manifest) {
-      std::cerr << "failed to open manifest: " << options.manifest << "\n";
+      set_last_error("failed to open manifest: " + options.manifest.string());
+      log_line(callbacks, "%s", g_last_error.c_str());
       pp_shutdown();
       return 1;
     }
@@ -836,22 +868,32 @@ int main(int argc, char** argv) {
 
     int64_t total_chunks =
         (options.count + options.chunk_primes - 1) / options.chunk_primes;
+    int64_t group_width = options.threads > 0 ? options.threads : 1;
     int64_t total_groups =
-        (total_chunks + options.chunks_per_file - 1) / options.chunks_per_file;
+        (total_chunks + group_width - 1) / group_width;
     Progress progress(total_groups, options.count);
     StopMonitor stop_monitor;
     int64_t groups_done = 0;
     progress.update(0, 0);
 
     while (next_idx < end_idx) {
+      int32_t commit_seq = next_unused_commit_seq(options.warehouse, next_commit_seq);
+      if (commit_seq != next_commit_seq) {
+        log_line(callbacks,
+                 "skipping existing data files for commit_seq %d..%d",
+                 next_commit_seq,
+                 commit_seq - 1);
+        next_commit_seq = commit_seq;
+      }
       FileGroup group;
       if (!materialize_group(&next_idx, end_idx, options, &group, &error)) {
-        std::cerr << "materialize failed: " << error << "\n";
+        set_last_error("materialize failed: " + error);
+        log_line(callbacks, "%s", g_last_error.c_str());
         pp_shutdown();
         return 1;
       }
 
-      int32_t commit_seq = next_commit_seq++;
+      next_commit_seq++;
       if (first_p == 0 || group.first_p < first_p) {
         first_p = group.first_p;
       }
@@ -872,7 +914,8 @@ int main(int argc, char** argv) {
                                             group.prime_rows, group.k_histogram);
       if (!write_parquet_file(primes_file.path, p_schema, primes_metadata, group.batches,
                               commit_seq, false, &primes_file, &error)) {
-        std::cerr << "write primes failed: " << error << "\n";
+        set_last_error("write primes failed: " + error);
+        log_line(callbacks, "%s", g_last_error.c_str());
         pp_shutdown();
         return 1;
       }
@@ -895,7 +938,8 @@ int main(int argc, char** argv) {
                                               group.k_histogram);
         if (!write_parquet_file(decomp_file.path, d_schema, decomp_metadata, group.batches,
                                 commit_seq, true, &decomp_file, &error)) {
-          std::cerr << "write decompositions failed: " << error << "\n";
+          set_last_error("write decompositions failed: " + error);
+          log_line(callbacks, "%s", g_last_error.c_str());
           pp_shutdown();
           return 1;
         }
@@ -908,10 +952,18 @@ int main(int argc, char** argv) {
       total_decomp += group.decomp_rows;
       groups_done++;
       progress.update(groups_done, total_primes);
+      log_line(
+          callbacks,
+          "group %" PRId64 "/%" PRId64 " complete | primes=%" PRId64 " | files=%" PRId64,
+          groups_done,
+          total_groups,
+          total_primes,
+          files_written);
 
       manifest.flush();
       if (!manifest) {
-        std::cerr << "failed to flush manifest: " << options.manifest << "\n";
+        set_last_error("failed to flush manifest: " + options.manifest.string());
+        log_line(callbacks, "%s", g_last_error.c_str());
         pp_shutdown();
         return 1;
       }
@@ -928,24 +980,21 @@ int main(int argc, char** argv) {
         std::chrono::duration<double>(run_end - run_start).count();
     double primes_per_s =
         elapsed_s > 0.0 ? static_cast<double>(total_primes) / elapsed_s : 0.0;
-    std::cout << "{"
-              << "\"warehouse\":\"" << json_escape(fs::absolute(options.warehouse).string())
-              << "\","
-              << "\"manifest\":\"" << json_escape(fs::absolute(options.manifest).string())
-              << "\","
-              << "\"start_idx\":" << options.start_idx << ","
-              << "\"count\":" << options.count << ","
-              << "\"prime_rows\":" << total_primes << ","
-              << "\"decomp_rows\":" << total_decomp << ","
-              << "\"files_written\":" << files_written << ","
-              << "\"bytes_written\":" << bytes_written << ","
-              << "\"first_p\":" << first_p << ","
-              << "\"last_p\":" << last_p << ","
-              << "\"stop_requested\":" << (stop_requested ? "true" : "false") << ","
-              << "\"elapsed_s\":" << elapsed_s << ","
-              << "\"primes_per_s\":" << primes_per_s << "}\n";
+    if (out) {
+      out->prime_rows = total_primes;
+      out->decomp_rows = total_decomp;
+      out->files_written = files_written;
+      out->bytes_written = bytes_written;
+      out->first_p = first_p;
+      out->last_p = last_p;
+      out->stop_requested = stop_requested ? 1 : 0;
+      out->elapsed_s = elapsed_s;
+      out->primes_per_s = primes_per_s;
+    }
+    log_line(callbacks, "generation finished | primes=%" PRId64 " | rate=%.0f/s", total_primes, primes_per_s);
   } catch (const std::exception& exc) {
-    std::cerr << "native writer failed: " << exc.what() << "\n";
+    set_last_error(std::string("native writer failed: ") + exc.what());
+    log_line(callbacks, "%s", g_last_error.c_str());
     pp_shutdown();
     return 1;
   }
@@ -953,3 +1002,81 @@ int main(int argc, char** argv) {
   pp_shutdown();
   return 0;
 }
+
+extern "C" {
+
+const char* pp_gen_last_error(void) { return g_last_error.c_str(); }
+
+int pp_gen_run(const pp_gen_options* options,
+               const pp_gen_callbacks* callbacks,
+               pp_gen_result* out) {
+  if (!options) {
+    set_last_error("null options");
+    return 1;
+  }
+  Options internal;
+  internal.start_idx = options->start_idx;
+  internal.count = options->count;
+  internal.chunk_primes = options->chunk_primes > 0 ? options->chunk_primes : kDefaultChunkPrimes;
+  internal.threads = options->threads;
+  internal.commit_seq = options->commit_seq_start;
+  internal.temp = options->temp != 0;
+  if (options->warehouse) internal.warehouse = options->warehouse;
+  if (options->manifest) internal.manifest = options->manifest;
+  if (internal.start_idx <= 0 || internal.count < 0 || internal.chunk_primes <= 0 || internal.threads < 0) {
+    set_last_error("invalid pp_gen_options values");
+    return 1;
+  }
+  if (internal.warehouse.empty()) {
+    if (!internal.temp) {
+      set_last_error("either warehouse or temp mode is required");
+      return 1;
+    }
+    fs::path temp_root = default_temp_root();
+    internal.warehouse = temp_root / "warehouse";
+    if (internal.manifest.empty()) {
+      internal.manifest = temp_root / "native_files.jsonl";
+    }
+  } else if (internal.manifest.empty()) {
+    internal.manifest = internal.warehouse / "native_files.jsonl";
+  }
+  if (internal.threads == 0) {
+    unsigned hw = std::thread::hardware_concurrency();
+    internal.threads = hw == 0 ? 1 : static_cast<int64_t>(hw);
+  }
+  return run_generation(internal, callbacks, out);
+}
+
+}  // extern "C"
+
+#ifndef PRIMEPARTS_GENERATE_NO_MAIN
+int main(int argc, char** argv) {
+  Options options;
+  if (!parse_args(argc, argv, &options)) {
+    return 2;
+  }
+  pp_gen_result out{};
+  int rc = run_generation(options, nullptr, &out);
+  if (rc != 0) {
+    std::cerr << pp_gen_last_error() << "\n";
+    return rc;
+  }
+  std::cout << "{"
+            << "\"warehouse\":\"" << json_escape(fs::absolute(options.warehouse).string())
+            << "\","
+            << "\"manifest\":\"" << json_escape(fs::absolute(options.manifest).string())
+            << "\","
+            << "\"start_idx\":" << out.start_idx << ","
+            << "\"count\":" << out.count << ","
+            << "\"prime_rows\":" << out.prime_rows << ","
+            << "\"decomp_rows\":" << out.decomp_rows << ","
+            << "\"files_written\":" << out.files_written << ","
+            << "\"bytes_written\":" << out.bytes_written << ","
+            << "\"first_p\":" << out.first_p << ","
+            << "\"last_p\":" << out.last_p << ","
+            << "\"stop_requested\":" << (out.stop_requested ? "true" : "false") << ","
+            << "\"elapsed_s\":" << out.elapsed_s << ","
+            << "\"primes_per_s\":" << out.primes_per_s << "}\n";
+  return 0;
+}
+#endif

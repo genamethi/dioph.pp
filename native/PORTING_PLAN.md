@@ -80,7 +80,7 @@ Verified:
 - `pixi run native-build`
 - `warehouse_standing()` returns OK against the compacted production
   warehouse at `/media/extssd/research/dioph.pp/data/iceberg`.
-- `make -C native build/primeparts-tui CC=cc CXX=c++` builds the notcurses UI.
+- `make -C native build/primeparts-tui CC=/usr/bin/gcc CXX=/usr/bin/g++` builds the notcurses UI.
 - Native C output matches Sage for the first 100 prime ranks.
 - Core-only throughput on this machine:
   `native/build/primeparts-bench-core --start-idx 1 --count 100000000 --threads 24`
@@ -91,7 +91,7 @@ Verified:
   materializing `18,613,680` decomposition rows into `20` chunks.
   Total used column bytes were `566,728,320`; total allocated bytes were
   `629,145,600`; max chunk allocation was `31,457,280` bytes.
-- `FUNBUNS_DATA_DIR=/tmp/primeparts-native-data HOME=/tmp pixi run primeparts -n 10 -b 10 --temp`
+- `pixi run primeparts -n 10 -b 10 --temp` (defaults to `/media/extssd/research/dioph.pp/data/tmp/...`)
   writes and commits temp Iceberg tables.
 - `iceberg-cpp` builds from the Apache GitHub checkout with
   `-Wno-error=free-nonheap-object` for a GCC 15 false positive in
@@ -285,8 +285,8 @@ Status as of 2026-05-03:
   modal is open, `Tab` / `j` / arrows move fields, digits append, `Backspace`
   deletes, `Enter` launches, and `Esc` cancels.
 - In this environment, native notcurses linkage is ABI-compatible with system
-  compilers; use `CC=cc CXX=c++` (now baked into pixi `native-build` and
-  `native-test` tasks).
+  compilers; use `CC=/usr/bin/gcc CXX=/usr/bin/g++` (now baked into pixi
+  `native-build` and `native-test` tasks).
 
 Direction:
 
