@@ -30,19 +30,28 @@ Recent unblockers:
 
 Remaining operational blockers:
 
-- The Rust commit path still does not interoperate with the current
-  PyIceberg-created SQLite catalog schema.
+- Rust commit integration still needs full production validation end-to-end in
+  this warehouse (append + HMS sync paths under real run conditions).
 - The first-screen native TUI exists with actionable ops, but deeper
   operational workflows are still pending (query/browse execution panes,
   richer recovery UX, and stronger safeguards).
 
 Practical deferrals:
 
-- Keep `sync_hms.py` as the HMS sync tool until Rust catalog compatibility is
-  resolved.
+- Keep `sync_hms.py` as the HMS sync tool until Rust HMS parity is fully
+  validated in production.
 - Keep Python/PyIceberg as the commit bridge for production appends.
 - Treat the Rust commit binary as a partial port and test target, not as a
   replacement, until it can append against the live SQLite catalog.
+
+Rust/truncation clarification:
+
+- The compacted production partition spec is `truncate[10000000000](p)` with
+  `p_trunc=...` directories.
+- That truncation spec is not the current Rust-commit schema blocker.
+- The concrete catalog mismatch was missing `iceberg_tables.iceberg_type` in
+  older SQLite catalogs; `primeparts-commit` now performs a schema-evolution
+  step to add/backfill this column before opening SqlCatalog.
 
 ## Current Slice
 

@@ -81,10 +81,15 @@ multiprocessing path.
 ```text
 primeparts -n N
     └── primeparts-generate         # C core + iceberg-cpp Parquet
-        └── data/.../funbuns/{primes,decompositions}/data/<partition>/*.parquet
+        └── /media/extssd/research/dioph.pp/data/.../funbuns/{primes,decompositions}/data/<partition>/*.parquet
         └── native_files.jsonl
     └── commit_native_manifest      # PyIceberg add_files
 ```
+
+All generation/commit paths share the same project data root:
+`/media/extssd/research/dioph.pp/data`. Temp runs, manifests, and intermediate
+files should live under that tree (for example `.../data/tmp/...`), not inside
+the repository checkout.
 
 As of the May 2026 compaction, production table partition directories are
 `p_trunc=...`. Older examples and the native generator's pre-compaction append
@@ -224,6 +229,12 @@ native C/C++ -> iceberg-cpp Parquet files -> native_files.jsonl -> PyIceberg add
 That bridge has been verified on a temp 10M-prime write with Polars reading
 back `10,000,000` prime rows and `18,613,680` decomposition rows from the
 registered Iceberg tables.
+
+Rust `primeparts-commit` note: the current production partitioning
+`truncate[10000000000](p)` is not itself the Rust-commit blocker. The main
+catalog compatibility issue was SQLite schema drift (`iceberg_tables.iceberg_type`);
+the Rust path now includes a schema-evolution step to add/backfill that column
+before opening SqlCatalog.
 
 ## Iceberg Writer Direction
 
