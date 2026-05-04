@@ -391,7 +391,7 @@ static int launch_generation_via_abi(app_state* app) {
     char warehouse_path[PATH_MAX];
     char manifest_path[PATH_MAX];
     snprintf(warehouse_path, sizeof(warehouse_path), "%s/warehouse", app->warehouse_root);
-    snprintf(manifest_path, sizeof(manifest_path), "%s/files_tui_%s.jsonl", app->warehouse_root, ts);
+    snprintf(manifest_path, sizeof(manifest_path), "%s/files_%s.jsonl", app->warehouse_root, ts);
     pp_gen_options opts = {
         .start_idx = start_idx,
         .count = app->gen_num_primes,
