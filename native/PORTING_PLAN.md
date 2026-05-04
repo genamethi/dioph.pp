@@ -40,7 +40,7 @@ Practical deferrals:
 
 - Keep `sync_hms.py` as the HMS sync tool until Rust HMS parity is fully
   validated in production.
-- Keep Python/PyIceberg as the commit bridge for production appends.
+- Keep Python/PyIceberg as the commit bridge for production appends (transitioning to Rust currently).
 - Treat the Rust commit binary as a partial port and test target, not as a
   replacement, until it can append against the live SQLite catalog.
 
