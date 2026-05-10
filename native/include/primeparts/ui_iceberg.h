@@ -50,6 +50,10 @@ int64_t pp_uic_max_p(pp_uic_handle* h, const char* table);
  * -1 on error. */
 int64_t pp_uic_total_rows(pp_uic_handle* h, const char* table);
 
+/* Maximum commit sequence from current snapshot summary property
+ * `funbuns.max_commit_seq`. Returns -1 on error or missing summary. */
+int64_t pp_uic_max_commit_seq(pp_uic_handle* h, const char* table);
+
 /* All snapshots for `table`, ordered by sequence_number. JSON shape:
  *   {"snapshots":[
  *     {"snapshot_id":..., "parent_id":..., "sequence_number":...,

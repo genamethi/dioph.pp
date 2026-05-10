@@ -100,5 +100,6 @@ funbuns_native/Cargo.lock
 pixi.lock
 native/vendor
 native/data/tmp/
+native/bin/nth_prime_boundaries
 .codex
 .mcp.json

@@ -101,6 +101,20 @@ int64_t pp_nth_prime(int64_t n)
     return primecount_nth_prime(n);
 }
 
+int64_t pp_next_prime(int64_t n)
+{
+    uint64_t p;
+
+    if (n < 0) {
+        return -1;
+    }
+    p = primesieve_nth_prime(1, (uint64_t)n);
+    if (p == PRIMESIEVE_ERROR || p > (uint64_t)INT64_MAX) {
+        return -1;
+    }
+    return (int64_t)p;
+}
+
 int64_t pp_previous_prime(int64_t n)
 {
     uint64_t p;

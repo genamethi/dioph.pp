@@ -379,6 +379,29 @@ int64_t pp_uic_total_rows(pp_uic_handle* h, const char* table) {
     return total;
 }
 
+int64_t pp_uic_max_commit_seq(pp_uic_handle* h, const char* table) {
+    if (!h || !table) return -1;
+    auto* meta = h->metadata_for(table);
+    if (!meta) return -1;
+
+    const uic_snapshot* snap = current_snapshot(*meta);
+    if (!snap) {
+        h->last_error = "current snapshot not found in metadata";
+        return -1;
+    }
+    auto it = snap->summary.find("funbuns.max_commit_seq");
+    if (it == snap->summary.end()) {
+        h->last_error = "missing funbuns.max_commit_seq summary";
+        return -1;
+    }
+    auto parsed = parse_i64(it->second);
+    if (!parsed.has_value()) {
+        h->last_error = "invalid funbuns.max_commit_seq summary value: " + it->second;
+        return -1;
+    }
+    return *parsed;
+}
+
 char* pp_uic_list_snapshots_json(pp_uic_handle* h, const char* table) {
     if (!h || !table) return nullptr;
     auto* meta = h->metadata_for(table);

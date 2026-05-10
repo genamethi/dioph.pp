@@ -8,12 +8,12 @@ version = "1.2.0"
 [tasks]
 kube-down = "scripts/kube-down.sh"
 kube-up = "scripts/kube-up.sh"
-native-build = "make -C native CC=cc CXX=c++"
+native-build = "make -C native CC=/usr/bin/gcc CXX=/usr/bin/g++"
 native-bench-core = "native/build/primeparts-bench-core --start-idx 1 --count 1000000"
 native-bench-materialize = "native/build/primeparts-bench-materialize --start-idx 1 --count 1000000 --chunk-primes 500000"
-native-generate = "native/build/primeparts-generate --start-idx 1 --count 1000000 --temp --chunk-primes 500000 --chunks-per-file 4"
+native-generate = "native/build/primeparts-generate --start-idx 1 --count 1000000 --temp --chunk-primes 500000"
 native-commit = "PYTHONPATH=src python -m primeparts.native_iceberg"
-native-test = "make -C native test CC=cc CXX=c++"
+native-test = "make -C native test CC=/usr/bin/gcc CXX=/usr/bin/g++"
 completion-zsh = "register-python-argcomplete --shell zsh primeparts"
 completion-bash = "register-python-argcomplete --shell bash primeparts"
 sync-hms = "python scripts/sync_hms.py"
@@ -77,6 +77,7 @@ funbuns = { path = ".", editable = true }
 pyhive = ">=0.7.0, <0.8"
 thrift-sasl = ">=0.4.3, <0.5"
 pure-sasl = ">=0.6.2, <0.7"
+pyiceberg-core = ">=0.9.1, <0.10"
 
 [environments]
 dev = ["dev"]

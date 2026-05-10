@@ -58,6 +58,7 @@ size_t pp_batch_result_allocated_bytes(const pp_batch_result *result);
 
 int64_t pp_prime_pi(int64_t n);
 int64_t pp_nth_prime(int64_t n);
+int64_t pp_next_prime(int64_t n);
 int64_t pp_previous_prime(int64_t n);
 
 int pp_is_prime_power_u64(uint64_t n, uint64_t *base, int32_t *exponent);

@@ -37,11 +37,6 @@ def main():
                      dest='logical_cores',
                      help='Use logical CPU count for the default worker count '
                           '(default uses physical cores; ignored when -p is set)')
-    gen.add_argument('--cpf', '--native-chunks-per-file', type=int, default=None, metavar='N',
-                     dest='native_chunks_per_file',
-                     help='Native chunks per Parquet file group '
-                          '(default: max(4, worker count); native workers used per '
-                          'group are min(threads, chunks_per_file))')
     gen.add_argument('--ckpt', '--checkpoint-primes', type=int, default=None, metavar='N',
                      dest='native_checkpoint_primes',
                      help='Native production checkpoint size in primes '
@@ -76,8 +71,6 @@ def main():
     args = parser.parse_args()
     if args.processes is not None and args.processes <= 0:
         parser.error("-p/--processes must be positive")
-    if args.native_chunks_per_file is not None and args.native_chunks_per_file <= 0:
-        parser.error("--native-chunks-per-file must be positive")
     if args.native_checkpoint_primes is not None and args.native_checkpoint_primes <= 0:
         parser.error("--checkpoint-primes must be positive")
 
@@ -98,20 +91,14 @@ def main():
         else:
             cores = psutil.cpu_count(logical=args.logical_cores) or psutil.cpu_count(logical=True) or 1
             core_kind = "logical cores" if args.logical_cores else "physical cores"
-        native_chunks_per_file = args.native_chunks_per_file
-        if native_chunks_per_file is None:
-            native_chunks_per_file = max(4, cores)
         print(
-            f"Using native pipeline: {cores} threads ({core_kind}, primeparts-generate); "
-            f"chunks_per_file={native_chunks_per_file}"
+            f"Using native pipeline: {cores} threads ({core_kind}, primeparts-generate)"
         )
     elif args.processes is not None:
         cores = args.processes
-        native_chunks_per_file = None
         print(f"Using {cores} workers (user-specified)")
     else:
         cores = psutil.cpu_count(logical=args.logical_cores) or psutil.cpu_count(logical=True) or 1
-        native_chunks_per_file = None
         core_kind = "logical cores" if args.logical_cores else "physical cores"
         print(f"Using {cores} workers ({core_kind})")
 
@@ -145,7 +132,6 @@ def main():
             commit_seq=commit_seq,
             num_primes=args.num_primes,
             batch_size=args.batch_size,
-            chunks_per_file=native_chunks_per_file,
             checkpoint_primes=args.native_checkpoint_primes,
             threads=cores,
             warehouse=warehouse,
@@ -199,7 +185,7 @@ def main():
             "--chunk-primes", str(args.batch_size),
         ]
         if use_native:
-            resume += ["--threads", str(cores), "--cpf", str(native_chunks_per_file)]
+            resume += ["--threads", str(cores)]
             if args.native_checkpoint_primes is not None:
                 resume += ["--ckpt", str(args.native_checkpoint_primes)]
         else:

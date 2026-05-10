@@ -95,7 +95,7 @@ from .utils import get_config
 # Constants
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 NAMESPACE = "funbuns"
 PRIMES_IDENT = f"{NAMESPACE}.primes"
 DECOMP_IDENT = f"{NAMESPACE}.decompositions"
@@ -105,6 +105,7 @@ PRIMES_SCHEMA = Schema(
     NestedField(1, "p", LongType(), required=False),
     NestedField(2, "k", IntegerType(), required=False),
     NestedField(3, "commit_seq", IntegerType(), required=False),
+    NestedField(4, "prime_rank", LongType(), required=False),
 )
 
 DECOMP_SCHEMA = Schema(
@@ -113,6 +114,7 @@ DECOMP_SCHEMA = Schema(
     NestedField(3, "n_k", IntegerType(), required=False),
     NestedField(4, "q_k", LongType(), required=False),
     NestedField(5, "commit_seq", IntegerType(), required=False),
+    NestedField(6, "prime_rank", LongType(), required=False),
 )
 
 PRIMES_PARTITION_SPEC = PartitionSpec(
@@ -134,9 +136,21 @@ TARGET_FILE_SIZE_BYTES = 1 << 30        # 1 GiB
 ROW_GROUP_SIZE_BYTES = 128 << 20        # 128 MiB
 ROW_GROUP_SIZE_ROWS = 1_048_576         # pyarrow takes rows, not bytes
 
-# Observed in step-1 prototype; conservative rounding
-BYTES_PER_ROW_PRIMES = 3
-BYTES_PER_ROW_DECOMP = 6
+# Calibrated 2026-05-07 from manifest stats over the live warehouse:
+#   primes: 21,699,850,257 rows / 31,882,062,508 bytes -> 1.469 B/row
+#   decomp: 40,842,554,340 rows / 183,403,710,324 bytes -> 4.491 B/row
+# bytes_per_row drift across p-range is < 3% under zstd-3 on monotone integers.
+BYTES_PER_ROW_PRIMES = 1.469
+BYTES_PER_ROW_DECOMP = 4.491
+
+# Projected bytes-per-row in the post-repartition tables which carry
+# prime_rank. Measured 2026-05-07 by rewriting one representative file per
+# table with realistic row-groups (~200M rows) under zstd-3:
+#   primes:        +1.026 B/row from prime_rank (delta-encoded i64 0..N)
+#   partitions:    +0.584 B/row (RLE on the k̄≈1.882 duplicates)
+# These are the numbers the bucket planner uses; see scripts/measure_prime_rank_bpr.py
+BYTES_PER_ROW_PRIMES_RANKED = 2.500
+BYTES_PER_ROW_PARTITIONS_RANKED = 5.097
 
 TABLE_PROPERTIES: dict[str, str] = {
     "write.parquet.compression-codec": "zstd",
