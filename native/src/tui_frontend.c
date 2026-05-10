@@ -292,27 +292,6 @@ static int run_shell_capture(app_state* app, const char* cmd) {
     return exit_code;
 }
 
-static bool resolve_rust_commit_binary(char* out, size_t cap) {
-    const char* candidates[] = {
-        "primeparts-commit",
-        "target/release/primeparts-commit",
-        "target/debug/primeparts-commit",
-        "../target/release/primeparts-commit",
-        "../target/debug/primeparts-commit",
-        "crates/target/release/primeparts-commit",
-        "crates/target/debug/primeparts-commit",
-        "../crates/target/release/primeparts-commit",
-        "../crates/target/debug/primeparts-commit",
-    };
-    for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); ++i) {
-        if (access(candidates[i], X_OK) == 0) {
-            snprintf(out, cap, "%s", candidates[i]);
-            return true;
-        }
-    }
-    return false;
-}
-
 static void utc_timestamp_compact(char* out, size_t cap) {
     time_t t = time(NULL);
     struct tm tm;
@@ -416,24 +395,16 @@ static int launch_generation_via_abi(app_state* app) {
     }
     snprintf(cfg, sizeof(cfg), "native manifest: %s", manifest_path);
     push_op_line(app, cfg);
-    char commit_bin[PATH_MAX];
-    if (!resolve_rust_commit_binary(commit_bin, sizeof(commit_bin))) {
-        app->op_failed = true;
-        snprintf(app->op_status, sizeof(app->op_status), "primeparts-commit binary not found");
-        push_op_line(app, "build it with: cargo build -p primeparts-commit (from crates/)");
-        return 1;
-    }
     char cmd[PATH_MAX * 3 + 512];
     char sqlite_uri[PATH_MAX + 16];
     snprintf(sqlite_uri, sizeof(sqlite_uri), "sqlite:///%s/catalog.db", app->warehouse_root);
     snprintf(
         cmd,
         sizeof(cmd),
-        "%s --manifest '%s' --warehouse '%s' --sqlite '%s' --warehouse-standing skip 2>&1",
-        commit_bin,
-        manifest_path,
+        "FUNBUNS_CATALOG_URI='%s' FUNBUNS_WAREHOUSE='file://%s' PYTHONPATH=src python -m primeparts.native_iceberg --manifest '%s' 2>&1",
+        sqlite_uri,
         warehouse_path,
-        sqlite_uri);
+        manifest_path);
     int commit_exit = run_shell_capture(app, cmd);
     refresh_status(app);
     app->op_failed = (commit_exit != 0);
@@ -475,20 +446,11 @@ static void run_op_with_refresh(app_state* app, struct notcurses* nc, const char
     app->op_busy = false;
 }
 
-static bool build_rust_hms_sync_cmd(
+static bool build_hms_sync_cmd(
     app_state* app,
     bool dry_run,
     char* cmd,
     size_t cmd_cap) {
-    char commit_bin[PATH_MAX];
-    if (!resolve_rust_commit_binary(commit_bin, sizeof(commit_bin))) {
-        app->op_failed = true;
-        snprintf(app->op_status, sizeof(app->op_status), "primeparts-commit binary not found");
-        clear_op_lines(app);
-        push_op_line(app, "build it with: cargo build -p primeparts-commit");
-        return false;
-    }
-
     char warehouse_path[PATH_MAX];
     char sqlite_uri[PATH_MAX + 16];
     snprintf(warehouse_path, sizeof(warehouse_path), "%s/warehouse", app->warehouse_root);
@@ -496,10 +458,9 @@ static bool build_rust_hms_sync_cmd(
     snprintf(
         cmd,
         cmd_cap,
-        "%s --sync-hms-only --warehouse '%s' --sqlite '%s'%s 2>&1",
-        commit_bin,
-        warehouse_path,
+        "FUNBUNS_CATALOG_URI='%s' FUNBUNS_WAREHOUSE='file://%s' PYTHONPATH=src python scripts/sync_hms.py%s 2>&1",
         sqlite_uri,
+        warehouse_path,
         dry_run ? " --dry-run" : "");
     return true;
 }
@@ -1117,7 +1078,7 @@ int main(int argc, char** argv) {
                 clear_pending_confirm(&app);
                 if (mode == CONFIRM_SYNC_LIVE) {
                     char cmd[PATH_MAX * 2 + 256];
-                    if (build_rust_hms_sync_cmd(&app, false, cmd, sizeof(cmd))) {
+                    if (build_hms_sync_cmd(&app, false, cmd, sizeof(cmd))) {
                         run_op_with_refresh(&app, nc, "running rust hms sync", cmd);
                     }
                 }
@@ -1174,7 +1135,7 @@ int main(int argc, char** argv) {
             case 's':
             {
                 char cmd[PATH_MAX * 2 + 256];
-                if (build_rust_hms_sync_cmd(&app, true, cmd, sizeof(cmd))) {
+                if (build_hms_sync_cmd(&app, true, cmd, sizeof(cmd))) {
                     run_op_with_refresh(&app, nc, "running rust hms sync dry-run", cmd);
                 }
                 break;

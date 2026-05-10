@@ -14,9 +14,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -28,8 +25,6 @@ from .iceberg_schema import (
     PRIMES_IDENT,
     assert_warehouse_good_standing,
     ensure_tables,
-    get_iceberg_dir,
-    get_warehouse_dir,
     open_catalog,
     table_manifest_bounds,
     warehouse_standing,
@@ -145,41 +140,6 @@ def verify_native_files(files: list[NativeFile]) -> None:
             raise ValueError(f"{file.path}: missing normalized funbuns.n_primes footer")
 
 
-class _RustCommitFallback(RuntimeError):
-    """Raised when the Rust commit binary cannot be invoked; signals fallback."""
-
-
-def _commit_via_rust_binary(manifest: Path) -> dict[str, Any]:
-    repo_root = Path(__file__).resolve().parents[2]
-    binary = repo_root / "crates" / "target" / "release" / "primeparts-commit"
-    if not binary.exists():
-        raise _RustCommitFallback(f"binary not built: run pixi run commit-build")
-
-    warehouse = get_warehouse_dir()
-    catalog_db = get_iceberg_dir() / "catalog.db"
-    cmd = [
-        str(binary),
-        "--manifest", str(manifest),
-        "--warehouse", str(warehouse),
-        "--sqlite", f"sqlite:///{catalog_db}",
-        "--warehouse-standing", "skip",
-    ]
-    proc = subprocess.run(cmd, check=False, capture_output=True, text=True)
-    if proc.stderr:
-        sys.stderr.write(proc.stderr)
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"primeparts-commit exited with code {proc.returncode}; "
-            f"stdout tail: {proc.stdout[-500:]!r}"
-        )
-    try:
-        return json.loads(proc.stdout.strip().splitlines()[-1])
-    except (IndexError, json.JSONDecodeError) as exc:
-        raise RuntimeError(
-            f"could not parse primeparts-commit JSON summary: {proc.stdout!r}"
-        ) from exc
-
-
 def _infer_manifest_warehouse(manifest: Path) -> Path | None:
     """Infer the temp warehouse created by ``--temp`` native writer runs."""
     candidate = manifest.resolve().parent / "warehouse"
@@ -205,23 +165,11 @@ def commit_native_manifest(
     opened beside that warehouse. Otherwise the configured production catalog
     is used.
 
-    With ``PRIMEPARTS_USE_RUST_COMMIT=1`` set, production commits (no
-    ``warehouse``, ``not temp``, ``not dry_run``) shell out to the native
-    ``crates/target/release/primeparts-commit`` binary instead. Default-off
-    until the Rust path is validated end-to-end.
+    The removed Rust ``primeparts-commit`` prototype is intentionally not part
+    of this path; production commits continue through PyIceberg until the
+    staging rewrite replaces the current warehouse.
     """
     manifest = manifest.resolve(strict=True)
-
-    if (
-        os.environ.get("PRIMEPARTS_USE_RUST_COMMIT") == "1"
-        and not dry_run
-        and not temp
-        and warehouse is None
-    ):
-        try:
-            return _commit_via_rust_binary(manifest)
-        except _RustCommitFallback as fallback:
-            print(f"primeparts-commit fallback to Python: {fallback}", file=sys.stderr)
 
     files = load_native_manifest(manifest)
     if verify_footers:

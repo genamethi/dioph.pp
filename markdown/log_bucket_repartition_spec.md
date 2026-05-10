@@ -33,7 +33,10 @@ readers retarget to `funbuns.partitions`. In prose throughout the codebase the
 
 ## Current Warehouse Shape
 
-Active production spec is `truncate[10000000000](p)` for both tables. Files at:
+Production was originally written with `truncate[10000000000](p)` for both
+tables. On 2026-05-10 the source metadata was normalized in place to
+`void(p)` so iceberg-rust can load the tables without the truncate-width
+parser blocker. Data files remain at their original paths:
 
 ```text
 warehouse/funbuns/primes/data/p_trunc=N/*.parquet         (57 files)
@@ -45,7 +48,8 @@ on disk in either tree. Live row counts (manifest-aggregated): 21,699,850,257
 primes / 40,842,554,340 decompositions.
 
 Catalog: `SqlCatalog` (sqlite) at `…/iceberg/catalog.db`, mirrored to HMS via
-`scripts/sync_hms.py` for HS2/MR3.
+`scripts/sync_hms.py` for HS2/MR3. The previous metadata locations still point
+at the pre-normalization `truncate[10000000000](p)` specs.
 
 ## Partition Spec
 
@@ -228,44 +232,33 @@ its own bucket's bytes.
 
 ### Backfill Deferral
 
-Backfilling `prime_rank` into the live tables in place is blocked by a
-pyiceberg-core 0.9.1 limitation: the Rust transform binding caps truncate
-widths at i32, but the live spec is `truncate[10_000_000_000]`. Since the
-repartition pass rewrites every file under the new identity(p_bucket) spec
-anyway, `prime_rank` is computed in-stream during that pass — no separate
-backfill writer is needed. This avoids the pyiceberg-core path entirely
-(identity transforms don't trigger the i32 width call).
+Backfilling `prime_rank` into the live tables in place is still unnecessary.
+The old blocker was the `truncate[10_000_000_000]` transform; current source
+metadata has been normalized to `void(p)`, so iceberg-rust can load the source
+tables. Since the repartition pass rewrites every file under the new
+identity(p_bucket) spec anyway, `prime_rank` is computed in-stream during that
+pass rather than through a separate backfill writer.
 
 ## Bucket Boundary Table
 
-One shared Iceberg table under `funbuns`:
+One shared Iceberg table already exists under `funbuns`:
 
 ```text
-funbuns.bucket_versions
-  bucket_version:           int
-  bucket_id:                int
-  min_p:                    long
-  max_p:                    long
-  min_rank:                 long
-  max_rank:                 long
-  expected_primes_rows:     long
-  expected_partitions_rows: long
-  expected_primes_bytes:    long
-  expected_partitions_bytes:long
-  target_files_primes:      int    # F_primes for this bucket (dynamic)
-  target_files_partitions:  int    # F_partitions for this bucket (dynamic)
+funbuns.boundaries
+  p_bucket_version: int
+  p_bucket:         int
+  p_min:            long
 ```
 
-Only the integer boundaries (`min_p`, `max_p`, `min_rank`, `max_rank`) are
-required for deterministic bucket assignment at write time. The table is
-small enough to keep warmed in memory in the writer process. A new bucket
-plan is a new `bucket_version` row-set; existing rows are immutable.
+`p_min` rows define lower bounds. The writer derives each bucket's exclusive
+upper bound from the next row, with the final frontier bucket open-ended. The
+table is small enough to keep warmed in memory in the writer process. A new
+bucket plan is a new `p_bucket_version` row-set; existing rows are immutable.
 
-Sharing the table (rather than splitting per-table) reflects the shared-p
-alignment: a single planner pass produces both tables' file targets from the
-same boundaries. Per-table divergence lives in the `target_files_*` and
-`expected_*` columns. `target_files_*` is per-row (per-bucket), not a
-global constant — see §Planner Sizing.
+Sharing the table reflects the shared-p alignment: both output tables use the
+same bucket id for the same prime. Per-table file counts are computed during
+the rewrite from calibration constants and observed source row counts; they
+are not stored in the boundary table.
 
 ## Bucket Planner
 
@@ -293,7 +286,7 @@ bucket_min_p = primes.first().p
 for (rank, p) in enumerate(primes_in_p_order):
     cum_primes_bytes += BYTES_PER_ROW_PRIMES_RANKED   # 2.500
     if cum_primes_bytes >= target_primes_bytes:
-        emit bucket_versions row(
+        emit boundary row(
             bucket_id, bucket_min_rank, rank, bucket_min_p, p,
             expected_primes_rows = rank - bucket_min_rank + 1,
             expected_partitions_rows = ⌈k̄ · (rank - bucket_min_rank + 1)⌉,
@@ -361,15 +354,19 @@ separate backfill. Three things make this efficient:
    +-- ranked: 2.500 (primes) / 5.097 (partitions) -- see §File Sizing
    |
    v
-5. Plan boundaries -> write bucket_versions v=1
-   +-- single streaming pass over primes in p-order; emit per §Bucket Planner
-   +-- per-bucket dynamic F_primes / F_partitions stored in the row
-   +-- snap cuts to prime_rank assigned by the same pass
-   +-- this pass does NOT write any data files; it only writes the
-       bucket_versions metadata table
+5. Boundary table  [DONE -- 2026-05-10]
+   +-- `funbuns.boundaries` populated from `native/bin/boundary_primes.tsv`
+   +-- schema: `(p_bucket_version, p_bucket, p_min)`
    |
    v
-6. Rewrite into staging warehouse
+6. Normalize source partition metadata  [DONE -- 2026-05-10]
+   +-- `scripts/normalize_void_partitions.py --apply`
+   +-- rewrote current manifests and manifest lists to `void(p)`
+   +-- SqlCatalog now points at metadata version 00003 for both source tables
+   +-- data files were not rewritten
+   |
+   v
+7. Rewrite into staging warehouse
    +-- staging at /media/extssd/research/dioph.pp/data/iceberg-staging/
    +-- new tables: funbuns.primes, funbuns.partitions
    +-- partition spec: identity(p_bucket_version, p_bucket)
@@ -380,7 +377,7 @@ separate backfill. Three things make this efficient:
        by p for partitions
    |
    v
-7. Validate staging
+8. Validate staging
    +-- row counts match (21.70B primes, 40.84B partitions)
    +-- sum(primes.k) == rows(partitions)
    +-- prime_rank contiguous and unique in primes (rank 0 = smallest present
@@ -389,7 +386,7 @@ separate backfill. Three things make this efficient:
    +-- files sorted, row-group counts match target
    |
    v
-8. Cutover
+9. Cutover
    +-- SqlCatalog: register new tables, retire old
    +-- HMS: scripts/sync_hms.py for HS2/MR3 visibility
    +-- archive old layout in place (tarball + delete)
@@ -397,9 +394,14 @@ separate backfill. Three things make this efficient:
 
 ## Writer Path
 
-Replace the hand-routed approach in `crates/primeparts-compact/src/writer.rs`
-(raw `ArrowWriter` + manual `p_trunc=N` directory routing) with iceberg-rust's
-`PartitioningWriter` chain:
+The old `crates/primeparts-compact` implementation was removed. The fresh
+crate starts from a source-load check:
+
+```text
+cargo run --manifest-path crates/Cargo.toml -p primeparts-compact -- check-source
+```
+
+The staging writer should use iceberg-rust's `PartitioningWriter` chain:
 
 - `ClusteredWriter` is correct here: input is pre-sorted by `p_bucket` then
   `p`, so memory stays bounded to one partition's in-flight rows.
@@ -408,10 +410,10 @@ Replace the hand-routed approach in `crates/primeparts-compact/src/writer.rs`
 - `Transform::to_human_string` derives partition path strings; do not
   format manually.
 
-The hand-routed path was justified for the truncate(1e10) compaction (byte-
-precise row-group flushing via `ArrowWriter::in_progress_size`). For the new
-spec, byte-precise flushing can stay if needed, but partition routing,
-path encoding, and field-id matching go through the writer chain.
+The removed hand-routed path was justified for the earlier truncate(1e10)
+compaction. For the new spec, byte-precise flushing can stay if needed, but
+partition routing, path encoding, and field-id matching go through the writer
+chain.
 
 ## Query And Lookup
 
@@ -427,7 +429,7 @@ buckets. `p_bucket` partition pruning narrows the manifest scan first.
 For direct lookup:
 
 ```text
-1. Load bucket_versions for active version into memory.
+1. Load `funbuns.boundaries` for the active version into memory.
 2. Binary-search by p or prime_rank to candidate p_bucket(s).
 3. Scan only those bucket partitions.
 4. Apply exact predicate.
@@ -446,12 +448,14 @@ files keep their `partition_spec_id`, new files use the current one,
 
 - Headroom factor — provisional 1.016 from diagnostic; revisit if calibration
   on the high-`p` end disagrees.
-- Append routing during the freeze window — handled separately from this
-  spec (out of scope here).
+- Append routing during the freeze window — out of scope for this one-time
+  staging rewrite.
 
 ## Implementation Notes
 
 - Iceberg manifests are the source of truth; do not glob the data tree.
+- Source tables are now `void(p)` in current metadata; do not reintroduce the
+  huge truncate transform as a reader dependency.
 - Do not reuse field ids when adding `prime_rank`, `p_bucket_version`,
   `p_bucket`. Fresh ids per the `iceberg_schema.py` rules.
 - **Drop `commit_seq` in the new schema.** It duplicates the Iceberg

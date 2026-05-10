@@ -1,64 +1,68 @@
-mod walker;
-mod writer;
-
-use std::fs::File;
-use std::io::Write;
-use std::path::PathBuf;
+use std::collections::HashMap;
 use std::process::ExitCode;
+use std::str::FromStr;
+use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow};
-use clap::Parser;
-use tracing::info;
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
+use iceberg::io::LocalFsStorageFactory;
+use iceberg::{Catalog, CatalogBuilder, NamespaceIdent, TableIdent};
+use iceberg_catalog_sql::{SqlBindStyle, SqlCatalog, SqlCatalogBuilder};
+use serde::Serialize;
+use sqlx::Row;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tracing_subscriber::EnvFilter;
 
-use crate::walker::walk;
-use crate::writer::{CompactConfig, compact};
+const DEFAULT_WAREHOUSE: &str = "file:///media/extssd/research/dioph.pp/data/iceberg/warehouse";
+const DEFAULT_SQLITE: &str = "sqlite:////media/extssd/research/dioph.pp/data/iceberg/catalog.db";
+const NAMESPACE: &str = "funbuns";
 
 #[derive(Parser, Debug)]
 #[command(name = "primeparts-compact")]
 struct Args {
-    /// Source warehouse data root, e.g. /…/iceberg/warehouse/funbuns
-    #[arg(long)]
-    src_root: PathBuf,
-
-    /// Destination data root for compacted output, e.g. /…/iceberg-staging/warehouse/funbuns
-    #[arg(long)]
-    dst_root: PathBuf,
-
-    /// Tables to compact (sub-dirs of src_root). Defaults to both.
-    #[arg(long, value_delimiter = ',', default_value = "primes,decompositions")]
-    tables: Vec<String>,
-
-    /// W in TruncateTransform(W) on `p`. Output files are routed into
-    /// dst_root/{table}/data/p_trunc={N}/.
-    #[arg(long, default_value_t = 10_000_000_000)]
-    partition_w: i64,
-
-    /// Flush a row group when the in-progress write buffer reaches this size.
-    #[arg(long, default_value_t = 256 * 1024 * 1024)]
-    target_row_group_bytes: usize,
-
-    /// Close an output file after this many flushed row groups.
-    #[arg(long, default_value_t = 4)]
-    max_row_groups_per_file: usize,
-
-    /// Where to write the JSONL manifest (consumed by primeparts-commit).
-    #[arg(long)]
-    manifest_out: PathBuf,
-
-    /// Compact only the first N source files per table (smoke test).
-    #[arg(long)]
-    limit: Option<usize>,
+    #[command(subcommand)]
+    command: Command,
 }
 
-fn main() -> ExitCode {
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Verify that iceberg-rust can load the source tables after void normalization.
+    CheckSource {
+        #[arg(long, default_value = DEFAULT_WAREHOUSE)]
+        warehouse: String,
+
+        #[arg(long, env = "FUNBUNS_CATALOG_URI", default_value = DEFAULT_SQLITE)]
+        sqlite: String,
+
+        #[arg(
+            long,
+            value_delimiter = ',',
+            default_value = "primes,decompositions,boundaries"
+        )]
+        tables: Vec<String>,
+    },
+}
+
+#[derive(Serialize)]
+struct SourceTableSummary {
+    table: String,
+    metadata_location: String,
+    current_snapshot_id: Option<i64>,
+    default_partition_spec_id: i32,
+    default_sort_order_id: i64,
+    partition_spec: String,
+}
+
+#[tokio::main]
+async fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .with_writer(std::io::stderr)
         .init();
-    match run() {
+
+    match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("primeparts-compact: {e:#}");
@@ -67,66 +71,87 @@ fn main() -> ExitCode {
     }
 }
 
-fn run() -> Result<()> {
+async fn run() -> Result<()> {
     let args = Args::parse();
-    if args.partition_w <= 0 {
-        return Err(anyhow!("--partition-w must be positive"));
+    match args.command {
+        Command::CheckSource {
+            warehouse,
+            sqlite,
+            tables,
+        } => check_source(&warehouse, &sqlite, &tables).await,
     }
-    if args.target_row_group_bytes == 0 {
-        return Err(anyhow!("--target-row-group-bytes must be positive"));
-    }
-    if args.max_row_groups_per_file == 0 {
-        return Err(anyhow!("--max-row-groups-per-file must be positive"));
-    }
-    if let Some(parent) = args.manifest_out.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
-    }
-    let mut manifest_file = File::create(&args.manifest_out)
-        .with_context(|| format!("creating manifest {}", args.manifest_out.display()))?;
+}
 
-    for table in &args.tables {
-        let src_data = args.src_root.join(table).join("data");
-        let dst_data = args.dst_root.join(table).join("data");
-        if !src_data.is_dir() {
-            return Err(anyhow!(
-                "source data dir does not exist: {}",
-                src_data.display()
-            ));
-        }
-        info!("walking {}", src_data.display());
-        let mut sources = walk(&src_data)?;
-        if let Some(n) = args.limit {
-            sources.truncate(n);
-        }
-        info!(
-            "compact[{}]: {} source files (batch ids {}..{})",
-            table,
-            sources.len(),
-            sources.first().map(|f| f.batch_id).unwrap_or(-1),
-            sources.last().map(|f| f.batch_id).unwrap_or(-1),
-        );
-
-        let cfg = CompactConfig {
-            table: table.clone(),
-            out_root: dst_data,
-            partition_w: args.partition_w,
-            target_row_group_bytes: args.target_row_group_bytes,
-            max_row_groups_per_file: args.max_row_groups_per_file,
-        };
-        let manifest_rows = compact(&sources, &cfg)?;
-        for row in &manifest_rows {
-            let line = serde_json::to_string(row).context("serializing manifest row")?;
-            manifest_file
-                .write_all(line.as_bytes())
-                .context("writing manifest line")?;
-            manifest_file.write_all(b"\n").context("writing newline")?;
-        }
-        info!(
-            "compact[{}]: wrote {} manifest rows",
-            table,
-            manifest_rows.len()
-        );
+async fn check_source(warehouse: &str, sqlite: &str, tables: &[String]) -> Result<()> {
+    let catalog = open_sql_catalog(sqlite, warehouse).await?;
+    let namespace = NamespaceIdent::new(NAMESPACE.to_string());
+    let mut summaries = Vec::with_capacity(tables.len());
+    for table_name in tables {
+        let ident = TableIdent::new(namespace.clone(), table_name.to_string());
+        let table = catalog
+            .load_table(&ident)
+            .await
+            .with_context(|| format!("loading table {ident:?}"))?;
+        let metadata = table.metadata();
+        summaries.push(SourceTableSummary {
+            table: table_name.clone(),
+            metadata_location: table
+                .metadata_location()
+                .map(|location| location.to_string())
+                .unwrap_or_default(),
+            current_snapshot_id: metadata.current_snapshot_id().map(|id| id as i64),
+            default_partition_spec_id: metadata.default_partition_spec_id(),
+            default_sort_order_id: metadata.default_sort_order_id() as i64,
+            partition_spec: format!("{:?}", metadata.default_partition_spec()),
+        });
     }
-    info!("manifest written to {}", args.manifest_out.display());
+    println!("{}", serde_json::to_string_pretty(&summaries)?);
+    Ok(())
+}
+
+async fn open_sql_catalog(uri: &str, warehouse: &str) -> Result<SqlCatalog> {
+    ensure_catalog_iceberg_type_column(uri).await?;
+    SqlCatalogBuilder::default()
+        .uri(uri)
+        .warehouse_location(warehouse)
+        .sql_bind_style(SqlBindStyle::QMark)
+        .with_storage_factory(Arc::new(LocalFsStorageFactory))
+        .load("funbuns".to_string(), HashMap::new())
+        .await
+        .context("opening SqlCatalog")
+}
+
+async fn ensure_catalog_iceberg_type_column(uri: &str) -> Result<()> {
+    let opts = SqliteConnectOptions::from_str(uri)
+        .map(|opts| opts.create_if_missing(true))
+        .with_context(|| format!("parsing sqlite uri: {uri}"))?;
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(opts)
+        .await
+        .context("opening sqlite for catalog schema check")?;
+    let cols = sqlx::query("PRAGMA table_info('iceberg_tables')")
+        .fetch_all(&pool)
+        .await
+        .context("reading iceberg_tables schema")?;
+    if cols.is_empty() {
+        return Ok(());
+    }
+    let has_iceberg_type = cols.iter().any(|row| {
+        row.try_get::<String, _>("name")
+            .map(|name| name == "iceberg_type")
+            .unwrap_or(false)
+    });
+    if has_iceberg_type {
+        return Ok(());
+    }
+    sqlx::query("ALTER TABLE iceberg_tables ADD COLUMN iceberg_type VARCHAR(5)")
+        .execute(&pool)
+        .await
+        .context("adding iceberg_tables.iceberg_type")?;
+    sqlx::query("UPDATE iceberg_tables SET iceberg_type = 'TABLE' WHERE iceberg_type IS NULL")
+        .execute(&pool)
+        .await
+        .context("backfilling iceberg_tables.iceberg_type")?;
     Ok(())
 }

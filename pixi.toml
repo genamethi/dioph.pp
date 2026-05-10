@@ -19,13 +19,13 @@ completion-bash = "register-python-argcomplete --shell bash primeparts"
 sync-hms = "python scripts/sync_hms.py"
 vendor-patch = "scripts/apply_vendor_patches.sh"
 
-[tasks.commit-build]
-cmd = "cargo build --release --manifest-path crates/Cargo.toml"
+[tasks.compact-build]
+cmd = "cargo build --release --manifest-path crates/Cargo.toml -p primeparts-compact"
 depends-on = ["vendor-patch"]
 
-[tasks.commit]
-cmd = "crates/target/release/primeparts-commit"
-depends-on = ["commit-build"]
+[tasks.compact-check-source]
+cmd = "cargo run --manifest-path crates/Cargo.toml -p primeparts-compact -- check-source"
+depends-on = ["compact-build"]
 
 [tasks.hive]
 cmd = "docker compose up"
