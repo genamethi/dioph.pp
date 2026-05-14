@@ -357,14 +357,12 @@ static int launch_generation_via_abi(app_state* app) {
     } else if (existing_prime_rows >= 0) {
         start_idx = existing_prime_rows + 1;
     }
-    int64_t max_commit_seq = pp_uic_max_commit_seq(app->handle, "primes");
-    if (max_commit_seq < 0 && existing_prime_rows > 0) {
-        app->op_failed = true;
-        snprintf(app->op_status, sizeof(app->op_status), "failed to read max_commit_seq");
-        push_op_line(app, pp_uic_last_error(app->handle));
-        return 1;
-    }
-    int32_t commit_seq_start = (max_commit_seq >= 0) ? (int32_t)(max_commit_seq + 1) : 0;
+    // TODO: post-cutover, derive (bucket_version, bucket, prime_rank_start,
+    // bucket_is_new) from funbuns.boundaries + the staging warehouse's
+    // current snapshot. For now the TUI launches generate against the
+    // default (v=1, bucket=0) without boundary emission; the planner /
+    // rewriter owns proper bucket-aware coordination until the TUI gets
+    // its bucket-ops UX.
     char ts[32];
     utc_timestamp_compact(ts, sizeof(ts));
     char warehouse_path[PATH_MAX];
@@ -376,7 +374,10 @@ static int launch_generation_via_abi(app_state* app) {
         .count = app->gen_num_primes,
         .chunk_primes = app->gen_batch_size,
         .threads = app->gen_threads,
-        .commit_seq_start = commit_seq_start,
+        .bucket_version = 1,
+        .bucket = 0,
+        .prime_rank_start = start_idx,
+        .bucket_is_new = 0,
         .temp = 0,
         .warehouse = warehouse_path,
         .manifest = manifest_path,

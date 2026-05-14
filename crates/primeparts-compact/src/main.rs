@@ -13,6 +13,8 @@ use sqlx::Row;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tracing_subscriber::EnvFilter;
 
+mod planner;
+
 const DEFAULT_WAREHOUSE: &str = "file:///media/extssd/research/dioph.pp/data/iceberg/warehouse";
 const DEFAULT_SQLITE: &str = "sqlite:////media/extssd/research/dioph.pp/data/iceberg/catalog.db";
 const NAMESPACE: &str = "funbuns";
@@ -40,6 +42,19 @@ enum Command {
             default_value = "primes,decompositions,boundaries"
         )]
         tables: Vec<String>,
+    },
+    /// Derive the per-bucket plan from funbuns.boundaries + locked calibration
+    /// constants and print it as JSON. Used by the rewriter in-process; this
+    /// subcommand exists for inspection and handoff recording.
+    Plan {
+        #[arg(long, default_value = DEFAULT_WAREHOUSE)]
+        warehouse: String,
+
+        #[arg(long, env = "FUNBUNS_CATALOG_URI", default_value = DEFAULT_SQLITE)]
+        sqlite: String,
+
+        #[arg(long, default_value_t = 1)]
+        version: i32,
     },
 }
 
@@ -79,7 +94,19 @@ async fn run() -> Result<()> {
             sqlite,
             tables,
         } => check_source(&warehouse, &sqlite, &tables).await,
+        Command::Plan {
+            warehouse,
+            sqlite,
+            version,
+        } => plan(&warehouse, &sqlite, version).await,
     }
+}
+
+async fn plan(warehouse: &str, sqlite: &str, version: i32) -> Result<()> {
+    let catalog = open_sql_catalog(sqlite, warehouse).await?;
+    let plan = planner::plan_buckets(&catalog, version).await?;
+    println!("{}", serde_json::to_string_pretty(&plan)?);
+    Ok(())
 }
 
 async fn check_source(warehouse: &str, sqlite: &str, tables: &[String]) -> Result<()> {

@@ -1,0 +1,318 @@
+#include "primeparts/writer.h"
+
+#include <arrow/api.h>
+#include <arrow/io/file.h>
+#include <arrow/util/key_value_metadata.h>
+#include <parquet/arrow/writer.h>
+#include <parquet/properties.h>
+#include <parquet/types.h>
+
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <stdexcept>
+#include <string>
+#include <system_error>
+
+#include "iceberg/schema.h"
+#include "iceberg/schema_field.h"
+#include "iceberg/type.h"
+
+namespace primeparts {
+
+namespace {
+
+constexpr std::string_view kTmpDotPrefix = ".";
+
+fs::path FilePathFor(const fs::path& dir, std::string_view prefix,
+                     int32_t bucket_version, int32_t bucket, int32_t seq) {
+  char name[160];
+  std::snprintf(name, sizeof(name), "%.*s_v%04d_b%06d_%04d.parquet",
+                static_cast<int>(prefix.size()), prefix.data(),
+                bucket_version, bucket, seq);
+  return dir / name;
+}
+
+}  // namespace
+
+// prime_rank is optional in the staging schema because the rewriter
+// writes it as null and the backfill pass populates it after. Promote
+// to required (via iceberg schema evolution) only after backfill has
+// run and every file has a non-null prime_rank column.
+std::shared_ptr<iceberg::Schema> PrimesSchema() {
+  return std::make_shared<iceberg::Schema>(
+      std::vector<iceberg::SchemaField>{
+          iceberg::SchemaField::MakeRequired(1, "p",                iceberg::int64()),
+          iceberg::SchemaField::MakeRequired(2, "k",                iceberg::int32()),
+          iceberg::SchemaField::MakeOptional(4, "prime_rank",       iceberg::int64()),
+          iceberg::SchemaField::MakeRequired(5, "p_bucket_version", iceberg::int32()),
+          iceberg::SchemaField::MakeRequired(6, "p_bucket",         iceberg::int32()),
+      },
+      0);
+}
+
+std::shared_ptr<iceberg::Schema> PartitionsSchema() {
+  return std::make_shared<iceberg::Schema>(
+      std::vector<iceberg::SchemaField>{
+          iceberg::SchemaField::MakeRequired(1, "p",                iceberg::int64()),
+          iceberg::SchemaField::MakeRequired(2, "m_k",              iceberg::int32()),
+          iceberg::SchemaField::MakeRequired(3, "n_k",              iceberg::int32()),
+          iceberg::SchemaField::MakeRequired(4, "q_k",              iceberg::int64()),
+          iceberg::SchemaField::MakeOptional(6, "prime_rank",       iceberg::int64()),
+          iceberg::SchemaField::MakeRequired(7, "p_bucket_version", iceberg::int32()),
+          iceberg::SchemaField::MakeRequired(8, "p_bucket",         iceberg::int32()),
+      },
+      0);
+}
+
+std::shared_ptr<arrow::Schema> IcebergToArrowSchemaWithFieldIds(
+    const iceberg::Schema& schema, std::string* error) {
+  arrow::FieldVector fields;
+  fields.reserve(schema.fields().size());
+  for (const auto& f : schema.fields()) {
+    std::shared_ptr<arrow::DataType> at;
+    auto tid = f.type()->type_id();
+    if (tid == iceberg::TypeId::kLong) {
+      at = arrow::int64();
+    } else if (tid == iceberg::TypeId::kInt) {
+      at = arrow::int32();
+    } else {
+      if (error) *error = std::string("unsupported field type for: ") +
+                          std::string(f.name());
+      return nullptr;
+    }
+    auto kv = arrow::key_value_metadata(
+        {{"PARQUET:field_id", std::to_string(f.field_id())}});
+    // Iceberg's required flag is the truth; mirror it on arrow side so
+    // parquet stops emitting null bitmaps for required columns.
+    const bool nullable = f.optional();
+    fields.push_back(
+        arrow::field(std::string(f.name()), at, nullable, kv));
+  }
+  return arrow::schema(fields);
+}
+
+fs::path BucketDataDir(const fs::path& warehouse, std::string_view table,
+                       int32_t bucket_version, int32_t bucket) {
+  return warehouse / "funbuns" / std::string(table) / "data" /
+         ("p_bucket_version=" + std::to_string(bucket_version)) /
+         ("p_bucket=" + std::to_string(bucket));
+}
+
+int32_t NextFileSeq(const fs::path& output_dir, std::string_view prefix) {
+  std::error_code ec;
+  if (!fs::exists(output_dir, ec)) return 0;
+  int32_t max_seq = -1;
+  for (auto& entry : fs::directory_iterator(output_dir, ec)) {
+    if (ec || !entry.is_regular_file()) continue;
+    auto name = entry.path().filename().string();
+    if (name.size() <= prefix.size() ||
+        name.compare(0, prefix.size(), prefix) != 0) {
+      continue;
+    }
+    auto pos = name.rfind('_');
+    auto dot = name.find('.', pos == std::string::npos ? 0 : pos);
+    if (pos == std::string::npos || dot == std::string::npos) continue;
+    try {
+      int32_t seq = static_cast<int32_t>(
+          std::stoi(name.substr(pos + 1, dot - pos - 1)));
+      if (seq > max_seq) max_seq = seq;
+    } catch (...) {}
+  }
+  return max_seq + 1;
+}
+
+struct BucketParquetWriter::Impl {
+  WriterConfig config;
+  std::shared_ptr<arrow::Schema> arrow_schema;
+  std::shared_ptr<parquet::WriterProperties> props;
+  int32_t next_seq = 0;
+  bool closed = false;
+
+  // Current open file (none when between rolls).
+  std::shared_ptr<arrow::io::FileOutputStream> sink;
+  std::unique_ptr<parquet::arrow::FileWriter> writer;
+  fs::path tmp_path;
+  fs::path final_path;
+  WrittenFile current_record;
+
+  // Lifetime accumulator.
+  std::vector<WrittenFile> done;
+
+  bool OpenIfNeeded(std::string* error);
+  bool CloseCurrent(std::string* error);
+};
+
+bool BucketParquetWriter::Impl::OpenIfNeeded(std::string* error) {
+  if (writer) return true;
+  std::error_code ec;
+  fs::create_directories(config.output_dir, ec);
+  if (ec) {
+    if (error) *error = "mkdir " + config.output_dir.string() + ": " + ec.message();
+    return false;
+  }
+
+  final_path = FilePathFor(config.output_dir, config.filename_prefix,
+                           config.bucket_version, config.bucket, next_seq);
+  if (fs::exists(final_path)) {
+    if (error) *error = "refusing to overwrite: " + final_path.string();
+    return false;
+  }
+  tmp_path = final_path.parent_path() /
+             ("." + final_path.filename().string() + ".tmp");
+  fs::remove(tmp_path, ec);
+
+  auto sink_r = arrow::io::FileOutputStream::Open(tmp_path.string());
+  if (!sink_r.ok()) {
+    if (error) *error = sink_r.status().ToString();
+    return false;
+  }
+  sink = sink_r.ValueOrDie();
+  auto fw_r = parquet::arrow::FileWriter::Open(
+      *arrow_schema, arrow::default_memory_pool(), sink, props,
+      parquet::default_arrow_writer_properties());
+  if (!fw_r.ok()) {
+    if (error) *error = fw_r.status().ToString();
+    sink.reset();
+    return false;
+  }
+  writer = std::move(fw_r).ValueOrDie();
+
+  current_record = WrittenFile{};
+  current_record.table = config.table_name;
+  current_record.bucket_version = config.bucket_version;
+  current_record.bucket = config.bucket;
+  return true;
+}
+
+bool BucketParquetWriter::Impl::CloseCurrent(std::string* error) {
+  if (!writer) return true;
+  auto cs = writer->Close();
+  if (!cs.ok()) {
+    if (error) *error = cs.ToString();
+    return false;
+  }
+  auto ss = sink->Close();
+  if (!ss.ok()) {
+    if (error) *error = ss.ToString();
+    return false;
+  }
+  std::error_code ec;
+  current_record.bytes = static_cast<int64_t>(fs::file_size(tmp_path, ec));
+  fs::rename(tmp_path, final_path, ec);
+  if (ec) {
+    if (error) *error = "rename " + tmp_path.string() + " -> " +
+                        final_path.string() + ": " + ec.message();
+    return false;
+  }
+  current_record.path = final_path;
+  done.push_back(current_record);
+
+  writer.reset();
+  sink.reset();
+  next_seq++;
+  return true;
+}
+
+std::unique_ptr<BucketParquetWriter> BucketParquetWriter::Make(
+    WriterConfig config, std::string* error) {
+  auto impl = std::make_unique<Impl>();
+  if (!config.schema) {
+    if (error) *error = "WriterConfig.schema is null";
+    return nullptr;
+  }
+  impl->arrow_schema = IcebergToArrowSchemaWithFieldIds(*config.schema, error);
+  if (!impl->arrow_schema) return nullptr;
+
+  parquet::WriterProperties::Builder builder;
+  builder.compression(parquet::Compression::ZSTD);
+  builder.compression_level(config.compression_level);
+  builder.data_pagesize(config.data_pagesize);
+  // ~256 MiB target row group => 4 row groups per ~1 GiB file. Both
+  // output schemas land at ~1.1 B/row with DELTA+zstd on the monotone
+  // columns (p, prime_rank, q_k), so 240M rows ≈ 264 MiB compressed.
+  // Parquet rolls strictly on row count; that's fine here — for primes
+  // every row has a distinct p, and for partitions a row-group split
+  // inside a prime is tolerable (only *file* boundaries need to snap
+  // to p, which the writer's target_rows_per_file logic already does).
+  builder.max_row_group_length(240'000'000);
+  for (const auto& col : config.delta_columns) {
+    if (impl->arrow_schema->GetFieldByName(col)) {
+      builder.disable_dictionary(col);
+      builder.encoding(col, parquet::Encoding::DELTA_BINARY_PACKED);
+    }
+  }
+  impl->props = builder.build();
+  impl->next_seq = config.starting_file_seq;
+  impl->config = std::move(config);
+
+  return std::unique_ptr<BucketParquetWriter>(
+      new BucketParquetWriter(std::move(impl)));
+}
+
+BucketParquetWriter::BucketParquetWriter(std::unique_ptr<Impl> impl)
+    : impl_(std::move(impl)) {}
+
+BucketParquetWriter::~BucketParquetWriter() {
+  // Best-effort cleanup if user forgot to call Close(). We can't return
+  // the WrittenFile records here, but we can at least flush bytes.
+  if (impl_ && !impl_->closed && impl_->writer) {
+    std::string ignored;
+    impl_->CloseCurrent(&ignored);
+  }
+}
+
+bool BucketParquetWriter::Write(const arrow::RecordBatch& batch,
+                                BatchStats stats, std::string* error) {
+  if (impl_->closed) {
+    if (error) *error = "Write after Close";
+    return false;
+  }
+  // Roll-before-write: if the current file is full, close it first so
+  // this batch lands at the head of the next file.
+  if (impl_->writer && impl_->config.target_rows_per_file > 0 &&
+      impl_->current_record.rows >= impl_->config.target_rows_per_file) {
+    if (!impl_->CloseCurrent(error)) return false;
+  }
+  if (!impl_->OpenIfNeeded(error)) return false;
+
+  // Re-wrap so the writer's target schema (with PARQUET:field_id) is
+  // the one parquet sees.
+  auto rb = arrow::RecordBatch::Make(impl_->arrow_schema, batch.num_rows(),
+                                     batch.columns());
+  auto ws = impl_->writer->WriteRecordBatch(*rb);
+  if (!ws.ok()) {
+    if (error) *error = ws.ToString();
+    return false;
+  }
+
+  // Accumulate into the current file's record.
+  auto& cur = impl_->current_record;
+  if (cur.rows == 0) {
+    cur.p_min = stats.p_min;
+    cur.p_max = stats.p_max;
+    cur.rank_min = stats.rank_min;
+    cur.rank_max = stats.rank_max;
+  } else {
+    cur.p_min = std::min(cur.p_min, stats.p_min);
+    cur.p_max = std::max(cur.p_max, stats.p_max);
+    cur.rank_min = std::min(cur.rank_min, stats.rank_min);
+    cur.rank_max = std::max(cur.rank_max, stats.rank_max);
+  }
+  cur.rows += batch.num_rows();
+  return true;
+}
+
+bool BucketParquetWriter::Close(std::vector<WrittenFile>* out,
+                                std::string* error) {
+  if (impl_->closed) {
+    if (error) *error = "double Close";
+    return false;
+  }
+  if (!impl_->CloseCurrent(error)) return false;
+  impl_->closed = true;
+  if (out) *out = std::move(impl_->done);
+  return true;
+}
+
+}  // namespace primeparts

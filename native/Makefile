@@ -3,23 +3,6 @@ PKG_CONFIG ?= /usr/bin/pkg-config
 PKG_CONFIG_PATH ?= $(PREFIX)/lib/pkgconfig:/usr/lib/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig
 CC ?= /usr/bin/gcc
 CXX ?= /usr/bin/g++
-ICEBERG_CPP_BUILD ?= vendor/iceberg-cpp-build
-ICEBERG_CPP_INSTALL ?= vendor/iceberg-cpp-install
-ICEBERG_CPP_CMAKE_ARGS ?= \
-	-DCMAKE_BUILD_TYPE=Release \
-	-DCMAKE_C_COMPILER=$(CC) \
-	-DCMAKE_CXX_COMPILER=$(CXX) \
-	-DICEBERG_BUILD_TESTS=OFF \
-	-DICEBERG_BUILD_REST=OFF \
-	-DICEBERG_BUILD_REST_INTEGRATION_TESTS=OFF \
-	-DICEBERG_BUILD_STATIC=ON \
-	-DICEBERG_BUILD_SHARED=ON \
-	-DICEBERG_BUILD_BUNDLE=ON \
-	-DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-	-DFETCHCONTENT_TRY_FIND_PACKAGE_MODE=NEVER \
-	-DARROW_WITH_SNAPPY=ON \
-	-DARROW_WITH_ZSTD=ON \
-	-DCMAKE_INSTALL_PREFIX=$(abspath $(ICEBERG_CPP_INSTALL))
 
 CPPFLAGS += -Iinclude -I$(PREFIX)/include
 CFLAGS += -std=c11 -D_POSIX_C_SOURCE=200809L -O3 -g -fPIC -Wall -Wextra -Wpedantic
@@ -30,11 +13,18 @@ LDLIBS += $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --libs primec
 NOTCURSES_LDLIBS ?= $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --libs notcurses-core 2>/dev/null || PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --libs notcurses 2>/dev/null)
 NOTCURSES_CPPFLAGS ?= $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --cflags notcurses-core 2>/dev/null || PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --cflags notcurses 2>/dev/null)
 NOTCURSES_RPATH ?= -Wl,-rpath,/usr/local/lib
-ICEBERG_CPPFLAGS += -I$(ICEBERG_CPP_INSTALL)/include -I$(ICEBERG_CPP_BUILD)/_deps/nanoarrow-src/src
-ICEBERG_LDFLAGS += -L$(ICEBERG_CPP_BUILD)/src/iceberg -L$(ICEBERG_CPP_BUILD)/_deps/nanoarrow-build \
-	-Wl,-rpath,$(abspath $(ICEBERG_CPP_BUILD)/src/iceberg) \
-	-Wl,-rpath,$(abspath $(ICEBERG_CPP_BUILD)/_deps/nanoarrow-build)
-ICEBERG_LDLIBS += -liceberg_bundle -liceberg_vendored_avrocpp -liceberg -lnanoarrow_shared -lzstd -lsnappy -lz
+
+# iceberg-cpp is built from source in vendor/iceberg-cpp/ and installed
+# to $(PREFIX) by hand. We link the static archives directly (no .so
+# variants exist at $(PREFIX)) and pick up arrow/parquet from the same
+# prefix.
+ICEBERG_CPPFLAGS += -I$(PREFIX)/include
+ICEBERG_LDFLAGS +=
+ICEBERG_LDLIBS += \
+	-liceberg_bundle -liceberg_vendored_avrocpp -liceberg \
+	-liceberg_vendored_nanoarrow -liceberg_vendored_croaring \
+	-larrow_bundled_dependencies \
+	-lzstd -lz -lssl -lcrypto -ldl -lrt
 
 BUILD_DIR := build
 CORE_OBJ := $(BUILD_DIR)/core.o
@@ -42,12 +32,16 @@ BENCH_CORE_OBJ := $(BUILD_DIR)/bench_core.o
 BENCH_MATERIALIZE_OBJ := $(BUILD_DIR)/bench_materialize.o
 GENERATE_OBJ := $(BUILD_DIR)/generate.o
 GENERATE_ABI_OBJ := $(BUILD_DIR)/generate_abi.o
+WRITER_OBJ := $(BUILD_DIR)/writer.o
+SOURCE_SCAN_OBJ := $(BUILD_DIR)/source_scan.o
+REWRITE_OBJ := $(BUILD_DIR)/rewrite.o
+PREFLIGHT_OBJ := $(BUILD_DIR)/preflight.o
 UI_ICEBERG_OBJ := $(BUILD_DIR)/ui_iceberg.o
 TEST_OBJ := $(BUILD_DIR)/test_core.o
 TEST_UI_ICEBERG_OBJ := $(BUILD_DIR)/test_ui_iceberg.o
 TUI_FRONTEND_OBJ := $(BUILD_DIR)/tui_frontend.o
 
-.PHONY: all clean test iceberg-cpp-rebuild
+.PHONY: all clean test
 
 all: $(BUILD_DIR)/libprimeparts_core.so \
      $(BUILD_DIR)/primeparts-bench-core \
@@ -68,13 +62,25 @@ $(BENCH_CORE_OBJ): src/bench.c include/primeparts/core.h | $(BUILD_DIR)
 $(BENCH_MATERIALIZE_OBJ): src/materialize_bench.c include/primeparts/core.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
-$(GENERATE_OBJ): src/generate.cc include/primeparts/core.h | $(BUILD_DIR)
+$(GENERATE_OBJ): src/generate.cc include/primeparts/core.h include/primeparts/writer.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(GENERATE_ABI_OBJ): src/generate.cc include/primeparts/core.h include/primeparts/generate.h | $(BUILD_DIR)
+$(GENERATE_ABI_OBJ): src/generate.cc include/primeparts/core.h include/primeparts/generate.h include/primeparts/writer.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -DPRIMEPARTS_GENERATE_NO_MAIN -c $< -o $@
 
 $(UI_ICEBERG_OBJ): src/ui_iceberg.cc include/primeparts/ui_iceberg.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(WRITER_OBJ): src/writer.cc include/primeparts/writer.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(SOURCE_SCAN_OBJ): src/source_scan.cc include/primeparts/source_scan.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(REWRITE_OBJ): src/rewrite.cc include/primeparts/writer.h include/primeparts/source_scan.h include/primeparts/preflight.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(PREFLIGHT_OBJ): src/preflight.cc include/primeparts/preflight.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(TEST_OBJ): tests/test_core.c include/primeparts/core.h | $(BUILD_DIR)
@@ -95,14 +101,17 @@ $(BUILD_DIR)/primeparts-bench-core: $(CORE_OBJ) $(BENCH_CORE_OBJ)
 $(BUILD_DIR)/primeparts-bench-materialize: $(CORE_OBJ) $(BENCH_MATERIALIZE_OBJ)
 	$(CC) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) -pthread -o $@
 
-$(BUILD_DIR)/primeparts-generate: $(CORE_OBJ) $(GENERATE_OBJ)
-	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(ICEBERG_LDLIBS) -pthread -o $@
+$(BUILD_DIR)/primeparts-generate: $(CORE_OBJ) $(GENERATE_OBJ) $(WRITER_OBJ)
+	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(ICEBERG_LDLIBS) -lparquet -larrow -pthread -o $@
+
+$(BUILD_DIR)/primeparts-rewrite: $(REWRITE_OBJ) $(SOURCE_SCAN_OBJ) $(WRITER_OBJ) $(PREFLIGHT_OBJ)
+	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(ICEBERG_LDLIBS) -lparquet -larrow -lsqlite3 -pthread -o $@
 
 $(BUILD_DIR)/primeparts-test-ui-iceberg: $(UI_ICEBERG_OBJ) $(TEST_UI_ICEBERG_OBJ)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(ICEBERG_LDLIBS) -lsqlite3 -o $@
 
-$(BUILD_DIR)/primeparts-tui: $(CORE_OBJ) $(GENERATE_ABI_OBJ) $(UI_ICEBERG_OBJ) $(TUI_FRONTEND_OBJ)
-	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $(NOTCURSES_RPATH) $^ $(LDLIBS) $(ICEBERG_LDLIBS) $(NOTCURSES_LDLIBS) -lsqlite3 -pthread -o $@
+$(BUILD_DIR)/primeparts-tui: $(CORE_OBJ) $(GENERATE_ABI_OBJ) $(WRITER_OBJ) $(UI_ICEBERG_OBJ) $(TUI_FRONTEND_OBJ)
+	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $(NOTCURSES_RPATH) $^ $(LDLIBS) $(ICEBERG_LDLIBS) -lparquet -larrow $(NOTCURSES_LDLIBS) -lsqlite3 -pthread -o $@
 
 $(BUILD_DIR)/test_core: $(CORE_OBJ) $(TEST_OBJ)
 	$(CC) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) -pthread -o $@
@@ -120,11 +129,6 @@ test: $(BUILD_DIR)/test_core \
 	  ICEBERG_DIR=$$(dirname "$$MANIFEST"); \
 	  PYTHONPATH=../src python -m primeparts.native_iceberg --manifest "$$MANIFEST" --temp >/tmp/primeparts-native-commit-smoke.json; \
 	  $(BUILD_DIR)/primeparts-test-ui-iceberg "$$ICEBERG_DIR" >/tmp/primeparts-test-ui-iceberg-smoke.txt
-
-iceberg-cpp-rebuild:
-	cmake -S vendor/iceberg-cpp -B $(ICEBERG_CPP_BUILD) $(ICEBERG_CPP_CMAKE_ARGS)
-	cmake --build $(ICEBERG_CPP_BUILD) -j
-	cmake --install $(ICEBERG_CPP_BUILD)
 
 $(BUILD_DIR)/nth_prime_boundaries.o: bin/nth_prime_boundaries.c | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@

@@ -15,7 +15,9 @@ path = "src/main.rs"
 primeparts-core.workspace = true
 
 anyhow.workspace = true
+arrow-array.workspace = true
 clap.workspace = true
+futures.workspace = true
 iceberg.workspace = true
 iceberg-catalog-sql.workspace = true
 serde.workspace = true
