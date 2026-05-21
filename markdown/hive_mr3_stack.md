@@ -89,6 +89,16 @@ sudo systemctl stop k3s
 sudo systemctl start k3s
 ```
 
+`pixi run kube-up` / `scripts/kube-up.sh` assumes the Kubernetes API is already
+running. If it reports a connection failure on `127.0.0.1:6443`, start k3s
+first and then rerun the script:
+
+```
+sudo systemctl start k3s
+kubectl get nodes
+pixi run kube-up
+```
+
 ### Client access
 ```
 # SQL via pyhive, NodePort 31140
@@ -102,6 +112,39 @@ FUNBUNS_HMS_URI=thrift://localhost:9850 pixi run python ...
 # The `get_table` vs `get_table_req` shim is applied via
 # `primeparts._patches`. Import it explicitly in scripts that use HMS directly.
 ```
+
+### Iceberg REST catalog switch
+
+The Hive/MR3 image currently has Iceberg's Java REST catalog client classes in
+`hive-iceberg-handler-4.0.0.jar`, including
+`org.apache.iceberg.rest.RESTCatalog`. It does not have Hive 4.2's newer
+`org.apache.iceberg.hive.client.HiveRESTCatalogClient`, so treat this as an
+Iceberg table-catalog switch for `HiveIcebergStorageHandler`, not a full
+replacement for Hive's own metastore client.
+
+The switch is centralized in `mr3/kubernetes/env.sh`:
+
+```
+ICEBERG_CATALOG_TYPE=hive
+ICEBERG_CATALOG_URI=thrift://$HIVE_METASTORE_HOST:$HIVE_METASTORE_PORT
+ICEBERG_CATALOG_WAREHOUSE=$HIVE_WAREHOUSE_DIR
+```
+
+Default behavior is unchanged: HS2 reads Iceberg tables through HMS Thrift, and
+HMS still uses MySQL for its metastore DB. To test a real Iceberg REST catalog,
+set:
+
+```
+ICEBERG_CATALOG_TYPE=rest
+ICEBERG_CATALOG_URI=http://<rest-catalog-service>.<namespace>.svc.cluster.local:<port>
+```
+
+Then propagate the config with the standard configmap/secret refresh below and
+restart HS2/MR3. Do not remove the MySQL/HMS pods until a query through HS2
+against `primeparts.*` succeeds through the REST catalog path. If the REST
+service is HMS-backed, MySQL is still required behind HMS; if the REST service
+is a separate catalog implementation, MySQL can be removed from the Iceberg
+table path after HS2 no longer depends on HMS table metadata.
 
 ### Config changes → pod propagation
 MR3 caches many settings at HS2 startup (the auto-generated

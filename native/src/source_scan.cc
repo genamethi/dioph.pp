@@ -151,35 +151,29 @@ struct SourceTableReader::Impl {
   }
 };
 
-std::unique_ptr<SourceTableReader> SourceTableReader::Open(
-    const fs::path& sqlite_path, std::string_view ns, std::string_view tbl,
+std::unique_ptr<SourceTableReader> SourceTableReader::OpenMetadata(
+    const fs::path& metadata_path,
     const std::vector<std::string>& select_columns, std::string* error) {
   ensure_format_registered();
 
-  std::string metadata_path;
-  if (!sqlite_lookup_metadata_location(sqlite_path, ns, tbl, &metadata_path,
-                                       error)) {
-    return nullptr;
-  }
-
-  auto impl = std::make_unique<Impl>();
+  auto impl = std::make_unique<SourceTableReader::Impl>();
   auto unique_io = iceberg::arrow::MakeLocalFileIO();
   impl->io = std::shared_ptr<iceberg::FileIO>(std::move(unique_io));
 
-  auto md_r = iceberg::TableMetadataUtil::Read(*impl->io, metadata_path);
+  auto md_r = iceberg::TableMetadataUtil::Read(*impl->io, metadata_path.string());
   if (!md_r.has_value()) {
     if (error) {
       *error = "TableMetadata::Read ";
-      *error += metadata_path;
+      *error += metadata_path.string();
       *error += ": " + md_r.error().message;
     }
     return nullptr;
   }
   impl->metadata = std::shared_ptr<iceberg::TableMetadata>(std::move(md_r.value()));
 
-  // Manifest-aggregated total row count: needed cheaply by the
-  // rewriter to validate against EXPECTED_N_PRIMES.
-  auto snap_r = impl->metadata->Snapshot();  // current snapshot
+  // Manifest-aggregated total row count: needed cheaply by readers to
+  // validate the scan scope without decoding data files.
+  auto snap_r = impl->metadata->Snapshot();
   if (snap_r.has_value() && snap_r.value()) {
     auto list_r = iceberg::ManifestListReader::Make(
         strip_file_scheme(snap_r.value()->manifest_list), impl->io);
@@ -248,6 +242,18 @@ std::unique_ptr<SourceTableReader> SourceTableReader::Open(
 
   return std::unique_ptr<SourceTableReader>(
       new SourceTableReader(std::move(impl)));
+}
+
+std::unique_ptr<SourceTableReader> SourceTableReader::Open(
+    const fs::path& sqlite_path, std::string_view ns, std::string_view tbl,
+    const std::vector<std::string>& select_columns, std::string* error) {
+  std::string metadata_path;
+  if (!sqlite_lookup_metadata_location(sqlite_path, ns, tbl, &metadata_path,
+                                       error)) {
+    return nullptr;
+  }
+
+  return OpenMetadata(metadata_path, select_columns, error);
 }
 
 SourceTableReader::SourceTableReader(std::unique_ptr<Impl> impl)

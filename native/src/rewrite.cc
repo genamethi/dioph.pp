@@ -19,7 +19,8 @@
 //      [p_min, p_max] overlaps the bucket's [p_min, p_max_excl).
 //   2. Build BucketJobs (one per bucket).
 //   3. Pool workers Pop() jobs, run their inner loop, push results.
-//   4. Main thread joins, emits files.jsonl entries.
+//   4. Main thread joins, emits audit files.jsonl entries and publishes
+//      Iceberg table metadata/catalog entries for primeparts.*.
 //
 // prime_rank
 // ==========
@@ -39,6 +40,7 @@
 #include "primeparts/writer.h"
 
 #include <arrow/api.h>
+#include <arrow/c/bridge.h>
 #include <arrow/io/file.h>
 #include <arrow/util/thread_pool.h>
 #include <parquet/arrow/reader.h>
@@ -49,11 +51,13 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -65,14 +69,35 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
+
+#include "iceberg/arrow/arrow_io_register.h"
+#include "iceberg/arrow/arrow_io_util.h"
+#include "iceberg/avro/avro_register.h"
+#include "iceberg/catalog.h"
+#include "iceberg/catalog/memory/in_memory_catalog.h"
+#include "iceberg/catalog/rest/catalog_properties.h"
+#include "iceberg/catalog/rest/rest_catalog.h"
+#include "iceberg/data/data_writer.h"
+#include "iceberg/expression/literal.h"
+#include "iceberg/file_writer.h"
+#include "iceberg/manifest/manifest_entry.h"
+#include "iceberg/parquet/parquet_register.h"
+#include "iceberg/partition_spec.h"
+#include "iceberg/sort_order.h"
+#include "iceberg/table.h"
+#include "iceberg/table_identifier.h"
+#include "iceberg/update/fast_append.h"
 
 namespace fs = std::filesystem;
 namespace cal = primeparts::calibration;
 
+using primeparts::BoundariesSchema;
 using primeparts::BucketDataDir;
 using primeparts::BucketParquetWriter;
+using primeparts::BucketPartitionSpec;
 using primeparts::IcebergToArrowSchemaWithFieldIds;
 using primeparts::NextFileSeq;
 using primeparts::PartitionsSchema;
@@ -206,6 +231,10 @@ struct Options {
   std::string source_partitions_table = "decompositions";
   std::string staging_primes_table = "primes";
   std::string staging_partitions_table = "partitions";
+  std::string rest_uri;
+  std::string rest_name = "primeparts";
+  std::string rest_warehouse;
+  std::string rest_prefix;
   int32_t p_bucket_version = 1;
   int64_t limit_primes = -1;          // smoke test cap; -1 = unlimited
   int32_t buckets = -1;               // smoke test: process only first N buckets; -1 = all
@@ -224,6 +253,10 @@ void usage(FILE* s) {
       "  --source-primes NAME     default: primes\n"
       "  --source-partitions NAME default: decompositions\n"
       "  --p-bucket-version V     default: 1\n"
+      "  --rest-uri URI           publish primeparts.* through Iceberg REST\n"
+      "  --rest-name NAME         REST catalog name, default: primeparts\n"
+      "  --rest-warehouse VALUE   REST warehouse config, default: --staging\n"
+      "  --rest-prefix PREFIX     optional REST catalog path prefix\n"
       "  --limit-primes N         smoke test: cap pass 1 at N primes\n"
       "  --buckets N              smoke test: process only the first N buckets\n"
       "  --skip-preflight         skip Pass 0 (dev iteration only)\n"
@@ -250,6 +283,10 @@ bool parse_args(int argc, char** argv, Options* o) {
       {"p-bucket-version", required_argument, nullptr, 'v'},
       {"limit-primes", required_argument, nullptr, 'l'},
       {"buckets", required_argument, nullptr, 1005},
+      {"rest-uri", required_argument, nullptr, 1006},
+      {"rest-name", required_argument, nullptr, 1007},
+      {"rest-warehouse", required_argument, nullptr, 1008},
+      {"rest-prefix", required_argument, nullptr, 1009},
       {"skip-preflight", no_argument, nullptr, 1004},
       {"preflight-only", no_argument, nullptr, 1003},
       {"help", no_argument, nullptr, 'h'},
@@ -263,6 +300,10 @@ bool parse_args(int argc, char** argv, Options* o) {
       case 1000: o->source_namespace = optarg; break;
       case 1001: o->source_primes_table = optarg; break;
       case 1002: o->source_partitions_table = optarg; break;
+      case 1006: o->rest_uri = optarg; break;
+      case 1007: o->rest_name = optarg; break;
+      case 1008: o->rest_warehouse = optarg; break;
+      case 1009: o->rest_prefix = optarg; break;
       case 'v': {
         int64_t v;
         if (!parse_i64(optarg, &v) || v <= 0 ||
@@ -299,6 +340,18 @@ bool parse_args(int argc, char** argv, Options* o) {
       (!o->preflight_only && o->staging_warehouse.empty())) {
     usage(stderr);
     return false;
+  }
+  if (o->rest_uri.empty()) {
+    const char* env = std::getenv("PRIMEPARTS_REST_CATALOG_URI");
+    if (env && *env) o->rest_uri = env;
+  }
+  if (o->rest_warehouse.empty()) {
+    const char* env = std::getenv("PRIMEPARTS_REST_WAREHOUSE");
+    if (env && *env) o->rest_warehouse = env;
+  }
+  if (o->rest_prefix.empty()) {
+    const char* env = std::getenv("PRIMEPARTS_REST_PREFIX");
+    if (env && *env) o->rest_prefix = env;
   }
   return true;
 }
@@ -811,6 +864,254 @@ void emit_boundary(std::ofstream& out, int32_t version, int32_t bucket,
       << "\"rank_min\":" << rank_min << "}\n";
 }
 
+template <typename Builder>
+bool finish_array(Builder* builder, std::shared_ptr<arrow::Array>* out,
+                  std::string* error) {
+  auto status = builder->Finish(out);
+  if (!status.ok()) {
+    if (error) *error = status.ToString();
+    return false;
+  }
+  return true;
+}
+
+std::shared_ptr<iceberg::FileIO> local_file_io() {
+  return std::shared_ptr<iceberg::FileIO>(iceberg::arrow::MakeLocalFileIO());
+}
+
+std::unordered_map<std::string, std::string> table_properties() {
+  return {
+      {"write.parquet.compression-codec", "zstd"},
+      {"write.parquet.compression-level", "3"},
+  };
+}
+
+std::unordered_map<std::string, std::string> boundary_writer_properties() {
+  return {
+      {iceberg::WriterProperties::kParquetCompression.key(), "zstd"},
+      {iceberg::WriterProperties::kParquetCompressionLevel.key(), "3"},
+      {iceberg::WriterProperties::kParquetDataPageSize.key(), std::to_string(1 << 20)},
+      {iceberg::WriterProperties::kParquetMaxRowGroupLength.key(), "240000000"},
+      {std::string(iceberg::WriterProperties::kParquetDictionaryEnabledColumnPrefix.key()) +
+           "p_min",
+       "false"},
+      {std::string(iceberg::WriterProperties::kParquetEncodingColumnPrefix.key()) +
+           "p_min",
+       "DELTA_BINARY_PACKED"},
+      {std::string(iceberg::WriterProperties::kParquetDictionaryEnabledColumnPrefix.key()) +
+           "rank_min",
+       "false"},
+      {std::string(iceberg::WriterProperties::kParquetEncodingColumnPrefix.key()) +
+           "rank_min",
+       "DELTA_BINARY_PACKED"},
+  };
+}
+
+bool write_boundaries_data_file(const fs::path& staging_warehouse,
+                                const std::vector<BoundaryRow>& boundaries,
+                                int32_t bucket_version,
+                                std::shared_ptr<iceberg::DataFile>* out,
+                                std::string* error) {
+  auto schema = BoundariesSchema();
+  std::shared_ptr<arrow::Schema> arrow_schema =
+      IcebergToArrowSchemaWithFieldIds(*schema, error);
+  if (!arrow_schema) return false;
+
+  arrow::Int32Builder version_builder;
+  arrow::Int32Builder bucket_builder;
+  arrow::Int64Builder p_min_builder;
+  arrow::Int64Builder rank_min_builder;
+  for (const auto& b : boundaries) {
+    if (!version_builder.Append(bucket_version).ok() ||
+        !bucket_builder.Append(b.p_bucket).ok() ||
+        !p_min_builder.Append(b.p_min).ok() ||
+        !rank_min_builder.Append(b.rank_min).ok()) {
+      if (error) *error = "append boundary arrow values failed";
+      return false;
+    }
+  }
+
+  std::shared_ptr<arrow::Array> version_array;
+  std::shared_ptr<arrow::Array> bucket_array;
+  std::shared_ptr<arrow::Array> p_min_array;
+  std::shared_ptr<arrow::Array> rank_min_array;
+  if (!finish_array(&version_builder, &version_array, error) ||
+      !finish_array(&bucket_builder, &bucket_array, error) ||
+      !finish_array(&p_min_builder, &p_min_array, error) ||
+      !finish_array(&rank_min_builder, &rank_min_array, error)) {
+    return false;
+  }
+
+  auto batch = arrow::RecordBatch::Make(
+      arrow_schema, static_cast<int64_t>(boundaries.size()),
+      {version_array, bucket_array, p_min_array, rank_min_array});
+
+  const fs::path data_dir =
+      staging_warehouse / "primeparts" / "boundaries" / "data";
+  std::error_code ec;
+  fs::create_directories(data_dir, ec);
+  if (ec) {
+    if (error) *error = "mkdir " + data_dir.string() + ": " + ec.message();
+    return false;
+  }
+  const fs::path final_path = data_dir / "boundaries_0000.parquet";
+  if (fs::exists(final_path, ec)) {
+    if (error) *error = "refusing to overwrite: " + final_path.string();
+    return false;
+  }
+
+  iceberg::DataWriterOptions options;
+  options.path = final_path.string();
+  options.schema = schema;
+  options.spec = iceberg::PartitionSpec::Unpartitioned();
+  options.partition = iceberg::PartitionValues{};
+  options.format = iceberg::FileFormatType::kParquet;
+  options.io = local_file_io();
+  options.properties = boundary_writer_properties();
+
+  auto writer_result = iceberg::DataWriter::Make(options);
+  if (!writer_result.has_value()) {
+    if (error) *error = writer_result.error().message;
+    return false;
+  }
+  auto writer = std::move(writer_result.value());
+
+  ArrowArray c_array;
+  auto export_status = arrow::ExportRecordBatch(*batch, &c_array);
+  if (!export_status.ok()) {
+    if (error) *error = export_status.ToString();
+    return false;
+  }
+  auto write_status = writer->Write(&c_array);
+  if (!write_status.has_value()) {
+    if (error) *error = write_status.error().message;
+    return false;
+  }
+  auto close_status = writer->Close();
+  if (!close_status.has_value()) {
+    if (error) *error = close_status.error().message;
+    return false;
+  }
+  auto metadata_result = writer->Metadata();
+  if (!metadata_result.has_value()) {
+    if (error) *error = metadata_result.error().message;
+    return false;
+  }
+  auto write_result = std::move(metadata_result.value());
+  if (write_result.data_files.size() != 1) {
+    if (error) *error = "boundary writer returned unexpected data file count";
+    return false;
+  }
+  *out = std::move(write_result.data_files.front());
+  return true;
+}
+
+std::shared_ptr<iceberg::Catalog> make_catalog(const Options& opts,
+                                               std::string* mode,
+                                               std::string* error) {
+  if (!opts.rest_uri.empty()) {
+    iceberg::arrow::EnsureArrowFileIOsRegistered();
+    auto config = iceberg::rest::RestCatalogProperties::default_properties();
+    config.Set(iceberg::rest::RestCatalogProperties::kUri, opts.rest_uri)
+        .Set(iceberg::rest::RestCatalogProperties::kName, opts.rest_name)
+        .Set(iceberg::rest::RestCatalogProperties::kWarehouse,
+             opts.rest_warehouse.empty() ? opts.staging_warehouse.string()
+                                         : opts.rest_warehouse);
+    if (!opts.rest_prefix.empty()) {
+      config.Set(iceberg::rest::RestCatalogProperties::kPrefix,
+                 opts.rest_prefix);
+    }
+    auto catalog_result = iceberg::rest::RestCatalog::Make(config);
+    if (!catalog_result.has_value()) {
+      if (error) *error = catalog_result.error().message;
+      return nullptr;
+    }
+    if (mode) *mode = "rest";
+    return std::move(catalog_result.value());
+  }
+
+  if (mode) *mode = "metadata-only";
+  return std::make_shared<iceberg::InMemoryCatalog>(
+      "primeparts-staging", local_file_io(), opts.staging_warehouse.string(),
+      std::unordered_map<std::string, std::string>{});
+}
+
+bool ensure_namespace(const std::shared_ptr<iceberg::Catalog>& catalog,
+                      const iceberg::Namespace& ns, std::string* error) {
+  auto exists = catalog->NamespaceExists(ns);
+  if (!exists.has_value()) {
+    if (error) *error = exists.error().message;
+    return false;
+  }
+  if (exists.value()) return true;
+  auto status = catalog->CreateNamespace(ns, {});
+  if (!status.has_value()) {
+    if (error) *error = status.error().message;
+    return false;
+  }
+  return true;
+}
+
+struct CatalogTableResult {
+  std::string table;
+  std::string metadata_location;
+};
+
+bool create_appended_table(
+    const std::shared_ptr<iceberg::Catalog>& catalog,
+    std::string_view table_name, const fs::path& table_location,
+    const std::shared_ptr<iceberg::Schema>& schema,
+    const std::shared_ptr<iceberg::PartitionSpec>& spec,
+    const std::vector<std::shared_ptr<iceberg::DataFile>>& data_files,
+    CatalogTableResult* out, std::string* error) {
+  std::error_code ec;
+  fs::create_directories(table_location / "metadata", ec);
+  if (ec) {
+    if (error) *error = "mkdir " + (table_location / "metadata").string() +
+                        ": " + ec.message();
+    return false;
+  }
+
+  iceberg::TableIdentifier ident{
+      .ns = iceberg::Namespace{{"primeparts"}},
+      .name = std::string(table_name),
+  };
+  auto created = catalog->CreateTable(
+      ident, schema, spec, iceberg::SortOrder::Unsorted(), table_location.string(),
+      table_properties());
+  if (!created.has_value()) {
+    if (error) *error = created.error().message;
+    return false;
+  }
+  auto table = std::move(created.value());
+
+  if (!data_files.empty()) {
+    auto append_result = table->NewFastAppend();
+    if (!append_result.has_value()) {
+      if (error) *error = append_result.error().message;
+      return false;
+    }
+    auto append = std::move(append_result.value());
+    for (const auto& file : data_files) {
+      append->AppendFile(file);
+    }
+    auto commit_result = append->Commit();
+    if (!commit_result.has_value()) {
+      if (error) *error = commit_result.error().message;
+      return false;
+    }
+    auto refresh_status = table->Refresh();
+    if (!refresh_status.has_value()) {
+      if (error) *error = refresh_status.error().message;
+      return false;
+    }
+  }
+
+  out->table = std::string("primeparts.") + std::string(table_name);
+  out->metadata_location = std::string(table->metadata_file_location());
+  return true;
+}
+
 }  // namespace
 
 // ============================================================================
@@ -986,11 +1287,13 @@ int main(int argc, char** argv) {
   }
   int64_t primes_files_total = 0;
   int64_t primes_rows_total = 0;
+  std::vector<std::shared_ptr<iceberg::DataFile>> primes_data_files;
   for (const auto& r : primes_results) {
     for (const auto& f : r.files) {
       emit_file_row(manifest, f);
       primes_files_total++;
       primes_rows_total += f.rows;
+      if (f.data_file) primes_data_files.push_back(f.data_file);
     }
   }
   manifest.flush();
@@ -1033,11 +1336,13 @@ int main(int argc, char** argv) {
   }
   int64_t parts_files_total = 0;
   int64_t parts_rows_total = 0;
+  std::vector<std::shared_ptr<iceberg::DataFile>> parts_data_files;
   for (const auto& r : parts_results) {
     for (const auto& f : r.files) {
       emit_file_row(manifest, f);
       parts_files_total++;
       parts_rows_total += f.rows;
+      if (f.data_file) parts_data_files.push_back(f.data_file);
     }
   }
   manifest.flush();
@@ -1047,6 +1352,74 @@ int main(int argc, char** argv) {
                static_cast<long long>(parts_rows_total),
                static_cast<long long>(parts_files_total),
                std::chrono::duration<double>(t_phase2_end - t_phase2).count());
+
+  iceberg::avro::RegisterAll();
+  iceberg::parquet::RegisterAll();
+
+  std::shared_ptr<iceberg::DataFile> boundaries_data_file;
+  if (!write_boundaries_data_file(opts.staging_warehouse, boundaries,
+                                  opts.p_bucket_version,
+                                  &boundaries_data_file, &error)) {
+    std::fprintf(stderr, "write boundaries table: %s\n", error.c_str());
+    return 1;
+  }
+
+  std::string catalog_mode;
+  auto catalog = make_catalog(opts, &catalog_mode, &error);
+  if (!catalog) {
+    std::fprintf(stderr, "open iceberg catalog: %s\n", error.c_str());
+    return 1;
+  }
+  if (!ensure_namespace(catalog, iceberg::Namespace{{"primeparts"}}, &error)) {
+    std::fprintf(stderr, "create namespace primeparts: %s\n", error.c_str());
+    return 1;
+  }
+  std::fprintf(stdout, "iceberg catalog: %s\n", catalog_mode.c_str());
+
+  std::vector<CatalogTableResult> catalog_tables;
+  CatalogTableResult table_result;
+  auto primes_schema = PrimesSchema();
+  auto primes_spec = BucketPartitionSpec(*primes_schema, &error);
+  if (!primes_spec ||
+      !create_appended_table(catalog, opts.staging_primes_table,
+                             opts.staging_warehouse / "primeparts" /
+                                 opts.staging_primes_table,
+                             primes_schema, primes_spec, primes_data_files,
+                             &table_result, &error)) {
+    std::fprintf(stderr, "create primes iceberg metadata: %s\n", error.c_str());
+    return 1;
+  }
+  catalog_tables.push_back(table_result);
+
+  auto partitions_schema = PartitionsSchema();
+  auto partitions_spec = BucketPartitionSpec(*partitions_schema, &error);
+  if (!partitions_spec ||
+      !create_appended_table(catalog, opts.staging_partitions_table,
+                             opts.staging_warehouse / "primeparts" /
+                                 opts.staging_partitions_table,
+                             partitions_schema, partitions_spec, parts_data_files,
+                             &table_result, &error)) {
+    std::fprintf(stderr, "create partitions iceberg metadata: %s\n", error.c_str());
+    return 1;
+  }
+  catalog_tables.push_back(table_result);
+
+  std::vector<std::shared_ptr<iceberg::DataFile>> boundaries_files = {
+      boundaries_data_file};
+  if (!create_appended_table(catalog, "boundaries",
+                             opts.staging_warehouse / "primeparts" / "boundaries",
+                             BoundariesSchema(), iceberg::PartitionSpec::Unpartitioned(),
+                             boundaries_files, &table_result, &error)) {
+    std::fprintf(stderr, "create boundaries iceberg metadata: %s\n", error.c_str());
+    return 1;
+  }
+  catalog_tables.push_back(table_result);
+
+  for (const auto& t : catalog_tables) {
+    std::fprintf(stdout, "iceberg metadata: %s %s\n", t.table.c_str(),
+                 t.metadata_location.c_str());
+  }
+
   progress.Stop();
   std::fprintf(stdout,
                "rewrite done: %lld primes + %lld partitions (prime_rank null; backfill next)\n",

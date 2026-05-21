@@ -48,6 +48,13 @@ class SourceTableReader {
       std::string_view table_name,
       const std::vector<std::string>& select_columns, std::string* error);
 
+  // Open directly from an Iceberg metadata JSON path. This is useful for
+  // staging tables that are already materialized but not registered in the
+  // local SQLite catalog.
+  static std::unique_ptr<SourceTableReader> OpenMetadata(
+      const fs::path& metadata_path,
+      const std::vector<std::string>& select_columns, std::string* error);
+
   ~SourceTableReader();
   SourceTableReader(const SourceTableReader&) = delete;
   SourceTableReader& operator=(const SourceTableReader&) = delete;

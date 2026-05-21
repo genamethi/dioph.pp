@@ -9,6 +9,19 @@ set -euo pipefail
 
 NS=hivemr3
 
+if ! kubectl version --client=false --request-timeout=5s >/dev/null 2>&1; then
+  echo "Kubernetes API is not reachable via the current kubeconfig." >&2
+  if systemctl is-active --quiet k3s 2>/dev/null; then
+    echo "k3s is active, but kubectl cannot reach 127.0.0.1:6443." >&2
+    echo "Check: sudo journalctl -u k3s -n 120 --no-pager" >&2
+  else
+    echo "k3s is inactive. Start it first:" >&2
+    echo "  sudo systemctl start k3s" >&2
+    echo "Then rerun: scripts/kube-up.sh" >&2
+  fi
+  exit 2
+fi
+
 # If the node was cordoned (kubectl cordon / drain), un-cordon first so the
 # scaled-up pods can actually schedule.
 for n in $(kubectl get nodes -o jsonpath='{.items[?(@.spec.unschedulable==true)].metadata.name}'); do

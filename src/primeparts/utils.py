@@ -12,6 +12,7 @@ import tomllib
 import time
 import shutil
 from typing import Dict, List, Optional
+
 def get_log_dir() -> Path:
     """Get the log directory path."""
     if log_dir := os.getenv('FUNBUNS_LOG_DIR'):

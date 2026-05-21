@@ -14,8 +14,14 @@
 #include <string>
 #include <system_error>
 
+#include "iceberg/expression/literal.h"
+#include "iceberg/manifest/manifest_entry.h"
+#include "iceberg/partition_field.h"
+#include "iceberg/partition_spec.h"
+#include "iceberg/row/partition_values.h"
 #include "iceberg/schema.h"
 #include "iceberg/schema_field.h"
+#include "iceberg/transform.h"
 #include "iceberg/type.h"
 
 namespace primeparts {
@@ -31,6 +37,108 @@ fs::path FilePathFor(const fs::path& dir, std::string_view prefix,
                 static_cast<int>(prefix.size()), prefix.data(),
                 bucket_version, bucket, seq);
   return dir / name;
+}
+
+int32_t FieldIdByName(const iceberg::Schema& schema, std::string_view name) {
+  for (const auto& field : schema.fields()) {
+    if (field.name() == name) return field.field_id();
+  }
+  return -1;
+}
+
+std::shared_ptr<iceberg::PartitionSpec> MakeBucketPartitionSpec(
+    const iceberg::Schema& schema, std::string* error) {
+  const int32_t bucket_version_id = FieldIdByName(schema, "p_bucket_version");
+  const int32_t bucket_id = FieldIdByName(schema, "p_bucket");
+  if (bucket_version_id < 0 || bucket_id < 0) {
+    if (error) *error = "schema is missing p_bucket_version or p_bucket";
+    return nullptr;
+  }
+
+  auto spec_result = iceberg::PartitionSpec::Make(
+      schema, iceberg::PartitionSpec::kInitialSpecId,
+      {iceberg::PartitionField(bucket_version_id, 1000, "p_bucket_version",
+                               iceberg::Transform::Identity()),
+       iceberg::PartitionField(bucket_id, 1001, "p_bucket",
+                               iceberg::Transform::Identity())},
+      /*allow_missing_fields=*/false);
+  if (!spec_result.has_value()) {
+    if (error) *error = spec_result.error().message;
+    return nullptr;
+  }
+  return std::shared_ptr<iceberg::PartitionSpec>(std::move(spec_result.value()));
+}
+
+std::shared_ptr<parquet::WriterProperties> ParquetWriterProperties(
+    const WriterConfig& config, const arrow::Schema& arrow_schema) {
+  parquet::WriterProperties::Builder builder;
+  builder.compression(parquet::Compression::ZSTD);
+  builder.compression_level(config.compression_level);
+  builder.data_pagesize(config.data_pagesize);
+  // ~256 MiB target row group => 4 row groups per ~1 GiB file. Both
+  // output schemas land at ~1.1 B/row with DELTA+zstd on the monotone
+  // columns (p, prime_rank, q_k), so 240M rows ~= 264 MiB compressed.
+  builder.max_row_group_length(240'000'000);
+  for (const auto& col : config.delta_columns) {
+    if (arrow_schema.GetFieldByName(col)) {
+      builder.disable_dictionary(col);
+      builder.encoding(col, parquet::Encoding::DELTA_BINARY_PACKED);
+    }
+  }
+  return builder.build();
+}
+
+bool PutBound(std::map<int32_t, std::vector<uint8_t>>* bounds, int32_t field_id,
+              const iceberg::Literal& literal, std::string* error) {
+  auto serialized = literal.Serialize();
+  if (!serialized.has_value()) {
+    if (error) *error = serialized.error().message;
+    return false;
+  }
+  (*bounds)[field_id] = std::move(serialized.value());
+  return true;
+}
+
+bool BuildDataFile(const WriterConfig& config,
+                   const std::shared_ptr<iceberg::PartitionSpec>& spec,
+                   const WrittenFile& file,
+                   std::shared_ptr<iceberg::DataFile>* out,
+                   std::string* error) {
+  if (!config.schema) {
+    if (error) *error = "WriterConfig.schema is null";
+    return false;
+  }
+  auto data_file = std::make_shared<iceberg::DataFile>();
+  data_file->content = iceberg::DataFile::Content::kData;
+  data_file->file_path = file.path.string();
+  data_file->file_format = iceberg::FileFormatType::kParquet;
+  data_file->partition = iceberg::PartitionValues({
+      iceberg::Literal::Int(config.bucket_version),
+      iceberg::Literal::Int(config.bucket),
+  });
+  data_file->record_count = file.rows;
+  data_file->file_size_in_bytes = file.bytes;
+  if (spec) data_file->partition_spec_id = spec->spec_id();
+
+  for (const auto& field : config.schema->fields()) {
+    data_file->value_counts[field.field_id()] = file.rows;
+    if (!field.optional()) {
+      data_file->null_value_counts[field.field_id()] = 0;
+    }
+  }
+
+  const int32_t p_id = FieldIdByName(*config.schema, "p");
+  if (p_id >= 0 && file.rows > 0) {
+    if (!PutBound(&data_file->lower_bounds, p_id,
+                  iceberg::Literal::Long(file.p_min), error) ||
+        !PutBound(&data_file->upper_bounds, p_id,
+                  iceberg::Literal::Long(file.p_max), error)) {
+      return false;
+    }
+  }
+
+  *out = std::move(data_file);
+  return true;
 }
 
 }  // namespace
@@ -65,6 +173,22 @@ std::shared_ptr<iceberg::Schema> PartitionsSchema() {
       0);
 }
 
+std::shared_ptr<iceberg::Schema> BoundariesSchema() {
+  return std::make_shared<iceberg::Schema>(
+      std::vector<iceberg::SchemaField>{
+          iceberg::SchemaField::MakeRequired(1, "p_bucket_version", iceberg::int32()),
+          iceberg::SchemaField::MakeRequired(2, "p_bucket",         iceberg::int32()),
+          iceberg::SchemaField::MakeRequired(3, "p_min",            iceberg::int64()),
+          iceberg::SchemaField::MakeRequired(4, "rank_min",         iceberg::int64()),
+      },
+      0);
+}
+
+std::shared_ptr<iceberg::PartitionSpec> BucketPartitionSpec(
+    const iceberg::Schema& schema, std::string* error) {
+  return MakeBucketPartitionSpec(schema, error);
+}
+
 std::shared_ptr<arrow::Schema> IcebergToArrowSchemaWithFieldIds(
     const iceberg::Schema& schema, std::string* error) {
   arrow::FieldVector fields;
@@ -94,7 +218,7 @@ std::shared_ptr<arrow::Schema> IcebergToArrowSchemaWithFieldIds(
 
 fs::path BucketDataDir(const fs::path& warehouse, std::string_view table,
                        int32_t bucket_version, int32_t bucket) {
-  return warehouse / "funbuns" / std::string(table) / "data" /
+  return warehouse / "primeparts" / std::string(table) / "data" /
          ("p_bucket_version=" + std::to_string(bucket_version)) /
          ("p_bucket=" + std::to_string(bucket));
 }
@@ -125,6 +249,7 @@ int32_t NextFileSeq(const fs::path& output_dir, std::string_view prefix) {
 struct BucketParquetWriter::Impl {
   WriterConfig config;
   std::shared_ptr<arrow::Schema> arrow_schema;
+  std::shared_ptr<iceberg::PartitionSpec> partition_spec;
   std::shared_ptr<parquet::WriterProperties> props;
   int32_t next_seq = 0;
   bool closed = false;
@@ -206,6 +331,10 @@ bool BucketParquetWriter::Impl::CloseCurrent(std::string* error) {
     return false;
   }
   current_record.path = final_path;
+  if (!BuildDataFile(config, partition_spec, current_record,
+                     &current_record.data_file, error)) {
+    return false;
+  }
   done.push_back(current_record);
 
   writer.reset();
@@ -223,26 +352,10 @@ std::unique_ptr<BucketParquetWriter> BucketParquetWriter::Make(
   }
   impl->arrow_schema = IcebergToArrowSchemaWithFieldIds(*config.schema, error);
   if (!impl->arrow_schema) return nullptr;
+  impl->partition_spec = MakeBucketPartitionSpec(*config.schema, error);
+  if (!impl->partition_spec) return nullptr;
 
-  parquet::WriterProperties::Builder builder;
-  builder.compression(parquet::Compression::ZSTD);
-  builder.compression_level(config.compression_level);
-  builder.data_pagesize(config.data_pagesize);
-  // ~256 MiB target row group => 4 row groups per ~1 GiB file. Both
-  // output schemas land at ~1.1 B/row with DELTA+zstd on the monotone
-  // columns (p, prime_rank, q_k), so 240M rows ≈ 264 MiB compressed.
-  // Parquet rolls strictly on row count; that's fine here — for primes
-  // every row has a distinct p, and for partitions a row-group split
-  // inside a prime is tolerable (only *file* boundaries need to snap
-  // to p, which the writer's target_rows_per_file logic already does).
-  builder.max_row_group_length(240'000'000);
-  for (const auto& col : config.delta_columns) {
-    if (impl->arrow_schema->GetFieldByName(col)) {
-      builder.disable_dictionary(col);
-      builder.encoding(col, parquet::Encoding::DELTA_BINARY_PACKED);
-    }
-  }
-  impl->props = builder.build();
+  impl->props = ParquetWriterProperties(config, *impl->arrow_schema);
   impl->next_seq = config.starting_file_seq;
   impl->config = std::move(config);
 

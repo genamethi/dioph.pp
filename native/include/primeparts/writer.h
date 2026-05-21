@@ -5,10 +5,10 @@
 // them. It owns the iceberg-cpp Schema → arrow-with-PARQUET:field_id
 // translation and the per-column DELTA/zstd encoding policy.
 //
-// Per-column DELTA encoding is the reason we bypass iceberg-cpp's own
-// parquet writer here: iceberg::ParquetWriterProperties doesn't expose
-// per-column DELTA_BINARY_PACKED yet, while parquet::arrow::FileWriter
-// does.
+// The physical writer is parquet::arrow::FileWriter. Iceberg DataFile
+// metadata is synthesized after close from the writer's exact file stats,
+// keeping catalog publication high-level without putting Iceberg's
+// Arrow-C bridge on the row-write hot path.
 
 #pragma once
 
@@ -26,6 +26,8 @@ class Schema;
 }
 
 namespace iceberg {
+struct DataFile;
+class PartitionSpec;
 class Schema;
 }
 
@@ -33,10 +35,9 @@ namespace primeparts {
 
 namespace fs = std::filesystem;
 
-// One parquet file written by BucketParquetWriter. Same shape that
-// generate.cc has emitted into files.jsonl since the project began;
-// rewriter emits the same format so the commit binary doesn't care
-// whether the bytes came from FLINT or from a rewrite pass.
+// One parquet file written by BucketParquetWriter. The JSONL projection
+// remains useful as an audit trail, but the Iceberg DataFile metadata is
+// the catalog handoff for native rewrites.
 struct WrittenFile {
   std::string table;          // logical table name: "primes" or "partitions"
   fs::path path;              // absolute on-disk path
@@ -48,6 +49,7 @@ struct WrittenFile {
   int64_t rank_min = 0;
   int64_t rank_max = 0;
   int64_t bytes = 0;
+  std::shared_ptr<iceberg::DataFile> data_file;
 };
 
 struct WriterConfig {
@@ -112,9 +114,12 @@ std::shared_ptr<arrow::Schema> IcebergToArrowSchemaWithFieldIds(
 // so the slots are retired in the new tables.
 std::shared_ptr<iceberg::Schema> PrimesSchema();
 std::shared_ptr<iceberg::Schema> PartitionsSchema();
+std::shared_ptr<iceberg::Schema> BoundariesSchema();
+std::shared_ptr<iceberg::PartitionSpec> BucketPartitionSpec(
+    const iceberg::Schema& schema, std::string* error);
 
 // Default bucket-data-dir layout used by the live writer. Kept here so
-// generate.cc and rewrite.cc compute identical paths.
+// generate.cc and rewrite.cc compute identical primeparts.* paths.
 fs::path BucketDataDir(const fs::path& warehouse, std::string_view table,
                        int32_t bucket_version, int32_t bucket);
 
