@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <unordered_set>
 
 #include "iceberg/expression/literal.h"
 #include "iceberg/manifest/manifest_entry.h"
@@ -31,11 +32,17 @@ namespace {
 constexpr std::string_view kTmpDotPrefix = ".";
 
 fs::path FilePathFor(const fs::path& dir, std::string_view prefix,
-                     int32_t bucket_version, int32_t bucket, int32_t seq) {
+                     int32_t bucket_version, int32_t bucket, int32_t seq,
+                     bool simple) {
   char name[160];
-  std::snprintf(name, sizeof(name), "%.*s_v%04d_b%06d_%04d.parquet",
-                static_cast<int>(prefix.size()), prefix.data(),
-                bucket_version, bucket, seq);
+  if (simple) {
+    std::snprintf(name, sizeof(name), "%.*s_%04d.parquet",
+                  static_cast<int>(prefix.size()), prefix.data(), seq);
+  } else {
+    std::snprintf(name, sizeof(name), "%.*s_v%04d_b%06d_%04d.parquet",
+                  static_cast<int>(prefix.size()), prefix.data(),
+                  bucket_version, bucket, seq);
+  }
   return dir / name;
 }
 
@@ -112,10 +119,14 @@ bool BuildDataFile(const WriterConfig& config,
   data_file->content = iceberg::DataFile::Content::kData;
   data_file->file_path = file.path.string();
   data_file->file_format = iceberg::FileFormatType::kParquet;
-  data_file->partition = iceberg::PartitionValues({
-      iceberg::Literal::Int(config.bucket_version),
-      iceberg::Literal::Int(config.bucket),
-  });
+  if (config.partition_values) {
+    data_file->partition = *config.partition_values;
+  } else {
+    data_file->partition = iceberg::PartitionValues({
+        iceberg::Literal::Int(config.bucket_version),
+        iceberg::Literal::Int(config.bucket),
+    });
+  }
   data_file->record_count = file.rows;
   data_file->file_size_in_bytes = file.bytes;
   if (spec) data_file->partition_spec_id = spec->spec_id();
@@ -143,18 +154,21 @@ bool BuildDataFile(const WriterConfig& config,
 
 }  // namespace
 
-// prime_rank is optional in the staging schema because the rewriter
-// writes it as null and the backfill pass populates it after. Promote
-// to required (via iceberg schema evolution) only after backfill has
-// run and every file has a non-null prime_rank column.
+// All fields required. The staging warehouse is the post-backfill
+// target — prime_rank is materialized either inline by the rewriter or
+// by a separate backfill pass before metadata publish, and downstream
+// readers can rely on it being non-null. Field ids are contiguous; the
+// earlier scheme that skipped 3 / 5 / 8 to retire commit_seq turned out
+// to be incidental rather than load-bearing, and renumbering created
+// drift with what was actually on disk.
 std::shared_ptr<iceberg::Schema> PrimesSchema() {
   return std::make_shared<iceberg::Schema>(
       std::vector<iceberg::SchemaField>{
           iceberg::SchemaField::MakeRequired(1, "p",                iceberg::int64()),
           iceberg::SchemaField::MakeRequired(2, "k",                iceberg::int32()),
-          iceberg::SchemaField::MakeOptional(4, "prime_rank",       iceberg::int64()),
-          iceberg::SchemaField::MakeRequired(5, "p_bucket_version", iceberg::int32()),
-          iceberg::SchemaField::MakeRequired(6, "p_bucket",         iceberg::int32()),
+          iceberg::SchemaField::MakeRequired(3, "prime_rank",       iceberg::int64()),
+          iceberg::SchemaField::MakeRequired(4, "p_bucket_version", iceberg::int32()),
+          iceberg::SchemaField::MakeRequired(5, "p_bucket",         iceberg::int32()),
       },
       0);
 }
@@ -166,9 +180,9 @@ std::shared_ptr<iceberg::Schema> PartitionsSchema() {
           iceberg::SchemaField::MakeRequired(2, "m_k",              iceberg::int32()),
           iceberg::SchemaField::MakeRequired(3, "n_k",              iceberg::int32()),
           iceberg::SchemaField::MakeRequired(4, "q_k",              iceberg::int64()),
-          iceberg::SchemaField::MakeOptional(6, "prime_rank",       iceberg::int64()),
-          iceberg::SchemaField::MakeRequired(7, "p_bucket_version", iceberg::int32()),
-          iceberg::SchemaField::MakeRequired(8, "p_bucket",         iceberg::int32()),
+          iceberg::SchemaField::MakeRequired(5, "prime_rank",       iceberg::int64()),
+          iceberg::SchemaField::MakeRequired(6, "p_bucket_version", iceberg::int32()),
+          iceberg::SchemaField::MakeRequired(7, "p_bucket",         iceberg::int32()),
       },
       0);
 }
@@ -190,16 +204,29 @@ std::shared_ptr<iceberg::PartitionSpec> BucketPartitionSpec(
 }
 
 std::shared_ptr<arrow::Schema> IcebergToArrowSchemaWithFieldIds(
-    const iceberg::Schema& schema, std::string* error) {
+    const iceberg::Schema& schema, std::string* error,
+    const iceberg::PartitionSpec* partition_spec) {
+  std::unordered_set<int32_t> skip_source_ids;
+  if (partition_spec) {
+    for (const auto& pf : partition_spec->fields()) {
+      if (pf.transform() &&
+          pf.transform()->transform_type() == iceberg::TransformType::kIdentity) {
+        skip_source_ids.insert(pf.source_id());
+      }
+    }
+  }
   arrow::FieldVector fields;
   fields.reserve(schema.fields().size());
   for (const auto& f : schema.fields()) {
+    if (skip_source_ids.count(f.field_id())) continue;
     std::shared_ptr<arrow::DataType> at;
     auto tid = f.type()->type_id();
     if (tid == iceberg::TypeId::kLong) {
       at = arrow::int64();
     } else if (tid == iceberg::TypeId::kInt) {
       at = arrow::int32();
+    } else if (tid == iceberg::TypeId::kString) {
+      at = arrow::utf8();
     } else {
       if (error) *error = std::string("unsupported field type for: ") +
                           std::string(f.name());
@@ -278,7 +305,8 @@ bool BucketParquetWriter::Impl::OpenIfNeeded(std::string* error) {
   }
 
   final_path = FilePathFor(config.output_dir, config.filename_prefix,
-                           config.bucket_version, config.bucket, next_seq);
+                           config.bucket_version, config.bucket, next_seq,
+                           config.simple_filename);
   if (fs::exists(final_path)) {
     if (error) *error = "refusing to overwrite: " + final_path.string();
     return false;
@@ -350,10 +378,18 @@ std::unique_ptr<BucketParquetWriter> BucketParquetWriter::Make(
     if (error) *error = "WriterConfig.schema is null";
     return nullptr;
   }
-  impl->arrow_schema = IcebergToArrowSchemaWithFieldIds(*config.schema, error);
+  if (config.partition_spec) {
+      impl->partition_spec = config.partition_spec;
+  } else {
+      impl->partition_spec = MakeBucketPartitionSpec(*config.schema, error);
+      if (!impl->partition_spec) return nullptr;
+  }
+  // Identity-partition source fields live in the manifest's partition tuple
+  // and are synthesized by readers at scan time. Pass the spec so the helper
+  // omits them from the physical arrow/parquet schema.
+  impl->arrow_schema = IcebergToArrowSchemaWithFieldIds(
+      *config.schema, error, impl->partition_spec.get());
   if (!impl->arrow_schema) return nullptr;
-  impl->partition_spec = MakeBucketPartitionSpec(*config.schema, error);
-  if (!impl->partition_spec) return nullptr;
 
   impl->props = ParquetWriterProperties(config, *impl->arrow_schema);
   impl->next_seq = config.starting_file_seq;
@@ -389,10 +425,25 @@ bool BucketParquetWriter::Write(const arrow::RecordBatch& batch,
   }
   if (!impl_->OpenIfNeeded(error)) return false;
 
-  // Re-wrap so the writer's target schema (with PARQUET:field_id) is
-  // the one parquet sees.
+  // Project the input batch onto the writer's target schema by column
+  // name. Callers can pass the full iceberg-shaped batch (e.g. with
+  // p_bucket_version / p_bucket columns); identity-partition source
+  // columns get dropped here since they live in the manifest's
+  // partition tuple, not on disk.
+  std::vector<std::shared_ptr<arrow::Array>> projected;
+  projected.reserve(impl_->arrow_schema->num_fields());
+  for (const auto& f : impl_->arrow_schema->fields()) {
+    auto col = batch.GetColumnByName(f->name());
+    if (!col) {
+      if (error) {
+        *error = "input batch missing column: " + f->name();
+      }
+      return false;
+    }
+    projected.push_back(std::move(col));
+  }
   auto rb = arrow::RecordBatch::Make(impl_->arrow_schema, batch.num_rows(),
-                                     batch.columns());
+                                     std::move(projected));
   auto ws = impl_->writer->WriteRecordBatch(*rb);
   if (!ws.ok()) {
     if (error) *error = ws.ToString();

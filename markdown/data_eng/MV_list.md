@@ -33,8 +33,16 @@ partition rows, n=1 ≈ 99.9 % of edges), see
 | 39 (above max_p) | 0.85 B | ~2 % |
 
 Bit 38 alone holds 18.5 B edges with avg ~1.8 multiplicity per q — q's
-do repeat at large magnitudes, just lightly. The "almost always 1"
-intuition needs adjustment.
+do repeat at large magnitudes, just lightly.
+
+> **Do not conflate two different "almost always 1" claims.** The
+> load-bearing fact is **`n_k = 1`** for ~99.9 % of edges (verified;
+> see [markdown/math/modular_filter_more_ideas.md] and memory
+> `[[project_n1_dominance]]`). That is *not* a statement about `q_k`
+> multiplicity: distinct `q` values repeat (~1.8× at bit-38), and the
+> distinct-`q_k`-**count** is a separate, harder question that only
+> indirectly touches the covering work. An earlier pass mis-stated the
+> `n_k` fact as "most `q_k` counts are exactly 1" — that is wrong.
 
 ---
 

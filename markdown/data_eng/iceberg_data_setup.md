@@ -63,7 +63,7 @@ covering-systems derivative.
 | `primeparts.primes`            | ~21.70 B     | `identity(p_bucket_version, p_bucket)`      |
 | `primeparts.partitions`        | ~40.84 B     | `identity(p_bucket_version, p_bucket)`      |
 | `primeparts.boundaries`        | small        | unpartitioned                               |
-| `primeparts.obstruction_catalog` | grows w/ passes | `identity(covering_system)` (string label) |
+| `primeparts.obstruction_catalog` | (being replaced) | `identity(covering_system)` string label — **the naming bug**; superseded by the covering-sieve rewrite (position-delete MOR over a `primes_k0` copy, no string-label partition). See `HANDOFF.md`. |
 
 Every prime `p` appears in `primes` exactly once. Obstructed primes
 (`k=0`, no decomposition) are present with `k=0` and have **no** rows
@@ -250,7 +250,35 @@ Three binaries currently in tree exemplify this pattern:
 The pyiceberg-driven `IcebergWriter.flush` write path of the legacy
 warehouse is **retired** for `primeparts.*`. New ingest, refreshes,
 and rewrites go native through IRC. `scripts/sync_hms.py` remains in
-tree only for the residual funbuns-era tables; don't extend it.
+tree only for the residual funbuns-era tables; don't extend it (its
+HMS-mutation *mechanism* is referenced for the open HMS-sync work — see
+`hive_mr3_stack.md` — but the script itself targets the retired sqlite
+catalog).
+
+### Row-level deletes (covering sieve — provisional)
+
+The covering-sieve rewrite wants merge-on-read **position deletes** over
+a `primes_k0` copy so the live rows are the current uncovered set.
+
+> **OPEN / unverified — do not rely on yet:**
+> - iceberg-cpp has no first-class row-level-delete update class. The
+>   path is a `SnapshotUpdate` subclass calling the protected
+>   `WriteDeleteManifests` (mirroring `fast_append.cc`). Architecturally
+>   it lines up (`ctx_`/`base()` protected in `pending_update.h`;
+>   `ApplyUpdateSnapshot` accepts any `SnapshotUpdate` via `checked_cast`
+>   in `transaction.cc`), but it is **untested end-to-end** and
+>   `snapshot_update.cc:212` carries a FIXME on per-file
+>   `data_sequence_number`. The parent-manifest carry-forward uses an
+>   internal `SnapshotCache` helper, so the subclass likely lives inside
+>   the vendored lib + a rebuild.
+> - The Puffin **writer** now exists (iceberg-cpp #624), but emitting a
+>   `deletion-vector` blob wired to a delete manifest is unverified;
+>   position-delete *files* (MOR v2) are the safe on-ramp.
+> - Hive's MOR read of these deletes is unverified and ties to the HMS
+>   sync question above.
+>
+> Prove write→commit→reopen→read on a throwaway table first; fallback is
+> an append-only covered-set model (FastAppend only).
 
 ---
 
@@ -348,8 +376,15 @@ pixi run python scripts/hive_sql.py -e \
     "SELECT k, COUNT(*) FROM primeparts.primes GROUP BY k"
 ```
 
-HS2 reads through HMS, so anything registered via IRC is visible to
-SQL with no extra step. Use SQL when the query genuinely needs
+HS2 reads through HMS.
+
+> **OPEN / corrected:** an earlier claim here — "anything registered via
+> IRC is visible to SQL with no extra step" — is **verified false** for
+> snapshot-advancing commits. A separate HMS sync (set `metadata_location`)
+> is required for Hive to see a new snapshot. See `hive_mr3_stack.md`
+> "HMS sync for native-committed snapshots (open)".
+
+Use SQL when the query genuinely needs
 transactional semantics (MV creation, ATOMIC swap-in commits) or when
 the planner's bucket-aligned join shapes are wanted. Don't reach for
 SQL for ad hoc filter/range scans — polars or native iceberg-cpp
@@ -429,9 +464,14 @@ MATERIALIZED VIEW ... REBUILD` picks up these snapshots is **untested**;
 treat all current MVs as one-shot snapshot views until this is
 validated.
 
-`obstruction_catalog` (per-prime covering-system labels) is produced
-by `primeparts-covering-sieve`, not as a MV: each sieve pass is a C++
-worker pipeline with bitmask logic, not a SQL transform.
+`obstruction_catalog` (per-prime covering-system labels) was produced
+by `primeparts-covering-sieve` as comma-string `covering_system`
+partitions. That artifact and partition scheme are **being discarded**
+in the covering-sieve rewrite: the uncovered set becomes the live
+(post-delete) view of a `primes_k0` copy under merge-on-read position
+deletes, not a string-labelled table. Each sieve pass remains a C++
+worker pipeline with bitmask logic, not a SQL transform. See `HANDOFF.md`
+"Covering-sieve rewrite".
 
 ---
 

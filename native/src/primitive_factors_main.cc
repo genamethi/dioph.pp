@@ -910,7 +910,7 @@ int main(int argc, char** argv) {
 
   std::string error;
   auto reader = primeparts::SourceTableReader::OpenMetadata(
-      opts.metadata, {"p", "k"}, &error);
+      opts.metadata, {"p", "k"}, nullptr, &error);
   if (!reader) {
     std::fprintf(stderr, "open metadata: %s\n", error.c_str());
     return 1;

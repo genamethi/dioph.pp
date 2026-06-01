@@ -2,6 +2,15 @@
 // + `funbuns.decompositions` source tables into the new bucket-
 // partitioned staging warehouse.
 //
+// Status (2026-05-22): the source funbuns warehouse has been deleted,
+// so this binary cannot be re-run. It is kept in tree as the design
+// reference for the bucketed staging layout. The companion backfill
+// pass (primeparts-backfill-rank) populates prime_rank in-place on the
+// existing staging files. Any future re-run of this rewriter must
+// (a) materialize prime_rank in-stream (see §prime_rank Materialization
+// in markdown/data_eng/log_bucket_repartition_spec.md) and (b) adjust
+// for the all-required schema in writer.cc.
+//
 // Architecture
 // ============
 // Two sequential phases: primes first, then partitions. Each phase
@@ -371,7 +380,7 @@ bool load_boundaries(const fs::path& sqlite, std::string_view ns,
                      std::string* error) {
   auto reader = SourceTableReader::Open(
       sqlite, ns, "boundaries",
-      {"p_bucket_version", "p_bucket", "p_min", "rank_min"}, error);
+      {"p_bucket_version", "p_bucket", "p_min", "rank_min"}, nullptr, error);
   if (!reader) return false;
   std::shared_ptr<arrow::RecordBatch> batch;
   while (true) {
@@ -1188,14 +1197,14 @@ int main(int argc, char** argv) {
   // and the rewriter workers open parquet files directly.
   auto primes_reader = SourceTableReader::Open(
       sqlite_path, opts.source_namespace, opts.source_primes_table,
-      {"p", "k"}, &error);
+      {"p", "k"}, nullptr, &error);
   if (!primes_reader) {
     std::fprintf(stderr, "open source primes: %s\n", error.c_str());
     return 1;
   }
   auto parts_reader = SourceTableReader::Open(
       sqlite_path, opts.source_namespace, opts.source_partitions_table,
-      {"p", "m_k", "n_k", "q_k"}, &error);
+      {"p", "m_k", "n_k", "q_k"}, nullptr, &error);
   if (!parts_reader) {
     std::fprintf(stderr, "open source partitions: %s\n", error.c_str());
     return 1;

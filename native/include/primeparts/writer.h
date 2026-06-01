@@ -29,6 +29,7 @@ namespace iceberg {
 struct DataFile;
 class PartitionSpec;
 class Schema;
+class PartitionValues;
 }
 
 namespace primeparts {
@@ -74,6 +75,11 @@ struct WriterConfig {
   // "prime_rank", "q_k"}. Members not in the schema are ignored.
   std::vector<std::string> delta_columns;
 
+  // Optional: Custom partition spec and values for the data files.
+  // If provided, bucket_version and bucket are ignored for DataFile generation.
+  std::shared_ptr<iceberg::PartitionSpec> partition_spec;
+  std::shared_ptr<iceberg::PartitionValues> partition_values;
+
   // Partition values written into the path (Hive-style) and stamped on
   // every row of every batch.
   int32_t bucket_version = 1;
@@ -94,24 +100,36 @@ struct WriterConfig {
   // zstd level 3, 1 MiB data pages.
   int32_t compression_level = 3;
   int64_t data_pagesize = 1 << 20;
+
+  // Simpler filename format `<prefix>_<seq:04d>.parquet`, useful for
+  // partitions that don't carry the bucket_version/bucket scheme (e.g.
+  // covering_system).
+  bool simple_filename = false;
 };
 
 // Field-id-aware arrow schema derived from an iceberg::Schema. Public
 // because the rewriter also wants to stamp PARQUET:field_id on its
 // source-projected schemas before re-writing. Returns nullptr on
 // unsupported type id and sets `*error`.
+//
+// If `partition_spec` is non-null, fields whose IDs are the source IDs of
+// identity-transform partition fields are omitted from the resulting arrow
+// schema. Those values live in the manifest's partition tuple and are
+// synthesized by iceberg readers at scan time — physically storing them in
+// every parquet file is redundant for identity transforms.
 std::shared_ptr<arrow::Schema> IcebergToArrowSchemaWithFieldIds(
-    const iceberg::Schema& schema, std::string* error);
+    const iceberg::Schema& schema, std::string* error,
+    const iceberg::PartitionSpec* partition_spec = nullptr);
 
-// New staging-warehouse schemas, spec-aligned. Field IDs inherited
-// from the source tables' schema-evolution history:
-//   primes:     p=1, k=2, [3 retired: commit_seq], prime_rank=4,
-//               p_bucket_version=5, p_bucket=6
-//   partitions: p=1, m_k=2, n_k=3, q_k=4, [5 retired: commit_seq],
-//               prime_rank=6, p_bucket_version=7, p_bucket=8
-// Field IDs 3 (primes) and 5 (partitions) are intentionally skipped:
-// they held commit_seq in the source schemas; Iceberg forbids reuse,
-// so the slots are retired in the new tables.
+// Staging-warehouse schemas. All fields required; field IDs contiguous:
+//   primes:     p=1, k=2, prime_rank=3, p_bucket_version=4, p_bucket=5
+//   partitions: p=1, m_k=2, n_k=3, q_k=4, prime_rank=5,
+//               p_bucket_version=6, p_bucket=7
+// prime_rank is the prime-counting function π(p) — the first row in
+// primes (smallest present prime, p=3) carries prime_rank=2 because
+// π(2)=1 and p=2 is intentionally absent from the table. The backfill
+// pass (primeparts-backfill-rank) materializes the column in place
+// before the staging metadata is published.
 std::shared_ptr<iceberg::Schema> PrimesSchema();
 std::shared_ptr<iceberg::Schema> PartitionsSchema();
 std::shared_ptr<iceberg::Schema> BoundariesSchema();

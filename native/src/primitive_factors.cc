@@ -49,10 +49,15 @@ int32_t MersenneHelper::GetOrd2(uint64_t divisor) const {
 MersenneHelper BuildMersenneHelper(int32_t max_d) {
   MersenneHelper helper;
   helper.max_d = max_d;
-  if (max_d <= 0 || max_d >= 64) return helper;
+  if (max_d <= 0 || max_d > 64) return helper;
 
   for (int32_t d = 1; d <= max_d; ++d) {
-    const uint64_t n = (uint64_t{1} << d) - 1;
+    uint64_t n;
+    if (d == 64) {
+        n = ~uint64_t{0};
+    } else {
+        n = (uint64_t{1} << d) - 1;
+    }
     if (n < 2) continue;
     n_factor_t factors;
     FactorU64(n, &factors);

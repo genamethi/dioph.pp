@@ -415,8 +415,18 @@ native binary  ──►  IRC (HMS REST servlet :9090)  ──►  HMS (Thrift +
 When a C++ tool finishes writing parquet and metadata.json, it calls
 `Catalog::RegisterTable(ident, metadata_location)` (or `CreateTable +
 FastAppend`) against IRC. IRC writes the HMS row with
-`table_type=ICEBERG` and `metadata_location=...`. Hive sees the new
-state on its next read. No separate sync step.
+`table_type=ICEBERG` and `metadata_location=...`.
+
+> **OPEN / corrected:** an earlier version of this doc claimed "Hive
+> sees the new state on its next read. No separate sync step." That is
+> **verified false** for snapshot-advancing commits: a native IRC /
+> on-disk commit does not by itself make the new snapshot visible to the
+> Hive engine for read or MV refresh — a separate HMS sync that sets
+> `metadata_location` is required. The register-once case (first
+> `RegisterTable` of a fresh table) *may* be visible without the extra
+> step; the snapshot-advance case is not. Mechanism (beeline vs raw
+> Thrift) and the exact boundary are under investigation — see "HMS sync
+> for native-committed snapshots (open)" below and `HANDOFF.md`.
 
 Working pattern, with the gotchas we hit during the 2026-05-26 cutover,
 is implemented in `native/src/drop_bucket_cols_main.cc::PublishTable`:
@@ -439,8 +449,14 @@ for two reasons:
 2. `scripts/sync_hms.py` is referenced by older docs and demonstrates
    the pre-IRC bridge pattern. Don't extend it; new code uses IRC.
 
-If you're tempted to use `pixi run sync-hms` for `primeparts.*` tables:
-**don't**. IRC commits update HMS in the same call.
+The `scripts/sync_hms.py` Thrift bridge is dead code for the SqlCatalog
+path (it targets the retired sqlite catalog), **but its mechanism is not
+obsolete**: the `get_table` → swap `metadata_location` /
+`previous_metadata_location` → `alter_table_with_environment_context`
+sequence is exactly the HMS sync the native stack still needs for
+snapshot-advancing commits (see "HMS sync for native-committed snapshots
+(open)" below). Don't revive `sync_hms.py` itself; port its three-line
+core if we land on the raw-Thrift route.
 
 ## Next steps / open questions
 
@@ -504,6 +520,34 @@ VIEW ... REBUILD` picks up snapshots committed outside Hive is
 **untested**. Resolve before binding any MV to an automated refresh
 loop. The current MVs are one-shot snapshot views — they don't
 auto-update when source tables advance.
+
+### HMS sync for native-committed snapshots (open)
+
+A native IRC / on-disk commit is **verified insufficient** on its own to
+make a snapshot-advancing change visible to the Hive engine (read / MV
+refresh). A separate HMS sync that updates the table's `metadata_location`
+(+ `previous_metadata_location`) is required. Two candidate mechanisms,
+undecided:
+
+- **beeline (leading):** in-container `ALTER TABLE primeparts.<tbl> SET
+  TBLPROPERTIES('metadata_location'=…)` via `run-beeline.sh` against HS2.
+  Routes through `HiveIcebergStorageHandler`, so if honored, visibility is
+  guaranteed and no `get_table_req` shim is needed.
+- **raw Thrift (proven elsewhere):** the `sync_hms.py` core — `get_table`
+  → swap params → `alter_table_with_environment_context`. Bypasses the
+  handler; needs the HMS-4 `get_table_req` patch (`primeparts._patches`).
+  A Rust port on `iceberg-catalog-hms` is extend-and-verify (its
+  `update_table`/`register_table` are stubs).
+
+> **OPEN — probe not yet run:** does the beeline `SET TBLPROPERTIES`
+> path actually make Hive adopt an externally-committed snapshot, or does
+> the storage handler reject/reinterpret a manual pointer swap?
+> `sync_hms.py` chose raw Thrift precisely *to avoid* that handler logic,
+> which hints the SQL path may differ. One throwaway test (register →
+> advance metadata.json → beeline ALTER → fresh SELECT) decides
+> beeline-vs-Thrift. Also unresolved: whether the initial `RegisterTable`
+> already yields an engine-readable table, or that too needs
+> handler-aware DDL.
 
 ### Bucket-map-join verification (open)
 

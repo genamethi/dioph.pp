@@ -10,12 +10,15 @@
 
 #pragma once
 
+#include "iceberg/expression/expression.h"
+
 #include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
+#include <optional>
 
 namespace arrow {
 class RecordBatch;
@@ -46,14 +49,38 @@ class SourceTableReader {
   static std::unique_ptr<SourceTableReader> Open(
       const fs::path& sqlite_path, std::string_view namespace_name,
       std::string_view table_name,
-      const std::vector<std::string>& select_columns, std::string* error);
+      const std::vector<std::string>& select_columns, 
+      std::shared_ptr<iceberg::Expression> filter,
+      std::string* error);
 
   // Open directly from an Iceberg metadata JSON path. This is useful for
   // staging tables that are already materialized but not registered in the
   // local SQLite catalog.
+  //
+  // `select_columns` may include the reserved metadata columns "_pos"
+  // (absolute ordinal of the row within its source data file) and "_file"
+  // (the source data file path). These are not table fields, so they bypass
+  // the scan's column projection: the reader appends them to the projected
+  // schema and the parquet reader synthesizes their values. Combined with
+  // `current_data_file_path()`, "_pos" gives the (file_path, pos) a position
+  // delete needs — and the values are correct under merge-on-read (they are
+  // the absolute positions of the surviving rows). Callers that don't request
+  // them see identical behavior to before.
+  //
+  // Sharding: with `shard_count > 1`, this reader handles only the planned
+  // FileScanTasks where `task_index % shard_count == shard_index` (modulo over
+  // the p-sorted task order, so each shard interleaves small/large-p files for
+  // load balance). Run N independent instances on N threads for parallel,
+  // delete-aware reads — each keeps its own cursor + current_data_file_path()
+  // and applies position deletes per task via the same FileScanTaskReader path.
+  // The default (0, 1) keeps every task (callers using this for metadata-only
+  // discovery, e.g. source_files(), are unaffected).
   static std::unique_ptr<SourceTableReader> OpenMetadata(
       const fs::path& metadata_path,
-      const std::vector<std::string>& select_columns, std::string* error);
+      const std::vector<std::string>& select_columns,
+      std::shared_ptr<iceberg::Expression> filter,
+      std::string* error,
+      int shard_index = 0, int shard_count = 1);
 
   ~SourceTableReader();
   SourceTableReader(const SourceTableReader&) = delete;
@@ -71,6 +98,12 @@ class SourceTableReader {
   // Number of FileScanTasks the scan planned (i.e., source data file
   // count). Useful for progress reporting.
   int64_t file_count() const;
+
+  // Data file path (as stored in the manifest, scheme intact) of the task
+  // the most recently returned batch was read from. Pair with a projected
+  // "_pos" column to form (file_path, pos) for a position delete. Valid only
+  // after a successful Next() that returned a non-null batch.
+  const std::string& current_data_file_path() const;
 
   // Per-file info derived from the planned scan, sorted by p_min ASC
   // (matches the streaming order of Next()). Lets the rewriter plan
