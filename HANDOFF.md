@@ -40,8 +40,6 @@ The below concepts wind up being vital for understanding these cases.
 
 Cluster-side end-to-end pipeline is working:
 - Native rewrite + IRC publish path (`primeparts-drop-bucket-cols`) writes iceberg metadata via HMS-backed REST catalog at `http://192.168.1.202:9090/iceberg/v1/`.
-- Hive 4.2 MR3 cluster running a custom-baked image (`mr3-hive-4.2.0-local/hive:4.2.0`) that includes the DELTA_BINARY_PACKED vectorized-read fix (upstream hive-mr3 branch `master4.2.0` commit `b5bc76328e`).
-- Cluster tuned to **Config A** for MV builds: 2 worker pods × 4 GiB envelope × 2 concurrent Tez tasks → 4 concurrent total. Pipelining `hive.mr3.am.task.concurrent.run.threshold.percent=80`. See `markdown/data_eng/hive_mr3_stack.md` for the propagation procedure.
 
 ### MV inventory
 
