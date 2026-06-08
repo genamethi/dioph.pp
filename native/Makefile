@@ -28,6 +28,16 @@ ICEBERG_LDLIBS += \
 	$(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --libs --static parquet arrow | sed -e 's/-lparquet[ ]//g' -e 's/-larrow[ ]//g' -e 's/-L[^ ]*[ ]//g') \
 	-lcurl -lssl -lcrypto -ldl -lrt
 
+# LMDB is vendored in vendor/lmdb and built into a small static archive used by
+# the native catalog store (pp_lmdb_store). Build-time only; it adds no
+# transitive dependencies. The upstream SQL-catalog engine lives in the
+# separately-installed libiceberg_sql_catalog.a (no SQL connector was built, so
+# no sqlpp23/sqlite); we inject the LMDB store through its CatalogStore seam.
+LMDB_DIR := vendor/lmdb/libraries/liblmdb
+LMDB_CPPFLAGS += -I$(LMDB_DIR)
+LMDB_CFLAGS := -O3 -g -fPIC -pthread
+SQL_CATALOG_LDLIBS := -liceberg_sql_catalog
+
 BUILD_DIR := build
 CORE_OBJ := $(BUILD_DIR)/core.o
 BENCH_CORE_OBJ := $(BUILD_DIR)/bench_core.o
@@ -48,6 +58,9 @@ PP_HIVE_SYNC_OBJ := $(BUILD_DIR)/pp_hive_sync.o
 PP_ROW_DELTA_OBJ := $(BUILD_DIR)/pp_row_delta.o
 PP_DELETE_SPIKE_OBJ := $(BUILD_DIR)/pp_delete_spike.o
 PP_SIEVE_CLONE_OBJ := $(BUILD_DIR)/pp_sieve_clone.o
+PP_LMDB_STORE_OBJ := $(BUILD_DIR)/pp_lmdb_store.o
+PP_LMDB_SMOKE_OBJ := $(BUILD_DIR)/pp_lmdb_smoke.o
+LMDB_LIB := $(BUILD_DIR)/liblmdb.a
 PP_CATALOG_MAIN_OBJ := $(BUILD_DIR)/pp_catalog_main.o
 PREFLIGHT_OBJ := $(BUILD_DIR)/preflight.o
 UI_ICEBERG_OBJ := $(BUILD_DIR)/ui_iceberg.o
@@ -58,7 +71,7 @@ TEST_PRIMITIVE_FACTORS_OBJ := $(BUILD_DIR)/test_primitive_factors.o
 TUI_FRONTEND_OBJ := $(BUILD_DIR)/tui_frontend.o
 MERSENNE_SIDECAR_OBJ := $(BUILD_DIR)/mersenne_sidecar.o
 
-.PHONY: all clean test
+.PHONY: all clean test smoke
 
 all: $(BUILD_DIR)/libprimeparts_core.so \
      $(BUILD_DIR)/primeparts-bench-core \
@@ -137,6 +150,22 @@ $(PP_DELETE_SPIKE_OBJ): src/catalog/pp_delete_spike.cc include/primeparts/catalo
 $(PP_SIEVE_CLONE_OBJ): src/catalog/pp_sieve_clone.cc include/primeparts/catalog/pp_sieve_clone.h include/primeparts/catalog/pp_iceberg_rest.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
+# --- LMDB catalog store --------------------------------------------------
+$(BUILD_DIR)/lmdb_mdb.o: $(LMDB_DIR)/mdb.c | $(BUILD_DIR)
+	$(CC) $(LMDB_CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/lmdb_midl.o: $(LMDB_DIR)/midl.c | $(BUILD_DIR)
+	$(CC) $(LMDB_CFLAGS) -c $< -o $@
+
+$(LMDB_LIB): $(BUILD_DIR)/lmdb_mdb.o $(BUILD_DIR)/lmdb_midl.o
+	$(AR) rcs $@ $^
+
+$(PP_LMDB_STORE_OBJ): src/catalog/pp_lmdb_store.cc include/primeparts/catalog/pp_lmdb_store.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(LMDB_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(PP_LMDB_SMOKE_OBJ): src/catalog/pp_lmdb_smoke.cc include/primeparts/catalog/pp_lmdb_store.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
 $(PP_CATALOG_MAIN_OBJ): src/catalog/pp_catalog_main.cc include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/catalog/pp_hive_sync.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
@@ -185,6 +214,12 @@ $(BUILD_DIR)/primeparts-drop-bucket-cols: $(DROP_BUCKET_COLS_OBJ) $(SOURCE_SCAN_
 $(BUILD_DIR)/pp-catalog: $(PP_CATALOG_MAIN_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_HIVE_SYNC_OBJ) $(PP_ROW_DELTA_OBJ) $(PP_DELETE_SPIKE_OBJ) $(PP_SIEVE_CLONE_OBJ) $(SOURCE_SCAN_OBJ)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
 
+# libiceberg_sql_catalog.a must precede the iceberg core archives so its
+# references resolve in static link order; liblmdb.a backs pp_lmdb_store.o.
+$(BUILD_DIR)/primeparts-lmdb-smoke: $(PP_LMDB_SMOKE_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
+	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $(PP_LMDB_SMOKE_OBJ) $(PP_LMDB_STORE_OBJ) \
+		$(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(LMDB_LIB) -pthread -o $@
+
 $(BUILD_DIR)/primeparts-primitive-factors: $(PRIMITIVE_FACTORS_MAIN_OBJ) $(PRIMITIVE_FACTORS_OBJ) $(SOURCE_SCAN_OBJ)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(ICEBERG_LDLIBS) -lparquet -larrow -lsqlite3 -pthread -o $@
 
@@ -216,6 +251,9 @@ test: $(BUILD_DIR)/test_core \
      $(BUILD_DIR)/primeparts-test-primitive-factors
 	$(BUILD_DIR)/test_core
 	$(BUILD_DIR)/primeparts-test-primitive-factors
+
+smoke: $(BUILD_DIR)/primeparts-lmdb-smoke
+	$(BUILD_DIR)/primeparts-lmdb-smoke
 
 clean:
 	rm -rf $(BUILD_DIR)
