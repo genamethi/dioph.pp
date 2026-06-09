@@ -51,8 +51,6 @@ PRIMITIVE_FACTORS_MAIN_OBJ := $(BUILD_DIR)/primitive_factors_main.o
 COVERING_SIEVE_MAIN_OBJ := $(BUILD_DIR)/covering_sieve_main.o
 SIEVE_TRIAGE_MAIN_OBJ := $(BUILD_DIR)/sieve_triage_main.o
 REWRITE_OBJ := $(BUILD_DIR)/rewrite.o
-BACKFILL_RANK_OBJ := $(BUILD_DIR)/backfill_prime_rank_main.o
-DROP_BUCKET_COLS_OBJ := $(BUILD_DIR)/drop_bucket_cols_main.o
 PP_ICEBERG_REST_OBJ := $(BUILD_DIR)/pp_iceberg_rest.o
 PP_HIVE_SYNC_OBJ := $(BUILD_DIR)/pp_hive_sync.o
 PP_ROW_DELTA_OBJ := $(BUILD_DIR)/pp_row_delta.o
@@ -80,8 +78,6 @@ all: $(BUILD_DIR)/libprimeparts_core.so \
      $(BUILD_DIR)/primeparts-primitive-factors \
      $(BUILD_DIR)/primeparts-covering-sieve \
      $(BUILD_DIR)/primeparts-sieve-triage \
-     $(BUILD_DIR)/primeparts-backfill-rank \
-     $(BUILD_DIR)/primeparts-drop-bucket-cols \
      $(BUILD_DIR)/pp-catalog \
      $(BUILD_DIR)/primeparts-test-ui-iceberg \
      $(BUILD_DIR)/nth_prime_boundaries \
@@ -114,25 +110,19 @@ $(WRITER_OBJ): src/writer.cc include/primeparts/writer.h | $(BUILD_DIR)
 $(SOURCE_SCAN_OBJ): src/source_scan.cc include/primeparts/source_scan.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(PRIMITIVE_FACTORS_OBJ): src/primitive_factors.cc include/primeparts/primitive_factors.h | $(BUILD_DIR)
+$(PRIMITIVE_FACTORS_OBJ): src/coverings/primitive_factors.cc include/primeparts/primitive_factors.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(PRIMITIVE_FACTORS_MAIN_OBJ): src/primitive_factors_main.cc include/primeparts/primitive_factors.h include/primeparts/source_scan.h | $(BUILD_DIR)
+$(PRIMITIVE_FACTORS_MAIN_OBJ): src/coverings/primitive_factors_main.cc include/primeparts/primitive_factors.h include/primeparts/source_scan.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(COVERING_SIEVE_MAIN_OBJ): src/covering_sieve_main.cc include/primeparts/primitive_factors.h include/primeparts/source_scan.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/catalog/pp_row_delta.h | $(BUILD_DIR)
+$(COVERING_SIEVE_MAIN_OBJ): src/coverings/covering_sieve_main.cc include/primeparts/primitive_factors.h include/primeparts/source_scan.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/catalog/pp_row_delta.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(SIEVE_TRIAGE_MAIN_OBJ): src/sieve_triage_main.cc include/primeparts/source_scan.h | $(BUILD_DIR)
+$(SIEVE_TRIAGE_MAIN_OBJ): src/coverings/sieve_triage_main.cc include/primeparts/source_scan.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(REWRITE_OBJ): src/rewrite.cc include/primeparts/writer.h include/primeparts/source_scan.h include/primeparts/preflight.h | $(BUILD_DIR)
-	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
-
-$(BACKFILL_RANK_OBJ): src/backfill_prime_rank_main.cc include/primeparts/writer.h include/primeparts/source_scan.h include/primeparts/calibration.h | $(BUILD_DIR)
-	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
-
-$(DROP_BUCKET_COLS_OBJ): src/drop_bucket_cols_main.cc include/primeparts/writer.h include/primeparts/source_scan.h | $(BUILD_DIR)
+$(REWRITE_OBJ): src/rewriter/rewrite.cc include/primeparts/writer.h include/primeparts/source_scan.h include/primeparts/preflight.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(PP_ICEBERG_REST_OBJ): src/catalog/pp_iceberg_rest.cc include/primeparts/catalog/pp_iceberg_rest.h | $(BUILD_DIR)
@@ -169,7 +159,7 @@ $(PP_LMDB_SMOKE_OBJ): src/catalog/pp_lmdb_smoke.cc include/primeparts/catalog/pp
 $(PP_CATALOG_MAIN_OBJ): src/catalog/pp_catalog_main.cc include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/catalog/pp_hive_sync.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(PREFLIGHT_OBJ): src/preflight.cc include/primeparts/preflight.h | $(BUILD_DIR)
+$(PREFLIGHT_OBJ): src/rewriter/preflight.cc include/primeparts/preflight.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(TEST_OBJ): tests/test_core.c include/primeparts/core.h | $(BUILD_DIR)
@@ -204,12 +194,6 @@ $(BUILD_DIR)/primeparts-generate: $(CORE_OBJ) $(GENERATE_OBJ) $(WRITER_OBJ)
 
 $(BUILD_DIR)/primeparts-rewrite: $(REWRITE_OBJ) $(SOURCE_SCAN_OBJ) $(WRITER_OBJ) $(PREFLIGHT_OBJ)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(ICEBERG_LDLIBS) -lparquet -larrow -lsqlite3 -pthread -o $@
-
-$(BUILD_DIR)/primeparts-backfill-rank: $(BACKFILL_RANK_OBJ) $(SOURCE_SCAN_OBJ) $(WRITER_OBJ)
-	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(ICEBERG_LDLIBS) -lparquet -larrow -lsqlite3 -pthread -o $@
-
-$(BUILD_DIR)/primeparts-drop-bucket-cols: $(DROP_BUCKET_COLS_OBJ) $(SOURCE_SCAN_OBJ) $(WRITER_OBJ)
-	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
 
 $(BUILD_DIR)/pp-catalog: $(PP_CATALOG_MAIN_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_HIVE_SYNC_OBJ) $(PP_ROW_DELTA_OBJ) $(PP_DELETE_SPIKE_OBJ) $(PP_SIEVE_CLONE_OBJ) $(SOURCE_SCAN_OBJ)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@

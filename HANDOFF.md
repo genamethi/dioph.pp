@@ -499,8 +499,10 @@ flowchart TD
    e2e against `pp-catalogd`); `curl GET /v1/config` first. **This JSON
    shape-matching is the real work.**
 3. **Phase 3 — consolidate + de-Hive** (the source reorg; **full detail in §11**).
-   First chunk: reconcile the Makefile with the new subdir tree so `make all`
-   builds again (§11.3). Then excise Hive (`pp_hive_sync`, `pp-catalog`
+   The Makefile is already reconciled with the new subdir tree (§11.3); a full
+   `make all` additionally needs the `rewriter/rewrite.cc` `WriterProperties`
+   rename ported (small, independent of #6). Then excise Hive (`pp_hive_sync`,
+   `pp-catalog`
    `--hive-*` / `--smoke-test`, `scripts/hive_register.sh`, `scripts/hive_sql.py`,
    `mr3/kubernetes/`); **re-point the three raw-`sqlite3_open` readers**
    (`source_scan.cc`, `rewriter/preflight.cc`, `ui_iceberg.cc`) onto the catalog
@@ -522,12 +524,10 @@ native CreateTable + FastAppend + RowDelta the same way the HMS servlet did.
 
 Commit `9e6d8ad` ("Started the reorganization of files with ./native/src path")
 began moving the flat `native/src/*.cc` layout into purpose subdirectories **and
-removed the one-time staging binaries.** This is mid-flight: the **Makefile still
-references the old flat paths**, so a plain `make all` is currently **broken** for
-the moved/removed targets. Only the catalog/LMDB targets build today — including
-`make smoke`, which is why Phase 0/1 verified cleanly while the rest of the tree
-did not. Reconciling the Makefile (and finishing the consolidation below) is the
-first concrete chunk of Phase 3.
+removed the one-time staging binaries.** The **Makefile was reconciled with the
+new tree (2026-06-08)** — paths repointed, the two removed targets dropped — so
+all rules now resolve. What still blocks a full `make all` is **two code
+migrations against the rebuilt iceberg lib** (§11.3), not build wiring.
 
 ### 11.1 Current on-disk layout
 
@@ -554,23 +554,29 @@ Headers were **not** moved — `include/primeparts/*.h` is still flat (incl.
   `DataFile` — now survives only in git history; preserve it if any future tool
   writes data files.
 
-### 11.3 Makefile reconciliation (blocking `make all`)
+### 11.3 Makefile state — reconciled; two code migrations remain
 
-The object rules still point at pre-move paths:
+The Makefile now points at the new subdir paths (`coverings/`, `rewriter/`,
+`catalog/`) and the `primeparts-backfill-rank` / `primeparts-drop-bucket-cols`
+targets are gone. Compiling each object against the rebuilt iceberg lib gives:
 
-| Makefile reference | now at | action |
-|---|---|---|
-| `src/covering_sieve_main.cc` | `src/coverings/covering_sieve_main.cc` | repath |
-| `src/sieve_triage_main.cc` | `src/coverings/sieve_triage_main.cc` | repath, or drop (folds into the stepper) |
-| `src/primitive_factors.cc`, `src/primitive_factors_main.cc` | `src/coverings/…` | repath |
-| `src/rewrite.cc` | `src/rewriter/rewrite.cc` | repath |
-| `src/preflight.cc` | `src/rewriter/preflight.cc` | repath |
-| `src/backfill_prime_rank_main.cc` | (removed) | drop target `primeparts-backfill-rank` |
-| `src/drop_bucket_cols_main.cc` | (removed) | drop target `primeparts-drop-bucket-cols` |
+- **OK:** `primitive_factors`, `primitive_factors_main`, `sieve_triage_main`,
+  `preflight`, `pp_iceberg_rest`, `pp_sieve_clone`, `source_scan`, `writer`,
+  plus the LMDB targets (`make smoke` green).
+- **FAIL — task #6 (`RowDelta` `SnapshotUpdate` ABI):** `pp_row_delta`,
+  `pp_delete_spike`, and `covering_sieve_main` (transitively, via
+  `pp_row_delta.h`). The override `CleanUncommitted` was declared `void` but the
+  rebuilt base now returns `Status` → "conflicting return type." This blocks
+  `pp-catalog` and `primeparts-covering-sieve`.
+- **FAIL — separate API drift:** `rewriter/rewrite.cc` references
+  `iceberg::WriterProperties::kParquetDataPageSize` /
+  `kParquetMaxRowGroupLength` / `kParquetDictionaryEnabledColumnPrefix` /
+  `kParquetEncodingColumnPrefix`, which the rebuilt lib renamed/removed. Smaller,
+  independent of #6. (`primeparts-rewrite` is not in `all:`, so this doesn't block
+  `make all` — but the object won't build until ported.)
 
-The `src/catalog/…` rules (and the new LMDB rules) are already correct. A
-`vpath %.cc src src/catalog src/coverings src/rewriter` plus dropping the two
-removed targets is the low-churn fix.
+So a full `make all` needs #6 finished (for the catalog/sieve targets) and the
+`WriterProperties` rename mapped in `rewrite.cc`.
 
 ### 11.4 DRY consolidation plan (from the source explorations)
 
