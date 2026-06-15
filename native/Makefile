@@ -130,6 +130,9 @@ $(BUILD_DIR)/query_service.o: src/query/query_service.cc include/primeparts/quer
 $(BUILD_DIR)/query_service_smoke.o: src/query/query_service_smoke.cc include/primeparts/query/query_service.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
+$(BUILD_DIR)/tui_main.o: src/tui/tui_main.cc include/primeparts/query/query_service.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(NOTCURSES_CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
 $(REWRITE_OBJ): src/rewriter/rewrite.cc include/primeparts/writer.h include/primeparts/source_scan.h include/primeparts/preflight.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
@@ -241,8 +244,10 @@ $(BUILD_DIR)/primeparts-test-iceberg-writer: $(TEST_ICEBERG_WRITER_OBJ) $(WRITER
 $(BUILD_DIR)/primeparts-test-primitive-factors: $(TEST_PRIMITIVE_FACTORS_OBJ) $(PRIMITIVE_FACTORS_OBJ)
 	$(CXX) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) -o $@
 
-$(BUILD_DIR)/primeparts-tui: $(CORE_OBJ) $(GENERATE_ABI_OBJ) $(WRITER_OBJ) $(UI_ICEBERG_OBJ) $(TUI_FRONTEND_OBJ)
-	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $(NOTCURSES_RPATH) $^ $(LDLIBS) $(ICEBERG_LDLIBS) -lparquet -larrow $(NOTCURSES_LDLIBS) -lsqlite3 -pthread -o $@
+# New TUI (src/tui/, C++ on QueryService + the LMDB catalog seam). Replaces the
+# scrapped tui_frontend.c. SQL_CATALOG_LDLIBS before ICEBERG_LDLIBS; notcurses-core.
+$(BUILD_DIR)/primeparts-tui: $(BUILD_DIR)/tui_main.o $(BUILD_DIR)/query_service.o $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(SOURCE_SCAN_OBJ) $(LMDB_LIB)
+	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $(NOTCURSES_RPATH) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(NOTCURSES_LDLIBS) -lsqlite3 -pthread -o $@
 
 # v0.3.0 arrow pulls mimalloc/brotli via libarrow_bundled_dependencies.a; the
 # bare -larrow -lparquet link no longer resolves them. ICEBERG_LDLIBS carries the
