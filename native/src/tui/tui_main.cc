@@ -71,7 +71,16 @@ struct App {
   std::string status_msg = "ready";
   char status_glyph = 'i';
   bool confirm_quit = false;
+
+  // Field-edit modal: one text box per variable field of the current preset.
+  struct ncplane* modal = nullptr;
+  bool modal_on = false;
+  size_t modal_field = 0;
+  std::vector<std::string> modal_buf;
 };
+
+void draw_modal(App* a);
+void run_selected(App* a);
 
 double secs_since(std::chrono::steady_clock::time_point t0) {
   return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -256,7 +265,7 @@ void draw_status(App* a) {
   ncplane_set_styles(a->status, NCSTYLE_NONE);
   const std::string& msg = a->confirm_quit ? std::string("quit? (y/N)") : a->status_msg;
   ncplane_printf_yx(a->status, 0, 6, "%s", msg.c_str());
-  const char* keys = "hjkl/↑↓:move  +/-:value  Tab:panel  Enter:run*  q:quit";
+  const char* keys = "↑↓/jk:move  +/-:value  Enter:edit  Space/b:page  Tab:panel  q:quit";
   size_t kl = std::strlen(keys);
   if (cols > kl + 8) {
     ncplane_set_fg_rgb8(a->status, 0x99, 0x99, 0xaa);
@@ -271,7 +280,19 @@ void redraw(App* a) {
   draw_query(a);
   draw_results(a);
   draw_status(a);
+  if (a->modal_on) draw_modal(a);
+  else ncplane_erase(a->modal);  // transparent when closed
   notcurses_render(a->nc);
+}
+
+// Scroll the results selection by a page (less-style Space / b / PgUp / PgDn).
+void page_results(App* a, int dir) {
+  unsigned rows, cols; ncplane_dim_yx(a->results, &rows, &cols); (void)cols;
+  int pg = (int)rows - 3; if (pg < 1) pg = 1;
+  int n = (int)a->result_lines.size();
+  if (n <= 1) return;
+  int s = (int)a->res_sel + dir * pg;
+  a->res_sel = (size_t)(s < 1 ? 1 : s >= n ? n - 1 : s);
 }
 
 // arrows / hjkl: move cursor among query options, or scroll results.
@@ -305,7 +326,7 @@ void cycle_value(App* a, int delta) {
   }
 }
 
-[[maybe_unused]] void run_selected(App* a) {
+void run_selected(App* a) {
   const Preset& p = a->presets[a->preset_idx];
   a->result_lines.clear();
   a->res_top = a->res_sel = 0;
@@ -354,6 +375,69 @@ void cycle_value(App* a, int delta) {
   a->focus = Focus::Results;
 }
 
+// Enter on the query panel: open a field-edit modal (one box per variable
+// field). If the preset has no fields, run directly.
+void open_modal(App* a) {
+  const Preset& p = a->presets[a->preset_idx];
+  if (p.fields.empty()) { run_selected(a); return; }
+  a->modal_buf.clear();
+  for (const auto& f : p.fields) a->modal_buf.push_back(std::to_string(f.value));
+  a->modal_field = a->cursor > 0 ? a->cursor - 1 : 0;
+  if (a->modal_field >= p.fields.size()) a->modal_field = 0;
+  a->modal_on = true;
+}
+
+// Confirm the modal: parse each box back into its field, then run.
+void confirm_modal(App* a) {
+  Preset& p = a->presets[a->preset_idx];
+  for (size_t i = 0; i < p.fields.size() && i < a->modal_buf.size(); ++i) {
+    const std::string& b = a->modal_buf[i];
+    p.fields[i].value = b.empty() ? 0 : std::strtoll(b.c_str(), nullptr, 10);
+  }
+  a->modal_on = false;
+  run_selected(a);
+}
+
+void draw_modal(App* a) {
+  const Preset& p = a->presets[a->preset_idx];
+  unsigned trows, tcols;
+  notcurses_term_dim_yx(a->nc, &trows, &tcols);
+  const unsigned nf = (unsigned)p.fields.size();
+  unsigned w = tcols < 52 ? (tcols > 8 ? tcols - 4 : 8) : 48;
+  unsigned h = nf + 5;
+  unsigned y0 = trows > h ? (trows - h) / 2 : 1;
+  unsigned x0 = tcols > w ? (tcols - w) / 2 : 1;
+  ncplane_resize_simple(a->modal, h, w);
+  ncplane_move_yx(a->modal, (int)y0, (int)x0);
+  ncplane_erase(a->modal);
+  ncplane_set_bg_rgb8(a->modal, 0x20, 0x24, 0x30);
+  for (unsigned r = 0; r < h; ++r)
+    ncplane_printf_yx(a->modal, (int)r, 0, "%*s", (int)w, "");
+  ncplane_perimeter_rounded(a->modal, NCSTYLE_BOLD, 0, 0);
+  ncplane_set_styles(a->modal, NCSTYLE_BOLD);
+  ncplane_printf_yx(a->modal, 0, 2, "┤ set fields: %s ├", p.id.c_str());
+  ncplane_set_styles(a->modal, NCSTYLE_NONE);
+  for (unsigned i = 0; i < nf; ++i) {
+    const bool foc = (i == a->modal_field);
+    if (foc) {
+      ncplane_set_styles(a->modal, NCSTYLE_BOLD);
+      ncplane_set_bg_rgb8(a->modal, 0x2c, 0x44, 0x66);
+      ncplane_set_fg_rgb8(a->modal, 0xff, 0xff, 0xff);
+    }
+    ncplane_printf_yx(a->modal, (int)(2 + i), 2, "%s%-8s [%-14s]",
+                      foc ? "> " : "  ", p.fields[i].name.c_str(),
+                      a->modal_buf[i].c_str());
+    ncplane_set_styles(a->modal, NCSTYLE_NONE);
+    ncplane_set_bg_rgb8(a->modal, 0x20, 0x24, 0x30);
+    ncplane_set_fg_default(a->modal);
+  }
+  ncplane_set_fg_rgb8(a->modal, 0x99, 0x99, 0xaa);
+  ncplane_printf_yx(a->modal, (int)(h - 2), 2,
+                    "Enter:run  Esc/b:cancel  digits:edit  j/k:field");
+  ncplane_set_fg_default(a->modal);
+  ncplane_set_bg_default(a->modal);
+}
+
 std::vector<Preset> make_presets() {
   return {
       Preset{"by-k", "primes where k == {k}, p in [{p_lo},{p_hi}], LIMIT {limit}",
@@ -386,7 +470,9 @@ int main(int argc, char** argv) {
   app.query = ncplane_create(std_, &po);
   app.results = ncplane_create(std_, &po);
   app.status = ncplane_create(std_, &po);
-  if (!app.topbar || !app.query || !app.results || !app.status || layout(&app) < 0) {
+  app.modal = ncplane_create(std_, &po);  // created last -> top z-order
+  if (!app.topbar || !app.query || !app.results || !app.status || !app.modal ||
+      layout(&app) < 0) {
     notcurses_stop(nc);
     std::fprintf(stderr, "terminal too small (need >= 12x48)\n");
     return 1;
@@ -403,6 +489,26 @@ int main(int argc, char** argv) {
       else app.confirm_quit = false;
       redraw(&app); continue;
     }
+    // Modal field editor captures input while open.
+    if (app.modal_on) {
+      const size_t nf = app.presets[app.preset_idx].fields.size();
+      if (key == NCKEY_ESC || key == 'b') app.modal_on = false;
+      else if (key == NCKEY_ENTER || key == '\n' || key == '\r') confirm_modal(&app);
+      else if (key == 'j' || key == NCKEY_DOWN || key == NCKEY_TAB)
+        app.modal_field = nf ? (app.modal_field + 1) % nf : 0;
+      else if (key == 'k' || key == NCKEY_UP)
+        app.modal_field = nf ? (app.modal_field + nf - 1) % nf : 0;
+      else if (key == NCKEY_BACKSPACE || key == NCKEY_DEL || key == 127 || key == 8) {
+        if (!app.modal_buf[app.modal_field].empty())
+          app.modal_buf[app.modal_field].pop_back();
+      } else if (key >= '0' && key <= '9') {
+        if (app.modal_buf[app.modal_field].size() < 18)
+          app.modal_buf[app.modal_field].push_back((char)key);
+      } else if (key == '-' && app.modal_buf[app.modal_field].empty()) {
+        app.modal_buf[app.modal_field].push_back('-');  // allow negative entry
+      }
+      redraw(&app); continue;
+    }
     switch (key) {
       case 'q': app.confirm_quit = true; break;
       case NCKEY_RESIZE: layout(&app); break;
@@ -413,8 +519,13 @@ int main(int argc, char** argv) {
       case 'k': case NCKEY_UP:   nav(&app, -1); break;
       case '+': case '=':        cycle_value(&app, +1); break;
       case '-':                  cycle_value(&app, -1); break;
-      // Enter run is a flagged placeholder (run trigger unspecified).
-      case NCKEY_ENTER: case '\n': case '\r': run_selected(&app); break;
+      case ' ': case NCKEY_PGDOWN: page_results(&app, +1); break;
+      case 'b': case NCKEY_PGUP:   page_results(&app, -1); break;
+      // Enter = select: on the query panel, open the field-edit modal (which
+      // runs on confirm). In results, reserved for `c`-dispatch later.
+      case NCKEY_ENTER: case '\n': case '\r':
+        if (app.focus == Focus::Query) open_modal(&app);
+        break;
       default: break;
     }
     redraw(&app);
@@ -424,6 +535,7 @@ int main(int argc, char** argv) {
   ncplane_destroy(app.query);
   ncplane_destroy(app.results);
   ncplane_destroy(app.status);
+  ncplane_destroy(app.modal);
   notcurses_stop(nc);
   return 0;
 }
