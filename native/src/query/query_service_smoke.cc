@@ -3,10 +3,12 @@
 
 #include "primeparts/query/query_service.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <thread>
 
 using primeparts::query::QueryService;
 
@@ -82,6 +84,29 @@ int main(int argc, char** argv) {
     auto pi = qs->LookupPrime(12, &err);
     std::printf("\n[lookup] p=12 (not prime) -> %s\n", pi ? "FOUND (BUG)" : "absent (ok)");
     if (pi) ++failures;
+  }
+
+  // 4) cooperative cancel: an unbounded k=16 scan is sparse (no k=16 in the
+  // first ~900M rows) so it would run a long time. Cancel after a beat and
+  // require a prompt return — this is the machinery the TUI's worker uses.
+  {
+    std::atomic<bool> cancel{false};
+    primeparts::query::ScanControl ctl;
+    ctl.cancel = &cancel;
+    int64_t last_scanned = 0;
+    ctl.progress = [&](int64_t sc, int64_t) { last_scanned = sc; };
+    auto t0 = std::chrono::steady_clock::now();
+    std::thread th([&] {
+      std::string e;
+      qs->ScanByK(16, 0, 0, 10, &e, ctl);  // sparse -> long-running
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    cancel.store(true);
+    th.join();
+    double dt = secs_since(t0);
+    std::printf("\n[cancel] k=16 unbounded cancelled after 0.4s -> returned in "
+                "%.2fs (scanned ~%lld rows)\n", dt, (long long)last_scanned);
+    if (dt > 5.0) { std::printf("    [!] cancel too slow (>5s)\n"); ++failures; }
   }
 
   std::printf("\n== query-service-smoke %s (%d failures) ==\n",

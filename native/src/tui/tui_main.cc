@@ -21,12 +21,14 @@
 
 #include <notcurses/notcurses.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "primeparts/query/query_service.h"
@@ -77,10 +79,22 @@ struct App {
   bool modal_on = false;
   size_t modal_field = 0;
   std::vector<std::string> modal_buf;
+
+  // Async query execution: the query runs on a worker thread with cooperative
+  // cancel + progress; the UI stays responsive (polls input, draws progress).
+  std::thread worker;
+  std::atomic<bool> q_running{false};
+  std::atomic<bool> q_done{false};
+  std::atomic<bool> q_cancel{false};
+  std::atomic<int64_t> q_scanned{0};
+  std::atomic<int64_t> q_total{0};
+  std::vector<std::string> pending_results;  // worker -> UI; read only post q_done
+  std::string worker_status;                 // ditto
+  char worker_glyph = 'i';                    // ditto
 };
 
 void draw_modal(App* a);
-void run_selected(App* a);
+void start_query(App* a);
 
 double secs_since(std::chrono::steady_clock::time_point t0) {
   return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -326,60 +340,85 @@ void cycle_value(App* a, int delta) {
   }
 }
 
-void run_selected(App* a) {
-  const Preset& p = a->presets[a->preset_idx];
-  a->result_lines.clear();
-  a->res_top = a->res_sel = 0;
-  a->status_glyph = '.'; a->status_msg = "running..."; redraw(a);
-
+// Runs ON THE WORKER THREAD. Writes pending_results / worker_status /
+// worker_glyph, then publishes q_done (release) — the UI reads those only after
+// observing q_done (acquire), so no lock is needed. Progress + cancel flow
+// through the atomics via ScanControl.
+void run_query_worker(App* a, Preset p) {
   std::string err;
+  std::vector<std::string> out;
+  primeparts::query::ScanControl ctl;
+  ctl.cancel = &a->q_cancel;
+  ctl.progress = [a](int64_t sc, int64_t tot) {
+    a->q_scanned.store(sc, std::memory_order_relaxed);
+    a->q_total.store(tot, std::memory_order_relaxed);
+  };
   auto t0 = std::chrono::steady_clock::now();
   if (p.kind == Kind::ByK) {
     auto hits = a->qs->ScanByK((int32_t)fval(p, "k"), fval(p, "p_lo"),
-                               fval(p, "p_hi"), fval(p, "limit", 10), &err);
+                               fval(p, "p_hi"), fval(p, "limit", 10), &err, ctl);
     char hdr[80]; std::snprintf(hdr, sizeof hdr, "%-20s %s", "p", "prime_rank");
-    a->result_lines.emplace_back(hdr);
+    out.emplace_back(hdr);
     for (const auto& h : hits) {
       char r[96]; std::snprintf(r, sizeof r, "%-20lld %lld", (long long)h.p,
                                 (long long)h.prime_rank);
-      a->result_lines.emplace_back(r);
+      out.emplace_back(r);
     }
     double dt = secs_since(t0);
-    char m[112]; std::snprintf(m, sizeof m, "k==%lld -> %zu hits in %.2fs",
-                               (long long)fval(p, "k"), hits.size(), dt);
-    a->status_msg = err.empty() ? m : ("error: " + err);
+    char m[128]; std::snprintf(m, sizeof m, "k==%lld -> %zu hits in %.2fs%s",
+                               (long long)fval(p, "k"), hits.size(), dt,
+                               a->q_cancel.load() ? " (cancelled)" : "");
+    a->worker_status = err.empty() ? m : ("error: " + err);
   } else {
     int64_t pv = fval(p, "p", 0);
-    auto pi = a->qs->LookupPrime(pv, &err);
-    a->result_lines.emplace_back("field                value");
+    auto pi = a->qs->LookupPrime(pv, &err, ctl);
+    out.emplace_back("field                value");
     if (pi) {
       char r[96];
       std::snprintf(r, sizeof r, "k                    %d", pi->k);
-      a->result_lines.emplace_back(r);
+      out.emplace_back(r);
       std::snprintf(r, sizeof r, "prime_rank           %lld", (long long)pi->prime_rank);
-      a->result_lines.emplace_back(r);
-      for (const auto& t : a->qs->LookupPartitions(pv, &err)) {
+      out.emplace_back(r);
+      for (const auto& t : a->qs->LookupPartitions(pv, &err, ctl)) {
         std::snprintf(r, sizeof r, "partition            2^%d + %lld^%d", t.m_k,
                       (long long)t.q_k, t.n_k);
-        a->result_lines.emplace_back(r);
+        out.emplace_back(r);
       }
     } else {
-      a->result_lines.emplace_back(err.empty() ? "(not present)" : err);
+      out.emplace_back(err.empty() ? "(not present)" : err);
     }
     double dt = secs_since(t0);
-    char m[96]; std::snprintf(m, sizeof m, "lookup p=%lld in %.2fs", (long long)pv, dt);
-    a->status_msg = err.empty() ? m : ("error: " + err);
+    char m[112]; std::snprintf(m, sizeof m, "lookup p=%lld in %.2fs%s",
+                               (long long)pv, dt,
+                               a->q_cancel.load() ? " (cancelled)" : "");
+    a->worker_status = err.empty() ? m : ("error: " + err);
   }
-  a->status_glyph = err.empty() ? 'k' : '!';
-  a->res_sel = a->result_lines.size() > 1 ? 1 : 0;
+  a->worker_glyph = err.empty() ? (a->q_cancel.load() ? '!' : 'k') : '!';
+  a->pending_results = std::move(out);
+  a->q_done.store(true, std::memory_order_release);
+}
+
+// Launch the query on a worker thread (UI stays live). No-op if one is running.
+void start_query(App* a) {
+  if (a->q_running.load()) return;
+  a->q_cancel.store(false);
+  a->q_done.store(false);
+  a->q_scanned.store(0);
+  a->q_total.store(0);
+  a->result_lines.clear();
+  a->res_top = a->res_sel = 0;
+  a->status_glyph = '.';
+  a->status_msg = "running...";
   a->focus = Focus::Results;
+  a->q_running.store(true);
+  a->worker = std::thread(run_query_worker, a, a->presets[a->preset_idx]);
 }
 
 // Enter on the query panel: open a field-edit modal (one box per variable
 // field). If the preset has no fields, run directly.
 void open_modal(App* a) {
   const Preset& p = a->presets[a->preset_idx];
-  if (p.fields.empty()) { run_selected(a); return; }
+  if (p.fields.empty()) { start_query(a); return; }
   a->modal_buf.clear();
   for (const auto& f : p.fields) a->modal_buf.push_back(std::to_string(f.value));
   a->modal_field = a->cursor > 0 ? a->cursor - 1 : 0;
@@ -395,7 +434,7 @@ void confirm_modal(App* a) {
     p.fields[i].value = b.empty() ? 0 : std::strtoll(b.c_str(), nullptr, 10);
   }
   a->modal_on = false;
-  run_selected(a);
+  start_query(a);
 }
 
 void draw_modal(App* a) {
@@ -481,6 +520,37 @@ int main(int argc, char** argv) {
 
   bool running = true;
   while (running) {
+    // While a query runs on the worker thread, poll input non-blocking so the
+    // UI stays live: show progress, let Esc cancel.
+    if (app.q_running.load()) {
+      struct timespec ts{0, 60'000'000};  // 60 ms
+      ncinput pin;
+      uint32_t pk = notcurses_get(nc, &ts, &pin);
+      if (pk != 0 && pin.evtype != NCTYPE_RELEASE && pk == NCKEY_ESC)
+        app.q_cancel.store(true);
+      if (app.q_done.load(std::memory_order_acquire)) {
+        app.worker.join();
+        app.q_running.store(false);
+        app.result_lines = std::move(app.pending_results);
+        app.status_msg = app.worker_status;
+        app.status_glyph = app.worker_glyph;
+        app.res_sel = app.result_lines.size() > 1 ? 1 : 0;
+      } else if (app.q_cancel.load()) {
+        app.status_glyph = '.'; app.status_msg = "cancelling...";
+      } else {
+        int64_t sc = app.q_scanned.load(), tot = app.q_total.load();
+        char m[96];
+        if (tot > 0)
+          std::snprintf(m, sizeof m, "running %.1f%%  (%lld / %lld rows)  — Esc cancel",
+                        100.0 * (double)sc / (double)tot, (long long)sc, (long long)tot);
+        else
+          std::snprintf(m, sizeof m, "running...  — Esc cancel");
+        app.status_glyph = '.'; app.status_msg = m;
+      }
+      redraw(&app);
+      continue;
+    }
+
     ncinput in;
     uint32_t key = notcurses_get_blocking(nc, &in);
     if (in.evtype == NCTYPE_RELEASE) continue;
@@ -531,6 +601,10 @@ int main(int argc, char** argv) {
     redraw(&app);
   }
 
+  if (app.worker.joinable()) {  // cancel + join any in-flight query
+    app.q_cancel.store(true);
+    app.worker.join();
+  }
   ncplane_destroy(app.topbar);
   ncplane_destroy(app.query);
   ncplane_destroy(app.results);
