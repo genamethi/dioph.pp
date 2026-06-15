@@ -80,7 +80,6 @@ all: $(BUILD_DIR)/libprimeparts_core.so \
      $(BUILD_DIR)/primeparts-sieve-triage \
      $(BUILD_DIR)/pp-catalog \
      $(BUILD_DIR)/primeparts-test-ui-iceberg \
-     $(BUILD_DIR)/nth_prime_boundaries \
      $(BUILD_DIR)/mersenne-sidecar
 
 $(BUILD_DIR):
@@ -122,10 +121,13 @@ $(COVERING_SIEVE_MAIN_OBJ): src/coverings/covering_sieve_main.cc include/primepa
 $(SIEVE_TRIAGE_MAIN_OBJ): src/coverings/sieve_triage_main.cc include/primeparts/source_scan.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
+$(BUILD_DIR)/query_smoke.o: src/query/query_smoke.cc include/primeparts/source_scan.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
 $(REWRITE_OBJ): src/rewriter/rewrite.cc include/primeparts/writer.h include/primeparts/source_scan.h include/primeparts/preflight.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(PP_ICEBERG_REST_OBJ): src/catalog/pp_iceberg_rest.cc include/primeparts/catalog/pp_iceberg_rest.h | $(BUILD_DIR)
+$(PP_ICEBERG_REST_OBJ): src/catalog/pp_iceberg_rest.cc include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/catalog/pp_lmdb_store.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(PP_HIVE_SYNC_OBJ): src/catalog/pp_hive_sync.cc include/primeparts/catalog/pp_hive_sync.h | $(BUILD_DIR)
@@ -195,8 +197,11 @@ $(BUILD_DIR)/primeparts-generate: $(CORE_OBJ) $(GENERATE_OBJ) $(WRITER_OBJ)
 $(BUILD_DIR)/primeparts-rewrite: $(REWRITE_OBJ) $(SOURCE_SCAN_OBJ) $(WRITER_OBJ) $(PREFLIGHT_OBJ)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(ICEBERG_LDLIBS) -lparquet -larrow -lsqlite3 -pthread -o $@
 
-$(BUILD_DIR)/pp-catalog: $(PP_CATALOG_MAIN_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_HIVE_SYNC_OBJ) $(PP_ROW_DELTA_OBJ) $(PP_DELETE_SPIKE_OBJ) $(PP_SIEVE_CLONE_OBJ) $(SOURCE_SCAN_OBJ)
-	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
+# pp_iceberg_rest now provides MakeLocalCatalog = SqlCatalog(LmdbStore), so every
+# consumer links the SQL-catalog engine + LMDB store. SQL_CATALOG_LDLIBS must
+# precede ICEBERG_LDLIBS (static link order); liblmdb.a backs pp_lmdb_store.o.
+$(BUILD_DIR)/pp-catalog: $(PP_CATALOG_MAIN_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_HIVE_SYNC_OBJ) $(PP_ROW_DELTA_OBJ) $(PP_DELETE_SPIKE_OBJ) $(PP_SIEVE_CLONE_OBJ) $(SOURCE_SCAN_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
+	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
 
 # libiceberg_sql_catalog.a must precede the iceberg core archives so its
 # references resolve in static link order; liblmdb.a backs pp_lmdb_store.o.
@@ -207,10 +212,13 @@ $(BUILD_DIR)/primeparts-lmdb-smoke: $(PP_LMDB_SMOKE_OBJ) $(PP_LMDB_STORE_OBJ) $(
 $(BUILD_DIR)/primeparts-primitive-factors: $(PRIMITIVE_FACTORS_MAIN_OBJ) $(PRIMITIVE_FACTORS_OBJ) $(SOURCE_SCAN_OBJ)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(ICEBERG_LDLIBS) -lparquet -larrow -lsqlite3 -pthread -o $@
 
-$(BUILD_DIR)/primeparts-covering-sieve: $(COVERING_SIEVE_MAIN_OBJ) $(PRIMITIVE_FACTORS_OBJ) $(SOURCE_SCAN_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_ROW_DELTA_OBJ)
-	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
+$(BUILD_DIR)/primeparts-covering-sieve: $(COVERING_SIEVE_MAIN_OBJ) $(PRIMITIVE_FACTORS_OBJ) $(SOURCE_SCAN_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_ROW_DELTA_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
+	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
 
 $(BUILD_DIR)/primeparts-sieve-triage: $(SIEVE_TRIAGE_MAIN_OBJ) $(SOURCE_SCAN_OBJ)
+	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(ICEBERG_LDLIBS) -lparquet -larrow -lsqlite3 -pthread -o $@
+
+$(BUILD_DIR)/query-smoke: $(BUILD_DIR)/query_smoke.o $(SOURCE_SCAN_OBJ)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(ICEBERG_LDLIBS) -lparquet -larrow -lsqlite3 -pthread -o $@
 
 $(BUILD_DIR)/primeparts-test-ui-iceberg: $(UI_ICEBERG_OBJ) $(TEST_UI_ICEBERG_OBJ)
@@ -225,8 +233,11 @@ $(BUILD_DIR)/primeparts-test-primitive-factors: $(TEST_PRIMITIVE_FACTORS_OBJ) $(
 $(BUILD_DIR)/primeparts-tui: $(CORE_OBJ) $(GENERATE_ABI_OBJ) $(WRITER_OBJ) $(UI_ICEBERG_OBJ) $(TUI_FRONTEND_OBJ)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $(NOTCURSES_RPATH) $^ $(LDLIBS) $(ICEBERG_LDLIBS) -lparquet -larrow $(NOTCURSES_LDLIBS) -lsqlite3 -pthread -o $@
 
+# v0.3.0 arrow pulls mimalloc/brotli via libarrow_bundled_dependencies.a; the
+# bare -larrow -lparquet link no longer resolves them. ICEBERG_LDLIBS carries the
+# full static transitive set (libarrow.a + libparquet.a + bundled deps).
 $(BUILD_DIR)/mersenne-sidecar: $(MERSENNE_SIDECAR_OBJ)
-	$(CXX) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) -larrow -lparquet -o $@
+	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(ICEBERG_LDLIBS) -o $@
 
 $(BUILD_DIR)/test_core: $(CORE_OBJ) $(TEST_OBJ)
 	$(CC) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) -pthread -o $@
@@ -241,9 +252,3 @@ smoke: $(BUILD_DIR)/primeparts-lmdb-smoke
 
 clean:
 	rm -rf $(BUILD_DIR)
-
-nth_prime_boundaries: bin/nth_prime_boundaries.c
-	$(CC) $(CFLAGS) $< -o $@ -lprimecount
-
-$(BUILD_DIR)/nth_prime_boundaries: nth_prime_boundaries | $(BUILD_DIR)
-	cp $< $@

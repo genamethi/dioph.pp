@@ -62,7 +62,8 @@ class RowDelta : public iceberg::SnapshotUpdate {
       const iceberg::TableMetadata& metadata_to_update,
       const std::shared_ptr<iceberg::Snapshot>& snapshot) override;
   std::unordered_map<std::string, std::string> Summary() override;
-  void CleanUncommitted(
+  // v0.3.0: base CleanUncommitted return type changed void -> Status.
+  iceberg::Status CleanUncommitted(
       const std::unordered_set<std::string>& committed) override;
 
  private:

@@ -15,10 +15,13 @@
 #include "iceberg/catalog/memory/in_memory_catalog.h"
 #include "iceberg/catalog/rest/catalog_properties.h"
 #include "iceberg/catalog/rest/rest_catalog.h"
+#include "iceberg/catalog/sql/sql_catalog.h"
 #include "iceberg/parquet/parquet_register.h"
 #include "iceberg/sort_order.h"
 #include "iceberg/table.h"
 #include "iceberg/update/fast_append.h"
+
+#include "primeparts/catalog/pp_lmdb_store.h"
 
 namespace primeparts::catalog {
 
@@ -80,6 +83,32 @@ std::shared_ptr<iceberg::Catalog> MakeCatalog(const RestOptions& opts,
   return std::make_shared<iceberg::InMemoryCatalog>(
       "primeparts-staging", LocalIO(), warehouse.string(),
       std::unordered_map<std::string, std::string>{});
+}
+
+std::shared_ptr<iceberg::Catalog> MakeLocalCatalog(const fs::path& warehouse,
+                                                   std::string* error) {
+  // Scanning + manifest read/write need all three format factories (an
+  // arrow-only registration fails PlanFiles with "Missing reader factory for
+  // file format: avro").
+  iceberg::arrow::RegisterAll();
+  iceberg::avro::RegisterAll();
+  iceberg::parquet::RegisterAll();
+
+  auto store_r = MakeLmdbCatalogStore(warehouse / "catalog.lmdb", "primeparts");
+  if (!store_r.has_value()) {
+    if (error) *error = "MakeLmdbCatalogStore: " + store_r.error().message;
+    return nullptr;
+  }
+  iceberg::sql::SqlCatalogConfig cfg;
+  cfg.name = "primeparts";
+  cfg.warehouse_location = warehouse.string();
+  auto cat_r =
+      iceberg::sql::SqlCatalog::Make(cfg, LocalIO(), std::move(store_r.value()));
+  if (!cat_r.has_value()) {
+    if (error) *error = "SqlCatalog::Make: " + cat_r.error().message;
+    return nullptr;
+  }
+  return std::move(cat_r.value());
 }
 
 bool EnsureNamespace(const std::shared_ptr<iceberg::Catalog>& catalog,

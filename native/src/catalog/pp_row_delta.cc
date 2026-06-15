@@ -96,7 +96,15 @@ Result<std::vector<ManifestFile>> RowDelta::WriteNewDeleteManifests() {
     for (const auto& [spec_id, files] : new_delete_files_by_spec_) {
       auto spec_r = base().PartitionSpecById(spec_id);
       if (!spec_r.has_value()) return std::unexpected(spec_r.error());
-      auto written = WriteDeleteManifests(files.as_span(), spec_r.value());
+      // v0.3.0: WriteDeleteManifests takes span<ContentFileWithSequenceNumber>.
+      // Fixed-source delete model -> no explicit data_sequence_number; deletes
+      // inherit the new snapshot's sequence number (see header scope note).
+      std::vector<ContentFileWithSequenceNumber> with_seq;
+      with_seq.reserve(files.as_span().size());
+      for (const auto& f : files.as_span()) {
+        with_seq.push_back({f, std::nullopt});
+      }
+      auto written = WriteDeleteManifests(with_seq, spec_r.value());
       if (!written.has_value()) return std::unexpected(written.error());
       new_manifests_.insert(new_manifests_.end(),
                             std::make_move_iterator(written.value().begin()),
@@ -136,15 +144,16 @@ std::unordered_map<std::string, std::string> RowDelta::Summary() {
   return summary_builder().Build();
 }
 
-void RowDelta::CleanUncommitted(
+iceberg::Status RowDelta::CleanUncommitted(
     const std::unordered_set<std::string>& committed) {
-  if (new_manifests_.empty()) return;
+  if (new_manifests_.empty()) return {};
   for (const auto& m : new_manifests_) {
     if (!committed.contains(m.manifest_path)) {
       std::ignore = DeleteFile(m.manifest_path);
     }
   }
   new_manifests_.clear();
+  return {};
 }
 
 }  // namespace primeparts::catalog

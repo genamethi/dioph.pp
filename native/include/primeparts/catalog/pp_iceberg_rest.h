@@ -60,6 +60,14 @@ std::shared_ptr<iceberg::Catalog> MakeCatalog(const RestOptions& opts,
                                               std::string* mode,
                                               std::string* error);
 
+/// Build the local catalog of record: an in-process `iceberg::sql::SqlCatalog`
+/// backed by an LMDB `CatalogStore` at `<warehouse>/catalog.lmdb`. This is the
+/// ground-up replacement for the (removed) HMS REST servlet and the ephemeral
+/// InMemoryCatalog — persistent, single-writer, IRC-spec-compatible. Registers
+/// arrow/avro/parquet factories. Returns nullptr + `*error` on failure.
+std::shared_ptr<iceberg::Catalog> MakeLocalCatalog(const fs::path& warehouse,
+                                                   std::string* error);
+
 /// Ensure `ns` exists in the catalog, creating it if absent. False + `*error`
 /// on failure.
 bool EnsureNamespace(const std::shared_ptr<iceberg::Catalog>& catalog,
