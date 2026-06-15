@@ -14,8 +14,10 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -42,6 +44,15 @@ struct ScanHit {
   int64_t prime_rank = 0;
 };
 
+/// Cooperative control for a (possibly long) scan. `cancel` is checked once per
+/// batch — set it from another thread to stop promptly. `progress` is invoked
+/// periodically with (rows_scanned, rows_total) for a progress indicator. Both
+/// optional; a default-constructed control runs to completion silently.
+struct ScanControl {
+  std::atomic<bool>* cancel = nullptr;
+  std::function<void(int64_t scanned, int64_t total)> progress;
+};
+
 class QueryService {
  public:
   /// Open against a warehouse root (the dir holding catalog.lmdb). Builds the
@@ -54,15 +65,21 @@ class QueryService {
 
   /// Point lookup of a prime. Returns nullopt if p is absent (not an error);
   /// sets *error only on a real failure.
-  std::optional<PrimeInfo> LookupPrime(int64_t p, std::string* error);
+  std::optional<PrimeInfo> LookupPrime(int64_t p, std::string* error,
+                                       const ScanControl& ctl = {});
 
   /// The (m_k, n_k, q_k) partitions of p (empty for k=0 primes). Sets *error on
   /// failure.
-  std::vector<PartitionTuple> LookupPartitions(int64_t p, std::string* error);
+  std::vector<PartitionTuple> LookupPartitions(int64_t p, std::string* error,
+                                               const ScanControl& ctl = {});
 
-  /// Up to `limit` primes with k == `k`, in p-order, early-stopping once `limit`
-  /// hits are collected.
-  std::vector<ScanHit> ScanByK(int32_t k, int64_t limit, std::string* error);
+  /// Up to `limit` primes with k == `k`, scanned within the p-window
+  /// [p_lo, p_hi] (a pushdown predicate on p; <= 0 means open on that end),
+  /// in p-order, early-stopping once `limit` hits are collected. The p-window
+  /// is load-bearing for sparse high-k values (no max_k stat to prune on).
+  std::vector<ScanHit> ScanByK(int32_t k, int64_t p_lo, int64_t p_hi,
+                               int64_t limit, std::string* error,
+                               const ScanControl& ctl = {});
 
  private:
   struct Impl;

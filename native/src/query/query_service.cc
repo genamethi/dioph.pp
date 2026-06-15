@@ -49,7 +49,8 @@ std::unique_ptr<QueryService> QueryService::Open(const fs::path& warehouse,
   return std::unique_ptr<QueryService>(new QueryService(std::move(impl)));
 }
 
-std::optional<PrimeInfo> QueryService::LookupPrime(int64_t p, std::string* error) {
+std::optional<PrimeInfo> QueryService::LookupPrime(int64_t p, std::string* error,
+                                                   const ScanControl& ctl) {
   fs::path meta = impl_->ResolveMeta("primes", error);
   if (meta.empty()) return std::nullopt;
 
@@ -61,9 +62,12 @@ std::optional<PrimeInfo> QueryService::LookupPrime(int64_t p, std::string* error
     if (error) *error = "open primes: " + e;
     return std::nullopt;
   }
+  const int64_t total = reader->total_records();
+  int64_t scanned = 0;
 
   std::shared_ptr<arrow::RecordBatch> batch;
   while (true) {
+    if (ctl.cancel && ctl.cancel->load()) return std::nullopt;
     if (!reader->Next(&batch, &e)) {
       if (error) *error = "scan primes: " + e;
       return std::nullopt;
@@ -78,12 +82,14 @@ std::optional<PrimeInfo> QueryService::LookupPrime(int64_t p, std::string* error
         return PrimeInfo{.p = p, .k = ka->Value(i), .prime_rank = ra->Value(i)};
       }
     }
+    scanned += batch->num_rows();
+    if (ctl.progress) ctl.progress(scanned, total);
   }
   return std::nullopt;  // not present
 }
 
-std::vector<PartitionTuple> QueryService::LookupPartitions(int64_t p,
-                                                           std::string* error) {
+std::vector<PartitionTuple> QueryService::LookupPartitions(
+    int64_t p, std::string* error, const ScanControl& ctl) {
   std::vector<PartitionTuple> out;
   fs::path meta = impl_->ResolveMeta("partitions", error);
   if (meta.empty()) return out;
@@ -99,6 +105,7 @@ std::vector<PartitionTuple> QueryService::LookupPartitions(int64_t p,
 
   std::shared_ptr<arrow::RecordBatch> batch;
   while (true) {
+    if (ctl.cancel && ctl.cancel->load()) return out;
     if (!reader->Next(&batch, &e)) {
       if (error) *error = "scan partitions: " + e;
       return out;
@@ -118,14 +125,31 @@ std::vector<PartitionTuple> QueryService::LookupPartitions(int64_t p,
   return out;
 }
 
-std::vector<ScanHit> QueryService::ScanByK(int32_t k, int64_t limit,
-                                           std::string* error) {
+std::vector<ScanHit> QueryService::ScanByK(int32_t k, int64_t p_lo, int64_t p_hi,
+                                           int64_t limit, std::string* error,
+                                           const ScanControl& ctl) {
   std::vector<ScanHit> out;
   if (limit <= 0) return out;
   fs::path meta = impl_->ResolveMeta("primes", error);
   if (meta.empty()) return out;
 
-  auto filter = iceberg::Expressions::Equal("k", iceberg::Literal::Int(k));
+  // Pushdown: k == K, bounded by the p-window [p_lo, p_hi] (open ends when <= 0).
+  // TODO(lua-preset): this predicate is the execution seam a Lua preset would
+  // drive — e.g. preset.run(f) -> pp.scan_k(f.k, f.p_lo, f.p_hi, f.limit); the
+  // hardcoded build here is the provisional stand-in (markdown/arch/tui_app_design.md).
+  std::shared_ptr<iceberg::Expression> filter =
+      iceberg::Expressions::Equal("k", iceberg::Literal::Int(k));
+  if (p_lo > 0) {
+    filter = iceberg::Expressions::And(
+        filter, iceberg::Expressions::GreaterThanOrEqual(
+                    "p", iceberg::Literal::Long(p_lo)));
+  }
+  if (p_hi > 0) {
+    filter = iceberg::Expressions::And(
+        filter,
+        iceberg::Expressions::LessThanOrEqual("p", iceberg::Literal::Long(p_hi)));
+  }
+
   std::string e;
   auto reader = primeparts::SourceTableReader::OpenMetadata(
       meta, {"p", "k", "prime_rank"}, filter, &e);
@@ -133,9 +157,13 @@ std::vector<ScanHit> QueryService::ScanByK(int32_t k, int64_t limit,
     if (error) *error = "open primes: " + e;
     return out;
   }
+  const int64_t total = reader->total_records();
 
+  int64_t scanned = 0;
+  bool past_window = false;  // p is streamed ascending; stop once p > p_hi
   std::shared_ptr<arrow::RecordBatch> batch;
-  while ((int64_t)out.size() < limit) {
+  while ((int64_t)out.size() < limit && !past_window) {
+    if (ctl.cancel && ctl.cancel->load()) break;  // cooperative cancel
     if (!reader->Next(&batch, &e)) {
       if (error) *error = "scan primes: " + e;
       return out;
@@ -146,12 +174,18 @@ std::vector<ScanHit> QueryService::ScanByK(int32_t k, int64_t limit,
     auto ra = std::static_pointer_cast<arrow::Int64Array>(
         batch->GetColumnByName("prime_rank"));
     for (int64_t i = 0; i < batch->num_rows() && (int64_t)out.size() < limit; ++i) {
-      // Re-check k: the scan filter prunes files/row-groups but does not
-      // guarantee a row-level residual, so confirm the exact match.
+      const int64_t pv = pa->Value(i);
+      // iceberg-cpp prunes whole files by the predicate but does NOT enforce a
+      // row-level residual, so enforce both k and the p-window in C++. p is
+      // sorted ascending across the stream -> early-stop once past p_hi.
+      if (p_hi > 0 && pv > p_hi) { past_window = true; break; }
+      if (p_lo > 0 && pv < p_lo) continue;
       if (ka->Value(i) == k) {
-        out.push_back(ScanHit{.p = pa->Value(i), .prime_rank = ra->Value(i)});
+        out.push_back(ScanHit{.p = pv, .prime_rank = ra->Value(i)});
       }
     }
+    scanned += batch->num_rows();
+    if (ctl.progress) ctl.progress(scanned, total);
   }
   return out;
 }
