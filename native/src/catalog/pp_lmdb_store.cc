@@ -414,6 +414,133 @@ class LmdbCatalogStore final : public CatalogStore {
     });
   }
 
+  // Renames every table and namespace-property entry from `from_ns` to `to_ns`.
+  // Returns the total number of entries moved.
+  //
+  // Fails with AlreadyExists if `to_ns` already contains any tables or
+  // properties.  The operation is atomic: on any failure the catalog is
+  // left in exactly its prior state.
+  Result<int64_t> RenameNamespace(std::string_view from_ns,
+                                  std::string_view to_ns) {
+    // Identity rename is a no-op; avoids unnecessary transaction overhead
+    // and sidesteps the (correct) "target already exists" check below.
+    if (from_ns == to_ns) {
+      return static_cast<int64_t>(0);
+    }
+
+    std::string from_prefix = NsPrefix(from_ns);
+    std::string to_prefix = NsPrefix(to_ns);
+
+    return WithWrite([&](MDB_txn* txn) -> Result<int64_t> {
+      // ── Phase 1: Guard ──────────────────────────────────────────────
+      // Reject the rename if the target namespace already owns *any* key
+      // in either DBI.  This prevents silent merging of two namespaces.
+      for (MDB_dbi dbi : {dbi_tables_, dbi_nsprops_}) {
+        MDB_cursor* cur = nullptr;
+        if (int rc = mdb_cursor_open(txn, dbi, &cur); rc != MDB_SUCCESS) {
+          return IOError("lmdb: cursor_open: {}", mdb_strerror(rc));
+        }
+        MDB_val k = ToVal(to_prefix);
+        MDB_val v{};
+        int rc = mdb_cursor_get(cur, &k, &v, MDB_SET_RANGE);
+        bool exists = false;
+        if (rc == MDB_SUCCESS) {
+          std::string_view key = ToView(k);
+          if (key.size() >= to_prefix.size() &&
+              key.substr(0, to_prefix.size()) == std::string_view(to_prefix)) {
+            exists = true;
+          }
+        }
+        mdb_cursor_close(cur);
+        if (rc != MDB_SUCCESS && rc != MDB_NOTFOUND) {
+          return IOError("lmdb: check target namespace: {}", mdb_strerror(rc));
+        }
+        if (exists) {
+          return AlreadyExists("target namespace already exists: {}", to_ns);
+        }
+      }
+
+      // ── Phase 2: Collect ────────────────────────────────────────────
+      // Snapshot every key/value belonging to `from_ns` in both DBIs.
+      //
+      // We materialise into a vector rather than mutating in-place during
+      // cursor iteration because LMDB cursors can behave subtly when the
+      // underlying B-tree pages are split by concurrent inserts within the
+      // same transaction.  A two-pass collect-then-apply is safer and
+      // keeps the logic easy to audit.
+      struct Entry {
+        std::string old_key;
+        std::string new_key;
+        std::string value;
+        MDB_dbi dbi;
+      };
+      std::vector<Entry> entries;
+
+      for (MDB_dbi dbi : {dbi_tables_, dbi_nsprops_}) {
+        MDB_cursor* cur = nullptr;
+        if (int rc = mdb_cursor_open(txn, dbi, &cur); rc != MDB_SUCCESS) {
+          return IOError("lmdb: cursor_open: {}", mdb_strerror(rc));
+        }
+        MDB_val k = ToVal(from_prefix);
+        MDB_val v{};
+        int rc = mdb_cursor_get(cur, &k, &v, MDB_SET_RANGE);
+        while (rc == MDB_SUCCESS) {
+          std::string_view key = ToView(k);
+          if (key.size() < from_prefix.size() ||
+              key.substr(0, from_prefix.size()) !=
+                  std::string_view(from_prefix)) {
+            break;  // Past the source prefix — done with this DBI.
+          }
+          Entry e;
+          e.old_key = std::string(key);
+          // Replace only the namespace portion; the trailing name stays.
+          e.new_key = to_prefix + std::string(key.substr(from_prefix.size()));
+          e.value = std::string(ToView(v));
+          e.dbi = dbi;
+          entries.push_back(std::move(e));
+          rc = mdb_cursor_get(cur, &k, &v, MDB_NEXT);
+        }
+        mdb_cursor_close(cur);
+        if (rc != MDB_SUCCESS && rc != MDB_NOTFOUND) {
+          return IOError("lmdb: scan source namespace: {}", mdb_strerror(rc));
+        }
+      }
+
+      // ── Phase 3: Apply ──────────────────────────────────────────────
+      // Insert all new keys first, then delete all old keys.
+      //
+      // Ordering inserts before deletes means that if an insert fails
+      // (e.g. MDB_KEYEXIST from a concurrent writer that slipped in after
+      // our Phase-1 check), the transaction is aborted before any source
+      // data is removed.  The catalog retains the original namespace
+      // intact.
+      for (auto& entry : entries) {
+        MDB_val nk = ToVal(entry.new_key);
+        MDB_val nv = ToVal(entry.value);
+        int rc = mdb_put(txn, entry.dbi, &nk, &nv, MDB_NOOVERWRITE);
+        if (rc == MDB_KEYEXIST) {
+          return AlreadyExists(
+              "target key collision during namespace rename");
+        }
+        if (rc != MDB_SUCCESS) {
+          return IOError("lmdb: namespace rename insert: {}",
+                         mdb_strerror(rc));
+        }
+      }
+
+      for (auto& entry : entries) {
+        MDB_val ok = ToVal(entry.old_key);
+        int rc = mdb_del(txn, entry.dbi, &ok, nullptr);
+        if (rc != MDB_SUCCESS && rc != MDB_NOTFOUND) {
+          return IOError("lmdb: namespace rename delete: {}",
+                         mdb_strerror(rc));
+        }
+      }
+
+      return static_cast<int64_t>(entries.size());
+    });
+  }
+
   Status RunInTransaction(const std::function<Status()>& body) override {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (active_txn_ != nullptr) {
@@ -506,6 +633,17 @@ Result<std::shared_ptr<iceberg::sql::CatalogStore>> MakeLmdbCatalogStore(
     std::size_t map_size_bytes) {
   return std::make_shared<LmdbCatalogStore>(std::move(path), std::move(catalog_name),
                                             map_size_bytes);
+}
+
+// Test-only seam. RenameNamespace is not part of the iceberg::sql::CatalogStore
+// interface (it is a concrete-store extension), so the smoke driver — which only
+// holds a CatalogStore base pointer — cannot reach it directly. This downcasts
+// to the concrete store. Valid because MakeLmdbCatalogStore only ever returns an
+// LmdbCatalogStore.
+Result<int64_t> SmokeRenameNamespace(iceberg::sql::CatalogStore& store,
+                                     std::string_view from_ns,
+                                     std::string_view to_ns) {
+  return static_cast<LmdbCatalogStore&>(store).RenameNamespace(from_ns, to_ns);
 }
 
 }  // namespace primeparts::catalog

@@ -25,6 +25,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "iceberg/arrow/arrow_file_io.h"
@@ -41,6 +42,14 @@
 #include "iceberg/type.h"
 
 #include "primeparts/catalog/pp_lmdb_store.h"
+
+namespace primeparts::catalog {
+// Test-only seam defined in pp_lmdb_store.cc: reaches RenameNamespace on the
+// concrete store (it is not on the CatalogStore interface).
+iceberg::Result<int64_t> SmokeRenameNamespace(iceberg::sql::CatalogStore& store,
+                                              std::string_view from_ns,
+                                              std::string_view to_ns);
+}  // namespace primeparts::catalog
 
 namespace {
 
@@ -250,6 +259,61 @@ void PartB(const std::filesystem::path& dir, const std::filesystem::path& wareho
   OkStatus(cat->DropNamespace(ns), "DropNamespace primeparts");
 }
 
+// --------------------------------------------------------------------------
+// Part C - RenameNamespace (concrete-store extension)
+// --------------------------------------------------------------------------
+void PartC(const std::filesystem::path& dir) {
+  using primeparts::catalog::SmokeRenameNamespace;
+  std::printf("\n== Part C: RenameNamespace (LMDB direct) ==\n");
+  auto store_r = primeparts::catalog::MakeLmdbCatalogStore(dir, "primeparts");
+  if (!Ok(store_r, "MakeLmdbCatalogStore(C)")) return;
+  auto store = store_r.value();
+  if (!OkStatus(store->Initialize(), "Initialize")) return;
+
+  // Source namespace populated across BOTH sub-DBs: 2 props + 2 tables.
+  OkStatus(store->InsertNamespaceProperty("ren.src", "exists", "true"),
+           "seed ren.src/exists");
+  OkStatus(store->InsertNamespaceProperty("ren.src", "owner", "bob"),
+           "seed ren.src/owner");
+  OkStatus(store->InsertTable("ren.src", "ta", "/wh/ren.src/ta/v1.json"),
+           "seed ren.src.ta");
+  OkStatus(store->InsertTable("ren.src", "tb", "/wh/ren.src/tb/v1.json"),
+           "seed ren.src.tb");
+
+  // Rename to an empty target: moves all 4 entries.
+  auto moved = SmokeRenameNamespace(*store, "ren.src", "ren.dst");
+  Check(moved.has_value() && *moved == 4, "rename ren.src -> ren.dst moves 4 entries");
+
+  // Target now carries both sub-DBs, values preserved verbatim.
+  auto dprops = store->GetNamespaceProperties("ren.dst");
+  Check(dprops.has_value() && dprops->size() == 2, "ren.dst has 2 property rows");
+  auto dta = store->TableExists("ren.dst", "ta");
+  auto dtb = store->TableExists("ren.dst", "tb");
+  Check(dta.has_value() && *dta && dtb.has_value() && *dtb,
+        "ren.dst owns ta and tb");
+  auto dloc = store->GetTableMetadataLocation("ren.dst", "ta");
+  Check(dloc.has_value() && *dloc == "/wh/ren.src/ta/v1.json",
+        "ren.dst.ta keeps original metadata loc");
+
+  // Source is fully drained in both sub-DBs.
+  auto sprops = store->GetNamespaceProperties("ren.src");
+  Check(sprops.has_value() && sprops->empty(), "ren.src has no property rows left");
+  auto stabs = store->ListTableNames("ren.src");
+  Check(stabs.has_value() && stabs->empty(), "ren.src has no tables left");
+
+  // Collision: target occupied -> AlreadyExists, and the source is untouched.
+  OkStatus(store->InsertTable("ren.occ", "x", "/wh/ren.occ/x/v1.json"),
+           "seed ren.occ.x");
+  Check(IsAlreadyExists(SmokeRenameNamespace(*store, "ren.dst", "ren.occ")),
+        "rename onto occupied target -> AlreadyExists");
+  auto still = store->TableExists("ren.dst", "ta");
+  Check(still.has_value() && *still, "ren.dst intact after rejected rename");
+
+  // Absent source: nothing to move, reports 0 (not an error).
+  auto absent = SmokeRenameNamespace(*store, "ren.nope", "ren.fresh");
+  Check(absent.has_value() && *absent == 0, "rename of absent source -> 0 moved");
+}
+
 }  // namespace
 
 int main() {
@@ -261,6 +325,7 @@ int main() {
 
   PartA(root / "store");
   PartB(root / "catalog", root / "warehouse");
+  PartC(root / "store_rename");
 
   std::filesystem::remove_all(root, ec);
 
