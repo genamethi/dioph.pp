@@ -124,6 +124,12 @@ $(SIEVE_TRIAGE_MAIN_OBJ): src/coverings/sieve_triage_main.cc include/primeparts/
 $(BUILD_DIR)/query_smoke.o: src/query/query_smoke.cc include/primeparts/source_scan.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
+$(BUILD_DIR)/query_service.o: src/query/query_service.cc include/primeparts/query/query_service.h include/primeparts/source_scan.h include/primeparts/catalog/pp_iceberg_rest.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/query_service_smoke.o: src/query/query_service_smoke.cc include/primeparts/query/query_service.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
 $(REWRITE_OBJ): src/rewriter/rewrite.cc include/primeparts/writer.h include/primeparts/source_scan.h include/primeparts/preflight.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
@@ -220,6 +226,11 @@ $(BUILD_DIR)/primeparts-sieve-triage: $(SIEVE_TRIAGE_MAIN_OBJ) $(SOURCE_SCAN_OBJ
 
 $(BUILD_DIR)/query-smoke: $(BUILD_DIR)/query_smoke.o $(SOURCE_SCAN_OBJ)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(ICEBERG_LDLIBS) -lparquet -larrow -lsqlite3 -pthread -o $@
+
+# QueryService links the catalog seam (SqlCatalog(LmdbStore)): SQL_CATALOG_LDLIBS
+# before ICEBERG_LDLIBS; liblmdb.a backs pp_lmdb_store.o.
+$(BUILD_DIR)/query-service-smoke: $(BUILD_DIR)/query_service_smoke.o $(BUILD_DIR)/query_service.o $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(SOURCE_SCAN_OBJ) $(LMDB_LIB)
+	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
 
 $(BUILD_DIR)/primeparts-test-ui-iceberg: $(UI_ICEBERG_OBJ) $(TEST_UI_ICEBERG_OBJ)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(ICEBERG_LDLIBS) -lparquet -larrow -lsqlite3 -o $@
