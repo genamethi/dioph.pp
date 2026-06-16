@@ -21,6 +21,7 @@
 
 #include <notcurses/notcurses.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -50,6 +51,16 @@ struct Preset {
   std::string desc;   // human description (shown dim)
   Kind kind;
   std::vector<Field> fields;
+  std::vector<std::string> accepts;  // schema field names this query consumes
+  std::string target;                // field a c-dispatched value is written to
+};
+
+// A rendered result row that also carries the schema field name + value it
+// represents, so `c` can dispatch the value into a compatible query.
+struct ResultRow {
+  std::string text;
+  std::string field;   // schema field name ("" = not dispatchable, e.g. header)
+  int64_t value = 0;
 };
 
 enum class Focus { Query, Results };
@@ -67,8 +78,15 @@ struct App {
   size_t cursor = 0;      // cursored option row: 0 = Preset, 1.. = fields
   Focus focus = Focus::Query;
 
-  std::vector<std::string> result_lines;
+  std::vector<ResultRow> result_rows;
   size_t res_top = 0, res_sel = 0;
+
+  // c-dispatch dialogue (reuses the modal overlay plane).
+  bool disp_on = false;
+  std::vector<size_t> disp_cands;  // candidate preset indices
+  size_t disp_sel = 0;
+  std::string disp_field;
+  int64_t disp_value = 0;
 
   std::string status_msg = "ready";
   char status_glyph = 'i';
@@ -88,12 +106,13 @@ struct App {
   std::atomic<bool> q_cancel{false};
   std::atomic<int64_t> q_scanned{0};
   std::atomic<int64_t> q_total{0};
-  std::vector<std::string> pending_results;  // worker -> UI; read only post q_done
+  std::vector<ResultRow> pending_results;    // worker -> UI; read only post q_done
   std::string worker_status;                 // ditto
   char worker_glyph = 'i';                    // ditto
 };
 
 void draw_modal(App* a);
+void draw_dispatch(App* a);
 void start_query(App* a);
 
 double secs_since(std::chrono::steady_clock::time_point t0) {
@@ -225,12 +244,12 @@ void draw_results(App* a) {
   const bool foc = a->focus == Focus::Results;
   char title[48];
   std::snprintf(title, sizeof title, "Results (%zu)",
-                a->result_lines.empty() ? 0 : a->result_lines.size() - 1);
+                a->result_rows.empty() ? 0 : a->result_rows.size() - 1);
   unsigned iy, ix, irows, icols;
   frame(a->results, title, foc, &iy, &ix, &irows, &icols);
   if (irows == 0) return;
 
-  if (a->result_lines.empty()) {
+  if (a->result_rows.empty()) {
     ncplane_set_fg_rgb8(a->results, 0x77, 0x77, 0x77);
     ncplane_printf_yx(a->results, (int)iy, (int)ix, "(no results yet)");
     ncplane_set_fg_default(a->results);
@@ -239,12 +258,12 @@ void draw_results(App* a) {
   ncplane_set_styles(a->results, NCSTYLE_BOLD);
   ncplane_set_fg_rgb8(a->results, 0x88, 0xcc, 0xcc);
   ncplane_printf_yx(a->results, (int)iy, (int)ix, "%-*s", (int)icols,
-                    a->result_lines[0].c_str());
+                    a->result_rows[0].text.c_str());
   ncplane_set_styles(a->results, NCSTYLE_NONE);
   ncplane_set_fg_default(a->results);
 
   const unsigned list_rows = irows - 1;
-  const size_t n = a->result_lines.size();
+  const size_t n = a->result_rows.size();
   if (a->res_sel < 1 && n > 1) a->res_sel = 1;
   if (a->res_sel < a->res_top) a->res_top = a->res_sel;
   else if (list_rows && a->res_sel >= a->res_top + list_rows)
@@ -254,7 +273,7 @@ void draw_results(App* a) {
   for (unsigned r = 0; r < list_rows && a->res_top + r < n; ++r) {
     const size_t idx = a->res_top + r;
     row(a->results, (int)(iy + 1 + r), (int)ix, (int)icols,
-        a->result_lines[idx], idx == a->res_sel, foc, idx);
+        a->result_rows[idx].text, idx == a->res_sel, foc, idx);
   }
   unsigned prows, pcols; ncplane_dim_yx(a->results, &prows, &pcols);
   if (a->res_top > 1) ncplane_putstr_yx(a->results, 1, pcols - 1, "▲");
@@ -279,7 +298,7 @@ void draw_status(App* a) {
   ncplane_set_styles(a->status, NCSTYLE_NONE);
   const std::string& msg = a->confirm_quit ? std::string("quit? (y/N)") : a->status_msg;
   ncplane_printf_yx(a->status, 0, 6, "%s", msg.c_str());
-  const char* keys = "↑↓/jk:move  +/-:value  Enter:edit  Space/b:page  Tab:panel  q:quit";
+  const char* keys = "jk:move +/-:value Enter:edit c:dispatch Space/b:page Tab:panel q:quit";
   size_t kl = std::strlen(keys);
   if (cols > kl + 8) {
     ncplane_set_fg_rgb8(a->status, 0x99, 0x99, 0xaa);
@@ -295,6 +314,7 @@ void redraw(App* a) {
   draw_results(a);
   draw_status(a);
   if (a->modal_on) draw_modal(a);
+  else if (a->disp_on) draw_dispatch(a);
   else ncplane_erase(a->modal);  // transparent when closed
   notcurses_render(a->nc);
 }
@@ -303,7 +323,7 @@ void redraw(App* a) {
 void page_results(App* a, int dir) {
   unsigned rows, cols; ncplane_dim_yx(a->results, &rows, &cols); (void)cols;
   int pg = (int)rows - 3; if (pg < 1) pg = 1;
-  int n = (int)a->result_lines.size();
+  int n = (int)a->result_rows.size();
   if (n <= 1) return;
   int s = (int)a->res_sel + dir * pg;
   a->res_sel = (size_t)(s < 1 ? 1 : s >= n ? n - 1 : s);
@@ -316,7 +336,7 @@ void nav(App* a, int delta) {
     int c = (int)a->cursor + delta;
     a->cursor = (size_t)(c < 0 ? 0 : c >= n ? n - 1 : c);
   } else {
-    int n = (int)a->result_lines.size();
+    int n = (int)a->result_rows.size();
     if (n <= 1) return;
     int s = (int)a->res_sel + delta;
     a->res_sel = (size_t)(s < 1 ? 1 : s >= n ? n - 1 : s);
@@ -346,7 +366,7 @@ void cycle_value(App* a, int delta) {
 // through the atomics via ScanControl.
 void run_query_worker(App* a, Preset p) {
   std::string err;
-  std::vector<std::string> out;
+  std::vector<ResultRow> out;
   primeparts::query::ScanControl ctl;
   ctl.cancel = &a->q_cancel;
   ctl.progress = [a](int64_t sc, int64_t tot) {
@@ -358,11 +378,11 @@ void run_query_worker(App* a, Preset p) {
     auto hits = a->qs->ScanByK((int32_t)fval(p, "k"), fval(p, "p_lo"),
                                fval(p, "p_hi"), fval(p, "limit", 10), &err, ctl);
     char hdr[80]; std::snprintf(hdr, sizeof hdr, "%-20s %s", "p", "prime_rank");
-    out.emplace_back(hdr);
+    out.push_back({hdr, "", 0});
     for (const auto& h : hits) {
       char r[96]; std::snprintf(r, sizeof r, "%-20lld %lld", (long long)h.p,
                                 (long long)h.prime_rank);
-      out.emplace_back(r);
+      out.push_back({r, "p", h.p});  // p is dispatchable (-> lookup)
     }
     double dt = secs_since(t0);
     char m[128]; std::snprintf(m, sizeof m, "k==%lld -> %zu hits in %.2fs%s",
@@ -372,20 +392,20 @@ void run_query_worker(App* a, Preset p) {
   } else {
     int64_t pv = fval(p, "p", 0);
     auto pi = a->qs->LookupPrime(pv, &err, ctl);
-    out.emplace_back("field                value");
+    out.push_back({"field                value", "", 0});
     if (pi) {
       char r[96];
       std::snprintf(r, sizeof r, "k                    %d", pi->k);
-      out.emplace_back(r);
+      out.push_back({r, "k", pi->k});  // k is dispatchable (-> by-k)
       std::snprintf(r, sizeof r, "prime_rank           %lld", (long long)pi->prime_rank);
-      out.emplace_back(r);
+      out.push_back({r, "", 0});
       for (const auto& t : a->qs->LookupPartitions(pv, &err, ctl)) {
         std::snprintf(r, sizeof r, "partition            2^%d + %lld^%d", t.m_k,
                       (long long)t.q_k, t.n_k);
-        out.emplace_back(r);
+        out.push_back({r, "q_k", t.q_k});  // q_k is a prime (-> lookup)
       }
     } else {
-      out.emplace_back(err.empty() ? "(not present)" : err);
+      out.push_back({err.empty() ? "(not present)" : err, "", 0});
     }
     double dt = secs_since(t0);
     char m[112]; std::snprintf(m, sizeof m, "lookup p=%lld in %.2fs%s",
@@ -405,7 +425,7 @@ void start_query(App* a) {
   a->q_done.store(false);
   a->q_scanned.store(0);
   a->q_total.store(0);
-  a->result_lines.clear();
+  a->result_rows.clear();
   a->res_top = a->res_sel = 0;
   a->status_glyph = '.';
   a->status_msg = "running...";
@@ -477,12 +497,92 @@ void draw_modal(App* a) {
   ncplane_set_bg_default(a->modal);
 }
 
+// `c` on a result cell: gather the queries whose accept-set contains the cell's
+// schema field name, and open a chooser. Field-name based — never a type guess.
+void open_dispatch(App* a) {
+  if (a->focus != Focus::Results || a->res_sel == 0 ||
+      a->res_sel >= a->result_rows.size())
+    return;
+  const ResultRow& rr = a->result_rows[a->res_sel];
+  if (rr.field.empty()) {
+    a->status_glyph = 'i';
+    a->status_msg = "nothing to dispatch on this row";
+    return;
+  }
+  a->disp_cands.clear();
+  for (size_t i = 0; i < a->presets.size(); ++i) {
+    const auto& acc = a->presets[i].accepts;
+    if (std::find(acc.begin(), acc.end(), rr.field) != acc.end())
+      a->disp_cands.push_back(i);
+  }
+  if (a->disp_cands.empty()) {
+    a->status_glyph = 'i';
+    a->status_msg = "no queries accept " + rr.field;
+    return;
+  }
+  a->disp_field = rr.field;
+  a->disp_value = rr.value;
+  a->disp_sel = 0;
+  a->disp_on = true;
+}
+
+void confirm_dispatch(App* a) {
+  const size_t pi = a->disp_cands[a->disp_sel];
+  a->preset_idx = pi;
+  Preset& p = a->presets[pi];
+  for (auto& f : p.fields)
+    if (f.name == p.target) f.value = a->disp_value;  // feed the value in
+  a->cursor = 0;
+  a->disp_on = false;
+  start_query(a);
+}
+
+void draw_dispatch(App* a) {
+  unsigned trows, tcols;
+  notcurses_term_dim_yx(a->nc, &trows, &tcols);
+  const unsigned ncand = (unsigned)a->disp_cands.size();
+  unsigned w = (tcols > 4 && 56u > tcols - 4) ? tcols - 4 : 56;
+  unsigned h = ncand + 5;
+  unsigned y0 = trows > h ? (trows - h) / 2 : 1;
+  unsigned x0 = tcols > w ? (tcols - w) / 2 : 1;
+  ncplane_resize_simple(a->modal, h, w);
+  ncplane_move_yx(a->modal, (int)y0, (int)x0);
+  ncplane_erase(a->modal);
+  ncplane_set_bg_rgb8(a->modal, 0x20, 0x24, 0x30);
+  for (unsigned r = 0; r < h; ++r)
+    ncplane_printf_yx(a->modal, (int)r, 0, "%*s", (int)w, "");
+  ncplane_perimeter_rounded(a->modal, NCSTYLE_BOLD, 0, 0);
+  ncplane_set_styles(a->modal, NCSTYLE_BOLD);
+  ncplane_printf_yx(a->modal, 0, 2, "┤ %s = %lld → run ├", a->disp_field.c_str(),
+                    (long long)a->disp_value);
+  ncplane_set_styles(a->modal, NCSTYLE_NONE);
+  for (unsigned i = 0; i < ncand; ++i) {
+    const bool foc = (i == a->disp_sel);
+    if (foc) {
+      ncplane_set_styles(a->modal, NCSTYLE_BOLD);
+      ncplane_set_bg_rgb8(a->modal, 0x2c, 0x44, 0x66);
+      ncplane_set_fg_rgb8(a->modal, 0xff, 0xff, 0xff);
+    }
+    const Preset& p = a->presets[a->disp_cands[i]];
+    ncplane_printf_yx(a->modal, (int)(2 + i), 2, "%s%-10s %.*s", foc ? "> " : "  ",
+                      p.id.c_str(), (int)w - 16, p.desc.c_str());
+    ncplane_set_styles(a->modal, NCSTYLE_NONE);
+    ncplane_set_bg_rgb8(a->modal, 0x20, 0x24, 0x30);
+    ncplane_set_fg_default(a->modal);
+  }
+  ncplane_set_fg_rgb8(a->modal, 0x99, 0x99, 0xaa);
+  ncplane_printf_yx(a->modal, (int)(h - 2), 2, "Enter:run  Esc/b:cancel  j/k:choose");
+  ncplane_set_fg_default(a->modal);
+  ncplane_set_bg_default(a->modal);
+}
+
 std::vector<Preset> make_presets() {
   return {
       Preset{"by-k", "primes where k == {k}, p in [{p_lo},{p_hi}], LIMIT {limit}",
-             Kind::ByK, {{"k", 0}, {"p_lo", 0}, {"p_hi", 0}, {"limit", 10}}},
+             Kind::ByK, {{"k", 0}, {"p_lo", 0}, {"p_hi", 0}, {"limit", 10}},
+             /*accepts=*/{"k"}, /*target=*/"k"},
       Preset{"lookup", "prime p == {p}  ->  k + partitions", Kind::Lookup,
-             {{"p", 11}}},
+             {{"p", 11}}, /*accepts=*/{"p", "q_k"}, /*target=*/"p"},
   };
 }
 
@@ -531,10 +631,10 @@ int main(int argc, char** argv) {
       if (app.q_done.load(std::memory_order_acquire)) {
         app.worker.join();
         app.q_running.store(false);
-        app.result_lines = std::move(app.pending_results);
+        app.result_rows = std::move(app.pending_results);
         app.status_msg = app.worker_status;
         app.status_glyph = app.worker_glyph;
-        app.res_sel = app.result_lines.size() > 1 ? 1 : 0;
+        app.res_sel = app.result_rows.size() > 1 ? 1 : 0;
       } else if (app.q_cancel.load()) {
         app.status_glyph = '.'; app.status_msg = "cancelling...";
       } else {
@@ -579,6 +679,15 @@ int main(int argc, char** argv) {
       }
       redraw(&app); continue;
     }
+    // Dispatch chooser captures input while open.
+    if (app.disp_on) {
+      const size_t ncd = app.disp_cands.size();
+      if (key == NCKEY_ESC || key == 'b') app.disp_on = false;
+      else if (key == NCKEY_ENTER || key == '\n' || key == '\r') confirm_dispatch(&app);
+      else if (key == 'j' || key == NCKEY_DOWN) app.disp_sel = ncd ? (app.disp_sel + 1) % ncd : 0;
+      else if (key == 'k' || key == NCKEY_UP)   app.disp_sel = ncd ? (app.disp_sel + ncd - 1) % ncd : 0;
+      redraw(&app); continue;
+    }
     switch (key) {
       case 'q': app.confirm_quit = true; break;
       case NCKEY_RESIZE: layout(&app); break;
@@ -595,6 +704,9 @@ int main(int argc, char** argv) {
       // runs on confirm). In results, reserved for `c`-dispatch later.
       case NCKEY_ENTER: case '\n': case '\r':
         if (app.focus == Focus::Query) open_modal(&app);
+        break;
+      case 'c':  // dispatch the cursored result value into a compatible query
+        if (app.focus == Focus::Results) open_dispatch(&app);
         break;
       default: break;
     }
