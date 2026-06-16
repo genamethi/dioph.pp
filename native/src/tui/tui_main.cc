@@ -29,6 +29,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <string>
 #include <thread>
@@ -61,6 +62,10 @@ fs::path config_presets_path() {
   return fs::path(".primeparts-queries.lua");
 }
 
+fs::path config_file_path() {  // <config>/config.lua, alongside queries.lua
+  return config_presets_path().parent_path() / "config.lua";
+}
+
 // The shipped seed presets, found relative to the binary
 // (<bindir>/../../scripts/lua/queries.lua) — read on first run before any save.
 fs::path binary_seed_path() {
@@ -82,6 +87,18 @@ using Field = primeparts::query::QueryField;
 using Preset = primeparts::query::QueryPreset;
 using primeparts::tui::LuaPresets;
 
+// Top-level screens (F1..F5). Only RunQuery + Config are real in this pass.
+enum class Screen { RunQuery, MakeQuery, Status, Generate, Config };
+
+// App configuration (persisted as a Lua table at the config path).
+struct Config {
+  int64_t log_limit = 200;          // run-log entries kept (janitor target)
+  int64_t gen_threads = 0;          // 0 = auto (hw concurrency)
+  int64_t default_limit = 10;       // default query LIMIT for new runs
+  std::string log_format = "flat";  // "flat" | "json"
+  bool autosave = false;            // rewrite presets file on every edit
+};
+
 // A rendered result row that also carries the schema field name + value it
 // represents, so `c` can dispatch the value into a compatible query.
 struct ResultRow {
@@ -102,10 +119,15 @@ struct App {
   QueryService* qs = nullptr;
   LuaPresets lua;                              // owns the lua_State
   std::string presets_path = "scripts/lua/queries.lua";
+  std::string config_path;                     // <config>/config.lua
   std::vector<Preset> presets;
   size_t preset_idx = 0;  // value of the "Preset" option
   size_t cursor = 0;      // cursored option row: 0 = Preset, 1.. = fields
   Focus focus = Focus::Query;
+
+  Screen screen = Screen::RunQuery;
+  Config cfg;
+  size_t cfg_cursor = 0;  // cursored config option row
 
   std::vector<ResultRow> result_rows;
   size_t res_top = 0, res_sel = 0;
@@ -196,12 +218,19 @@ int layout(App* a) {
   ncplane_resize_simple(a->topbar, 1, cols);
   ncplane_move_yx(a->topbar, 0, 0);
   const unsigned body = rows - 2;
-  unsigned qh = body * 3 / 10;
-  if (qh < 6) qh = 6;
-  ncplane_resize_simple(a->query, qh, cols);
-  ncplane_move_yx(a->query, 1, 0);
-  ncplane_resize_simple(a->results, body - qh, cols);
-  ncplane_move_yx(a->results, 1 + qh, 0);
+  if (a->screen == Screen::RunQuery) {
+    unsigned qh = body * 3 / 10;
+    if (qh < 6) qh = 6;
+    ncplane_resize_simple(a->query, qh, cols);
+    ncplane_move_yx(a->query, 1, 0);
+    ncplane_resize_simple(a->results, body - qh, cols);
+    ncplane_move_yx(a->results, 1 + qh, 0);
+  } else {  // other screens use the whole body in `query`; results is hidden
+    ncplane_resize_simple(a->query, body, cols);
+    ncplane_move_yx(a->query, 1, 0);
+    ncplane_resize_simple(a->results, 1, cols);
+    ncplane_move_yx(a->results, rows - 1, 0);  // under the status row (covered)
+  }
   ncplane_resize_simple(a->status, 1, cols);
   ncplane_move_yx(a->status, rows - 1, 0);
   return 0;
@@ -212,13 +241,13 @@ void draw_topbar(App* a) {
   unsigned rows, cols; ncplane_dim_yx(a->topbar, &rows, &cols); (void)rows;
   ncplane_set_bg_rgb8(a->topbar, 0x22, 0x22, 0x2c);
   ncplane_printf_yx(a->topbar, 0, 0, "%*s", (int)cols, "");
-  struct Tab { const char* label; bool active; };
-  const Tab tabs[] = {{"F1 Run Query", true}, {"F2 Make", false},
-                      {"F3 Status", false},   {"F4 Generate", false},
-                      {"F5 Config", false}};
+  const char* labels[] = {"F1 Run Query", "F2 Make", "F3 Status",
+                          "F4 Generate", "F5 Config"};
+  const int active = static_cast<int>(a->screen);  // enum order matches labels
   int x = 1;
-  for (const auto& t : tabs) {
-    if (t.active) {
+  for (int ti = 0; ti < 5; ++ti) {
+    const char* label = labels[ti];
+    if (ti == active) {
       ncplane_set_styles(a->topbar, NCSTYLE_BOLD);
       ncplane_set_bg_rgb8(a->topbar, 0x3a, 0x55, 0x88);
       ncplane_set_fg_rgb8(a->topbar, 0xff, 0xff, 0xff);
@@ -227,8 +256,8 @@ void draw_topbar(App* a) {
       ncplane_set_bg_rgb8(a->topbar, 0x22, 0x22, 0x2c);
       ncplane_set_fg_rgb8(a->topbar, 0x99, 0x99, 0xaa);
     }
-    ncplane_printf_yx(a->topbar, 0, x, " %s ", t.label);
-    x += (int)std::strlen(t.label) + 3;
+    ncplane_printf_yx(a->topbar, 0, x, " %s ", label);
+    x += (int)std::strlen(label) + 3;
   }
   ncplane_set_styles(a->topbar, NCSTYLE_NONE);
   ncplane_set_bg_default(a->topbar);
@@ -310,6 +339,59 @@ void draw_results(App* a) {
     ncplane_putstr_yx(a->results, prows - 2, pcols - 1, "▼");
 }
 
+// --- Config screen ---------------------------------------------------------
+size_t cfg_count() { return 5; }
+std::string cfg_name(size_t i) {
+  static const char* n[] = {"log limit", "gen threads", "default limit",
+                            "log format", "autosave"};
+  return i < 5 ? n[i] : "";
+}
+std::string cfg_value(const App& a, size_t i) {
+  switch (i) {
+    case 0: return std::to_string(a.cfg.log_limit);
+    case 1: return a.cfg.gen_threads == 0 ? "auto" : std::to_string(a.cfg.gen_threads);
+    case 2: return std::to_string(a.cfg.default_limit);
+    case 3: return a.cfg.log_format;
+    case 4: return a.cfg.autosave ? "on" : "off";
+  }
+  return "";
+}
+void cfg_adjust(App* a, size_t i, int d) {
+  switch (i) {
+    case 0: a->cfg.log_limit = std::max<int64_t>(0, a->cfg.log_limit + d * 50); break;
+    case 1: a->cfg.gen_threads = std::max<int64_t>(0, a->cfg.gen_threads + d); break;
+    case 2: a->cfg.default_limit = std::max<int64_t>(1, a->cfg.default_limit + d * 5); break;
+    case 3: a->cfg.log_format = (a->cfg.log_format == "flat") ? "json" : "flat"; break;
+    case 4: a->cfg.autosave = !a->cfg.autosave; break;
+  }
+}
+
+void draw_config(App* a) {
+  unsigned iy, ix, irows, icols;
+  frame(a->query, "Configuration", true, &iy, &ix, &irows, &icols);
+  if (irows == 0) return;
+  ncplane_set_fg_rgb8(a->query, 0x77, 0x77, 0x88);
+  ncplane_printf_yx(a->query, (int)iy, (int)ix, "%.*s", (int)icols,
+                    "+/- change   s save   F1 back to queries");
+  ncplane_set_fg_default(a->query);
+  for (size_t i = 0; i < cfg_count() && iy + 2 + i < iy + irows; ++i) {
+    char line[96];
+    std::snprintf(line, sizeof line, "%-16s %s", cfg_name(i).c_str(),
+                  cfg_value(*a, i).c_str());
+    row(a->query, (int)(iy + 2 + i), (int)ix, (int)icols, line,
+        i == a->cfg_cursor, true, i);
+  }
+}
+
+void draw_stub(App* a, const char* title, const char* msg) {
+  unsigned iy, ix, irows, icols;
+  frame(a->query, title, true, &iy, &ix, &irows, &icols);
+  if (irows == 0) return;
+  ncplane_set_fg_rgb8(a->query, 0x77, 0x77, 0x77);
+  ncplane_printf_yx(a->query, (int)iy, (int)ix, "%s", msg);
+  ncplane_set_fg_default(a->query);
+}
+
 void draw_status(App* a) {
   ncplane_erase(a->status);
   unsigned rows, cols; ncplane_dim_yx(a->status, &rows, &cols); (void)rows;
@@ -339,8 +421,19 @@ void draw_status(App* a) {
 
 void redraw(App* a) {
   draw_topbar(a);
-  draw_query(a);
-  draw_results(a);
+  switch (a->screen) {
+    case Screen::RunQuery: draw_query(a); draw_results(a); break;
+    case Screen::Config: draw_config(a); ncplane_erase(a->results); break;
+    case Screen::MakeQuery:
+      draw_stub(a, "Make Query", "ad-hoc queries + save — coming soon");
+      ncplane_erase(a->results); break;
+    case Screen::Status:
+      draw_stub(a, "Status", "warehouse status (max_p, rows, snapshots) — coming soon");
+      ncplane_erase(a->results); break;
+    case Screen::Generate:
+      draw_stub(a, "Generate", "generation runner (subprocess) — coming soon");
+      ncplane_erase(a->results); break;
+  }
   draw_status(a);
   if (a->modal_on) draw_modal(a);
   else if (a->disp_on) draw_dispatch(a);
@@ -677,6 +770,65 @@ void save_current(App* a) {
   }
 }
 
+// --- Config load / save / janitor ------------------------------------------
+void apply_config_kv(App* a, const std::map<std::string, std::string>& kv) {
+  auto geti = [&](const char* k, int64_t d) {
+    auto it = kv.find(k);
+    return it != kv.end() ? std::strtoll(it->second.c_str(), nullptr, 10) : d;
+  };
+  a->cfg.log_limit = geti("log_limit", a->cfg.log_limit);
+  a->cfg.gen_threads = geti("gen_threads", a->cfg.gen_threads);
+  a->cfg.default_limit = geti("default_limit", a->cfg.default_limit);
+  auto sit = kv.find("log_format");
+  if (sit != kv.end() && (sit->second == "json" || sit->second == "flat"))
+    a->cfg.log_format = sit->second;
+  auto bit = kv.find("autosave");
+  if (bit != kv.end()) a->cfg.autosave = (bit->second == "true");
+}
+
+std::map<std::string, std::string> config_to_kv(const Config& c) {
+  return {{"log_limit", std::to_string(c.log_limit)},
+          {"gen_threads", std::to_string(c.gen_threads)},
+          {"default_limit", std::to_string(c.default_limit)},
+          {"log_format", c.log_format},
+          {"autosave", c.autosave ? "true" : "false"}};
+}
+
+// Prune the run-log dir (<config>/logs) to the most-recent log_limit files.
+void run_janitor(App* a) {
+  std::error_code ec;
+  fs::path logs = fs::path(a->config_path).parent_path() / "logs";
+  if (!fs::exists(logs, ec)) return;
+  std::vector<fs::path> files;
+  for (auto& e : fs::directory_iterator(logs, ec))
+    if (e.is_regular_file(ec)) files.push_back(e.path());
+  if ((int64_t)files.size() <= a->cfg.log_limit) return;
+  std::sort(files.begin(), files.end(), [](const fs::path& x, const fs::path& y) {
+    std::error_code e1, e2;
+    return fs::last_write_time(x, e1) > fs::last_write_time(y, e2);
+  });
+  for (size_t i = (size_t)a->cfg.log_limit; i < files.size(); ++i)
+    fs::remove(files[i], ec);
+}
+
+void load_config(App* a) {
+  if (!fs::exists(a->config_path)) return;  // keep defaults
+  std::vector<std::string> errs;
+  apply_config_kv(a, a->lua.LoadConfig(a->config_path, &errs));
+}
+
+void save_config(App* a) {
+  std::string se;
+  if (LuaPresets::SaveConfig(config_to_kv(a->cfg), a->config_path, &se)) {
+    a->status_glyph = 'k';
+    a->status_msg = "saved config -> " + a->config_path;
+    run_janitor(a);
+  } else {
+    a->status_glyph = '!';
+    a->status_msg = "config save failed: " + se;
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -696,6 +848,8 @@ int main(int argc, char** argv) {
   app.nc = nc;
   app.qs = qs.get();
   app.presets_path = config_presets_path().string();  // ~/.config/primeparts/...
+  app.config_path = config_file_path().string();
+  load_config(&app);   // config.lua if present, else defaults
   load_presets(&app);  // config file, else shipped seed, else built-ins
   struct ncplane* std_ = notcurses_stdplane(nc);
   ncplane_options po{}; po.rows = 1; po.cols = 1;
@@ -782,6 +936,31 @@ int main(int argc, char** argv) {
       else if (key == 'k' || key == NCKEY_UP)   app.disp_sel = ncd ? (app.disp_sel + ncd - 1) % ncd : 0;
       redraw(&app); continue;
     }
+    // Global: F1..F5 switch screens; q quits; resize relayouts.
+    if (key == NCKEY_F01 || key == NCKEY_F02 || key == NCKEY_F03 ||
+        key == NCKEY_F04 || key == NCKEY_F05) {
+      app.screen = key == NCKEY_F01   ? Screen::RunQuery
+                   : key == NCKEY_F02 ? Screen::MakeQuery
+                   : key == NCKEY_F03 ? Screen::Status
+                   : key == NCKEY_F04 ? Screen::Generate
+                                      : Screen::Config;
+      app.cfg_cursor = 0;
+      layout(&app); redraw(&app); continue;
+    }
+    if (key == 'q') { app.confirm_quit = true; redraw(&app); continue; }
+    if (key == NCKEY_RESIZE) { layout(&app); redraw(&app); continue; }
+    // Config screen input.
+    if (app.screen == Screen::Config) {
+      const size_t n = cfg_count();
+      if ((key == 'j' || key == NCKEY_DOWN) && app.cfg_cursor + 1 < n) ++app.cfg_cursor;
+      else if ((key == 'k' || key == NCKEY_UP) && app.cfg_cursor > 0) --app.cfg_cursor;
+      else if (key == '+' || key == '=') cfg_adjust(&app, app.cfg_cursor, +1);
+      else if (key == '-') cfg_adjust(&app, app.cfg_cursor, -1);
+      else if (key == 's') save_config(&app);
+      redraw(&app); continue;
+    }
+    // Stub screens consume nothing but the globals above.
+    if (app.screen != Screen::RunQuery) { redraw(&app); continue; }
     switch (key) {
       case 'q': app.confirm_quit = true; break;
       case NCKEY_RESIZE: layout(&app); break;

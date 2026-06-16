@@ -91,6 +91,26 @@ int main(int argc, char** argv) {
     }
   }
 
+  // 4) config round-trip (SaveConfig -> LoadConfig), mixed types.
+  {
+    std::map<std::string, std::string> kv = {
+        {"log_limit", "500"}, {"log_format", "json"}, {"autosave", "true"}};
+    auto cfgtmp = std::filesystem::temp_directory_path() / "pp_cfg.lua";
+    std::filesystem::remove(cfgtmp);
+    std::string ce;
+    if (!LuaPresets::SaveConfig(kv, cfgtmp, &ce)) {
+      std::printf("[!] SaveConfig: %s\n", ce.c_str()); ++fail;
+    }
+    std::vector<std::string> ce2;
+    auto rk = lp.LoadConfig(cfgtmp, &ce2);
+    const bool ok = rk["log_limit"] == "500" && rk["log_format"] == "json" &&
+                    rk["autosave"] == "true";
+    std::printf("[%s] config round-trip: log_limit=%s log_format=%s autosave=%s\n",
+                ok ? "ok" : "!!", rk["log_limit"].c_str(),
+                rk["log_format"].c_str(), rk["autosave"].c_str());
+    if (!ok) ++fail;
+  }
+
   std::printf("\n== lua-presets-smoke %s (%d failures) ==\n",
               fail == 0 ? "PASS" : "FAIL", fail);
   return fail == 0 ? 0 : 1;

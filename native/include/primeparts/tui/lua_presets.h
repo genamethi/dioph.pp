@@ -8,6 +8,7 @@
 #pragma once
 
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -45,6 +46,15 @@ class LuaPresets {
   // vector with unique ids. false + *error on an IO failure.
   static bool SaveAll(const std::vector<QueryPreset>& ps, const fs::path& file,
                       std::string* error);
+
+  // App config (a Lua `config({ k = v, ... })` table). LoadConfig returns the
+  // last config()'s key->value as text (numbers stringified, bools "true"/
+  // "false"). SaveConfig writes one config({...}); a value that is "true"/
+  // "false" or all-numeric is emitted bare, otherwise quoted.
+  std::map<std::string, std::string> LoadConfig(const fs::path& file,
+                                                std::vector<std::string>* errors);
+  static bool SaveConfig(const std::map<std::string, std::string>& kv,
+                         const fs::path& file, std::string* error);
 
  private:
   std::unique_ptr<LuaState> st_;
