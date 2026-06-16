@@ -26,11 +26,15 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <thread>
 #include <vector>
+
+#include <unistd.h>  // readlink (binary-relative seed path)
 
 #include "primeparts/query/query_service.h"
 #include "primeparts/tui/lua_presets.h"
@@ -42,8 +46,34 @@ using primeparts::query::ScanHit;
 
 namespace {
 
+namespace fs = std::filesystem;
+
 constexpr char kDefaultWarehouse[] =
     "/media/extssd/research/dioph.pp/data/ib-staging";
+
+// Where saved presets live: an actual config dir, not CWD. XDG_CONFIG_HOME (or
+// ~/.config) / primeparts / queries.lua.
+fs::path config_presets_path() {
+  const char* xdg = std::getenv("XDG_CONFIG_HOME");
+  if (xdg && *xdg) return fs::path(xdg) / "primeparts" / "queries.lua";
+  const char* home = std::getenv("HOME");
+  if (home && *home) return fs::path(home) / ".config" / "primeparts" / "queries.lua";
+  return fs::path(".primeparts-queries.lua");
+}
+
+// The shipped seed presets, found relative to the binary
+// (<bindir>/../../scripts/lua/queries.lua) — read on first run before any save.
+fs::path binary_seed_path() {
+  char buf[4096];
+  ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+  if (n <= 0) return {};
+  buf[n] = '\0';
+  std::error_code ec;
+  fs::path seed = fs::path(buf).parent_path() / ".." / ".." / "scripts" / "lua" /
+                  "queries.lua";
+  fs::path c = fs::weakly_canonical(seed, ec);
+  return ec ? seed : c;
+}
 
 // Preset/Field are the shared QueryPreset/QueryField — parsed from Lua presets
 // (scripts/lua/queries.lua) and validated by the reader. kind is a string:
@@ -589,10 +619,20 @@ std::vector<Preset> built_in_presets() {  // fallback if the Lua file is missing
 // ones; fall back to the built-ins if the file is missing/empty/all-invalid.
 void load_presets(App* a) {
   std::vector<std::string> errs;
-  auto loaded = a->lua.Load(a->presets_path, &errs);
+  // Config file if it exists, else the shipped seed (binary-relative).
+  fs::path src = fs::exists(a->presets_path) ? fs::path(a->presets_path)
+                                             : binary_seed_path();
+  std::vector<Preset> loaded;
+  if (!src.empty() && fs::exists(src)) loaded = a->lua.Load(src, &errs);
   std::vector<Preset> valid;
   int rejected = 0;
+  auto have = [&](const std::string& id) {
+    for (const auto& v : valid)
+      if (v.id == id) return true;
+    return false;
+  };
   for (auto& p : loaded) {
+    if (have(p.id)) continue;  // dedup by id (first wins)
     std::string ve;
     if (a->qs && a->qs->ValidatePreset(p, &ve)) valid.push_back(std::move(p));
     else ++rejected;
@@ -625,9 +665,12 @@ void save_current(App* a) {
     return;
   }
   std::string se;
-  if (LuaPresets::Save(p, a->presets_path, &se)) {
+  // Rewrite the whole (id-unique) table -> deduped, persists field edits, and
+  // lands in the config path (created if needed).
+  if (LuaPresets::SaveAll(a->presets, a->presets_path, &se)) {
     a->status_glyph = 'k';
-    a->status_msg = "saved '" + p.id + "' to " + a->presets_path;
+    a->status_msg = "saved " + std::to_string(a->presets.size()) +
+                    " presets -> " + a->presets_path;
   } else {
     a->status_glyph = '!';
     a->status_msg = "save failed: " + se;
@@ -652,7 +695,8 @@ int main(int argc, char** argv) {
   App app;
   app.nc = nc;
   app.qs = qs.get();
-  load_presets(&app);  // from scripts/lua/queries.lua (validated), or built-ins
+  app.presets_path = config_presets_path().string();  // ~/.config/primeparts/...
+  load_presets(&app);  // config file, else shipped seed, else built-ins
   struct ncplane* std_ = notcurses_stdplane(nc);
   ncplane_options po{}; po.rows = 1; po.cols = 1;
   app.topbar = ncplane_create(std_, &po);

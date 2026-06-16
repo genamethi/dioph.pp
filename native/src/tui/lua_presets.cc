@@ -146,4 +146,22 @@ bool LuaPresets::Save(const QueryPreset& p, const fs::path& file,
   return true;
 }
 
+bool LuaPresets::SaveAll(const std::vector<QueryPreset>& ps, const fs::path& file,
+                         std::string* error) {
+  std::error_code ec;
+  if (file.has_parent_path()) fs::create_directories(file.parent_path(), ec);
+  std::ofstream f(file, std::ios::trunc);
+  if (!f) {
+    if (error) *error = "cannot open " + file.string();
+    return false;
+  }
+  f << "-- primeparts query presets (managed by the TUI; safe to hand-edit)\n\n";
+  for (const auto& p : ps) f << Serialize(p);
+  if (!f) {
+    if (error) *error = "write failed: " + file.string();
+    return false;
+  }
+  return true;
+}
+
 }  // namespace primeparts::tui

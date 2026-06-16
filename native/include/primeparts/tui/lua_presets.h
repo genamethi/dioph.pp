@@ -41,6 +41,11 @@ class LuaPresets {
   // is responsible for validating first. false + *error on an IO failure.
   static bool Save(const QueryPreset& p, const fs::path& file, std::string* error);
 
+  // Rewrite `file` with all presets (truncates). Use for deduped saves: pass a
+  // vector with unique ids. false + *error on an IO failure.
+  static bool SaveAll(const std::vector<QueryPreset>& ps, const fs::path& file,
+                      std::string* error);
+
  private:
   std::unique_ptr<LuaState> st_;
 };
