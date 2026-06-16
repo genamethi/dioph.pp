@@ -2,6 +2,7 @@
 
 #include "primeparts/query/query_service.h"
 
+#include <algorithm>
 #include <memory>
 #include <utility>
 
@@ -11,6 +12,7 @@
 #include "iceberg/catalog.h"
 #include "iceberg/expression/expressions.h"
 #include "iceberg/expression/literal.h"
+#include "iceberg/schema.h"
 #include "iceberg/table.h"
 #include "iceberg/table_identifier.h"
 
@@ -25,6 +27,8 @@ const iceberg::Namespace kNs{{"primeparts"}};
 
 struct QueryService::Impl {
   std::shared_ptr<iceberg::Catalog> catalog;
+  std::vector<std::string> schema_fields;  // cached union of base-table fields
+  bool schema_loaded = false;
 
   // Resolve a table's current metadata.json path through the catalog seam
   // (LoadTable). Empty + *error on failure.
@@ -188,6 +192,44 @@ std::vector<ScanHit> QueryService::ScanByK(int32_t k, int64_t p_lo, int64_t p_hi
     if (ctl.progress) ctl.progress(scanned, total);
   }
   return out;
+}
+
+const std::vector<std::string>& QueryService::SchemaFields() {
+  if (impl_->schema_loaded) return impl_->schema_fields;
+  std::vector<std::string>& out = impl_->schema_fields;
+  for (const char* tbl : {"primes", "partitions"}) {
+    auto t = impl_->catalog->LoadTable(
+        iceberg::TableIdentifier{.ns = kNs, .name = tbl});
+    if (!t.has_value()) continue;
+    auto sch = t.value()->schema();
+    if (!sch.has_value()) continue;
+    for (const auto& f : sch.value()->fields()) out.emplace_back(f.name());
+  }
+  std::sort(out.begin(), out.end());
+  out.erase(std::unique(out.begin(), out.end()), out.end());
+  impl_->schema_loaded = true;
+  return out;
+}
+
+bool QueryService::ValidatePreset(const QueryPreset& p, std::string* error) {
+  auto fail = [&](std::string m) { if (error) *error = std::move(m); return false; };
+  if (p.id.empty()) return fail("preset id is empty");
+  if (p.kind != "by_k" && p.kind != "lookup")
+    return fail("unknown query kind: '" + p.kind + "'");
+  const auto& fields = SchemaFields();
+  auto known = [&](const std::string& n) {
+    return std::find(fields.begin(), fields.end(), n) != fields.end();
+  };
+  for (const auto& a : p.accepts)
+    if (!known(a)) return fail("accepts unknown schema field: '" + a + "'");
+  if (p.target.empty()) return fail("target is empty");
+  if (!known(p.target)) return fail("target unknown schema field: '" + p.target + "'");
+  bool target_is_field = false;
+  for (const auto& f : p.fields)
+    if (f.name == p.target) target_is_field = true;
+  if (!target_is_field)
+    return fail("target '" + p.target + "' is not a declared field of the preset");
+  return true;
 }
 
 }  // namespace primeparts::query

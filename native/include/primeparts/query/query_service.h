@@ -23,6 +23,8 @@
 #include <string>
 #include <vector>
 
+#include "primeparts/query/query_preset.h"
+
 namespace primeparts::query {
 
 namespace fs = std::filesystem;
@@ -80,6 +82,16 @@ class QueryService {
   std::vector<ScanHit> ScanByK(int32_t k, int64_t p_lo, int64_t p_hi,
                                int64_t limit, std::string* error,
                                const ScanControl& ctl = {});
+
+  /// Distinct schema field names across the base tables (primes + partitions),
+  /// read from the catalog schema and cached. The authority for preset
+  /// validation — this is the "reader/catalog verifies the query" seam.
+  const std::vector<std::string>& SchemaFields();
+
+  /// Validate a query preset: non-empty id, known `kind`, and `accepts`/`target`
+  /// referencing real schema fields (`target` must also be a declared field).
+  /// Returns false + a human-readable `*error` on the first violation.
+  bool ValidatePreset(const QueryPreset& p, std::string* error);
 
  private:
   struct Impl;

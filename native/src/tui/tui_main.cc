@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "primeparts/query/query_service.h"
+#include "primeparts/tui/lua_presets.h"
 
 using primeparts::query::PartitionTuple;
 using primeparts::query::PrimeInfo;
@@ -44,16 +45,12 @@ namespace {
 constexpr char kDefaultWarehouse[] =
     "/media/extssd/research/dioph.pp/data/ib-staging";
 
-struct Field { std::string name; int64_t value; };
-enum class Kind { ByK, Lookup };
-struct Preset {
-  std::string id;     // short, shown as the "Preset" option value
-  std::string desc;   // human description (shown dim)
-  Kind kind;
-  std::vector<Field> fields;
-  std::vector<std::string> accepts;  // schema field names this query consumes
-  std::string target;                // field a c-dispatched value is written to
-};
+// Preset/Field are the shared QueryPreset/QueryField — parsed from Lua presets
+// (scripts/lua/queries.lua) and validated by the reader. kind is a string:
+// "by_k" (QueryService::ScanByK) | "lookup" (LookupPrime + partitions).
+using Field = primeparts::query::QueryField;
+using Preset = primeparts::query::QueryPreset;
+using primeparts::tui::LuaPresets;
 
 // A rendered result row that also carries the schema field name + value it
 // represents, so `c` can dispatch the value into a compatible query.
@@ -73,6 +70,8 @@ struct App {
   struct ncplane* status = nullptr;
 
   QueryService* qs = nullptr;
+  LuaPresets lua;                              // owns the lua_State
+  std::string presets_path = "scripts/lua/queries.lua";
   std::vector<Preset> presets;
   size_t preset_idx = 0;  // value of the "Preset" option
   size_t cursor = 0;      // cursored option row: 0 = Preset, 1.. = fields
@@ -298,7 +297,7 @@ void draw_status(App* a) {
   ncplane_set_styles(a->status, NCSTYLE_NONE);
   const std::string& msg = a->confirm_quit ? std::string("quit? (y/N)") : a->status_msg;
   ncplane_printf_yx(a->status, 0, 6, "%s", msg.c_str());
-  const char* keys = "jk:move +/-:value Enter:edit c:dispatch Space/b:page Tab:panel q:quit";
+  const char* keys = "jk:move +/-:val Enter:edit c:drill s:save R:reload Tab:panel q:quit";
   size_t kl = std::strlen(keys);
   if (cols > kl + 8) {
     ncplane_set_fg_rgb8(a->status, 0x99, 0x99, 0xaa);
@@ -374,7 +373,7 @@ void run_query_worker(App* a, Preset p) {
     a->q_total.store(tot, std::memory_order_relaxed);
   };
   auto t0 = std::chrono::steady_clock::now();
-  if (p.kind == Kind::ByK) {
+  if (p.kind == "by_k") {
     auto hits = a->qs->ScanByK((int32_t)fval(p, "k"), fval(p, "p_lo"),
                                fval(p, "p_hi"), fval(p, "limit", 10), &err, ctl);
     char hdr[80]; std::snprintf(hdr, sizeof hdr, "%-20s %s", "p", "prime_rank");
@@ -576,14 +575,63 @@ void draw_dispatch(App* a) {
   ncplane_set_bg_default(a->modal);
 }
 
-std::vector<Preset> make_presets() {
+std::vector<Preset> built_in_presets() {  // fallback if the Lua file is missing
   return {
       Preset{"by-k", "primes where k == {k}, p in [{p_lo},{p_hi}], LIMIT {limit}",
-             Kind::ByK, {{"k", 0}, {"p_lo", 0}, {"p_hi", 0}, {"limit", 10}},
-             /*accepts=*/{"k"}, /*target=*/"k"},
-      Preset{"lookup", "prime p == {p}  ->  k + partitions", Kind::Lookup,
-             {{"p", 11}}, /*accepts=*/{"p", "q_k"}, /*target=*/"p"},
+             "by_k", {{"k", 0}, {"p_lo", 0}, {"p_hi", 0}, {"limit", 10}},
+             {"k"}, "k"},
+      Preset{"lookup", "prime p == {p}  ->  k + partitions", "lookup",
+             {{"p", 11}}, {"p", "q_k"}, "p"},
   };
+}
+
+// Load presets from the Lua file, validate each via the reader, keep the valid
+// ones; fall back to the built-ins if the file is missing/empty/all-invalid.
+void load_presets(App* a) {
+  std::vector<std::string> errs;
+  auto loaded = a->lua.Load(a->presets_path, &errs);
+  std::vector<Preset> valid;
+  int rejected = 0;
+  for (auto& p : loaded) {
+    std::string ve;
+    if (a->qs && a->qs->ValidatePreset(p, &ve)) valid.push_back(std::move(p));
+    else ++rejected;
+  }
+  if (valid.empty()) {
+    a->presets = built_in_presets();
+    a->status_glyph = loaded.empty() ? 'i' : '!';
+    a->status_msg = loaded.empty() ? "no presets file — using built-ins"
+                                   : "all presets invalid — using built-ins";
+  } else {
+    a->presets = std::move(valid);
+    char m[96];
+    std::snprintf(m, sizeof m, "loaded %zu presets%s", a->presets.size(),
+                  rejected ? " (some rejected)" : "");
+    a->status_glyph = rejected ? '!' : 'i';
+    a->status_msg = m;
+  }
+  if (a->preset_idx >= a->presets.size()) a->preset_idx = 0;
+  a->cursor = 0;
+}
+
+// Save the current preset (with its current field values) to the Lua file.
+void save_current(App* a) {
+  if (a->presets.empty()) return;
+  const Preset& p = a->presets[a->preset_idx];
+  std::string ve;
+  if (a->qs && !a->qs->ValidatePreset(p, &ve)) {
+    a->status_glyph = '!';
+    a->status_msg = "invalid, not saved: " + ve;
+    return;
+  }
+  std::string se;
+  if (LuaPresets::Save(p, a->presets_path, &se)) {
+    a->status_glyph = 'k';
+    a->status_msg = "saved '" + p.id + "' to " + a->presets_path;
+  } else {
+    a->status_glyph = '!';
+    a->status_msg = "save failed: " + se;
+  }
 }
 
 }  // namespace
@@ -602,7 +650,9 @@ int main(int argc, char** argv) {
   if (!nc) { std::fprintf(stderr, "notcurses_core_init failed\n"); return 1; }
 
   App app;
-  app.nc = nc; app.qs = qs.get(); app.presets = make_presets();
+  app.nc = nc;
+  app.qs = qs.get();
+  load_presets(&app);  // from scripts/lua/queries.lua (validated), or built-ins
   struct ncplane* std_ = notcurses_stdplane(nc);
   ncplane_options po{}; po.rows = 1; po.cols = 1;
   app.topbar = ncplane_create(std_, &po);
@@ -708,6 +758,8 @@ int main(int argc, char** argv) {
       case 'c':  // dispatch the cursored result value into a compatible query
         if (app.focus == Focus::Results) open_dispatch(&app);
         break;
+      case 's': save_current(&app); break;   // save current query to Lua
+      case 'R': load_presets(&app); break;   // reload presets from Lua
       default: break;
     }
     redraw(&app);
