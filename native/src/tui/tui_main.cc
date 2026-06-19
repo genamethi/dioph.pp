@@ -1,41 +1,47 @@
-// primeparts TUI — first pass (v3: option-row query panel, correct key model).
+// primeparts TUI — multi-screen app over QueryService + the LMDB catalog.
 //
-// Multi-screen app design: markdown/arch/tui_app_design.md. This pass is the Run
-// Saved Query screen only (F1). C++ calling QueryService directly.
+// Multi-screen app design: markdown/arch/tui_app_design.md. Screens (F1..F5):
+//   F1 Run Query  — saved Lua presets, threaded + cancellable + progress, `c`
+//                   field-name dispatch into a compatible query.
+//   F4 Generate   — runs the primeparts-generate subprocess; streams its output
+//                   into a capped (kGenMaxLines), scrollable pane; Esc=SIGTERM.
+//   F5 Config     — app config (Lua), log janitor.
+//   F2 Make Query / F3 Status — stubs (next passes).
 //
 // KEY MODEL (per the user, do not re-derive — see feedback_dont_assume):
 //   * arrows / hjkl  = NAVIGATE (move the cursor among option rows; scroll
-//                      results). +/- is NEVER navigation.
-//   * + / -          = cycle the VALUE of the option the cursor is on, shown to
-//                      the right of the option name (e.g. the Preset option
-//                      cycles by-k <-> lookup). Numeric fields edit via a modal
-//                      (NOT YET — next pass).
-//   * Tab            = switch the query / results panel focus.
-//   * Enter          = reserved for "change view / detailed options". The RUN
-//                      trigger is UNSPECIFIED; Enter currently runs ONLY as a
-//                      flagged placeholder pending the user's choice of key.
+//                      results / output). +/- is NEVER navigation.
+//   * + / -          = cycle the VALUE of the cursored option, shown to the
+//                      right of the option name (preset cycle; generate/config
+//                      coarse adjust). Numeric fields also edit via Enter modal.
+//   * Tab            = switch panel focus (options <-> results/output).
+//   * Enter          = open the field-edit modal (Run Query runs on confirm;
+//                      Generate just commits values — `g` runs the subprocess).
 //   * q              = quit (y/N).
 //
-// NOT YET: field-edit modal; threaded+cancellable+progress queries; `c`
-// field-name dispatch; F2..F5 screens; Ctrl+L log; Lua presets.
+// NOT YET: F2 Make Query (ad-hoc + save-as-preset); F3 Status; Ctrl+L log view.
 
 #include <notcurses/notcurses.h>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <filesystem>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
-#include <unistd.h>  // readlink (binary-relative seed path)
+#include <sys/wait.h>  // waitpid (generation subprocess)
+#include <unistd.h>    // readlink (binary-relative seed path), fork/exec, pipe
 
 #include "primeparts/query/query_service.h"
 #include "primeparts/tui/lua_presets.h"
@@ -51,6 +57,20 @@ namespace fs = std::filesystem;
 
 constexpr char kDefaultWarehouse[] =
     "/media/extssd/research/dioph.pp/data/ib-staging";
+
+// Cap on the generation output pane — the run-log buffer is trimmed to the most
+// recent kGenMaxLines lines (per the Generate-tab spec).
+constexpr size_t kGenMaxLines = 10000;
+
+// Directory holding this binary (primeparts-tui); primeparts-generate lives
+// alongside it.
+fs::path binary_dir() {
+  char buf[4096];
+  ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+  if (n <= 0) return {};
+  buf[n] = '\0';
+  return fs::path(buf).parent_path();
+}
 
 // Where saved presets live: an actual config dir, not CWD. XDG_CONFIG_HOME (or
 // ~/.config) / primeparts / queries.lua.
@@ -69,13 +89,10 @@ fs::path config_file_path() {  // <config>/config.lua, alongside queries.lua
 // The shipped seed presets, found relative to the binary
 // (<bindir>/../../scripts/lua/queries.lua) — read on first run before any save.
 fs::path binary_seed_path() {
-  char buf[4096];
-  ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
-  if (n <= 0) return {};
-  buf[n] = '\0';
+  fs::path dir = binary_dir();
+  if (dir.empty()) return {};
   std::error_code ec;
-  fs::path seed = fs::path(buf).parent_path() / ".." / ".." / "scripts" / "lua" /
-                  "queries.lua";
+  fs::path seed = dir / ".." / ".." / "scripts" / "lua" / "queries.lua";
   fs::path c = fs::weakly_canonical(seed, ec);
   return ec ? seed : c;
 }
@@ -109,6 +126,9 @@ struct ResultRow {
 
 enum class Focus { Query, Results };
 
+// Which value set the shared field-edit modal is bound to.
+enum class ModalKind { PresetFields, GenFields };
+
 struct App {
   struct notcurses* nc = nullptr;
   struct ncplane* topbar = nullptr;
@@ -118,6 +138,7 @@ struct App {
 
   QueryService* qs = nullptr;
   LuaPresets lua;                              // owns the lua_State
+  std::string warehouse;                       // warehouse root (catalog + data)
   std::string presets_path = "scripts/lua/queries.lua";
   std::string config_path;                     // <config>/config.lua
   std::vector<Preset> presets;
@@ -143,11 +164,30 @@ struct App {
   char status_glyph = 'i';
   bool confirm_quit = false;
 
-  // Field-edit modal: one text box per variable field of the current preset.
+  // Field-edit modal: one text box per variable field. Shared between the
+  // RunQuery preset fields and the Generate parameters (modal_kind selects).
   struct ncplane* modal = nullptr;
   bool modal_on = false;
+  ModalKind modal_kind = ModalKind::PresetFields;
   size_t modal_field = 0;
   std::vector<std::string> modal_buf;
+
+  // Generation runner (F4): a `primeparts-generate` subprocess streamed into a
+  // capped, scrollable output pane. Mirrors the async-query worker pattern
+  // (worker thread + atomics + non-blocking UI poll), plus SIGTERM cancel.
+  int64_t gen_start = 1;            // --start-idx (1-indexed FLINT prime rank)
+  int64_t gen_count = 100'000'000;  // --count (primes to generate)
+  int64_t gen_chunk = 500'000;      // --chunk-primes (materialization chunk)
+  int64_t gen_threads = 0;          // --threads (0 = auto / hw concurrency)
+  size_t gen_cursor = 0;            // cursored generate option row (0..3)
+  std::thread gen_worker;
+  std::atomic<bool> gen_running{false};
+  std::atomic<bool> gen_done{false};
+  std::atomic<int> gen_pid{-1};      // child pid while running (for SIGTERM)
+  std::atomic<int> gen_exit{0};      // child exit code, valid once gen_done
+  std::mutex gen_mtx;                // guards gen_out
+  std::deque<std::string> gen_out;   // output lines, capped to kGenMaxLines
+  size_t gen_scroll = 0;             // lines scrolled up from the tail (0=follow)
 
   // Async query execution: the query runs on a worker thread with cooperative
   // cancel + progress; the UI stays responsive (polls input, draws progress).
@@ -165,6 +205,9 @@ struct App {
 void draw_modal(App* a);
 void draw_dispatch(App* a);
 void start_query(App* a);
+void start_generate(App* a);
+void open_gen_modal(App* a);
+size_t modal_field_count(App* a);
 
 double secs_since(std::chrono::steady_clock::time_point t0) {
   return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -218,9 +261,10 @@ int layout(App* a) {
   ncplane_resize_simple(a->topbar, 1, cols);
   ncplane_move_yx(a->topbar, 0, 0);
   const unsigned body = rows - 2;
-  if (a->screen == Screen::RunQuery) {
+  if (a->screen == Screen::RunQuery || a->screen == Screen::Generate) {
     unsigned qh = body * 3 / 10;
-    if (qh < 6) qh = 6;
+    const unsigned qmin = a->screen == Screen::Generate ? 8 : 6;
+    if (qh < qmin) qh = qmin;
     ncplane_resize_simple(a->query, qh, cols);
     ncplane_move_yx(a->query, 1, 0);
     ncplane_resize_simple(a->results, body - qh, cols);
@@ -366,6 +410,196 @@ void cfg_adjust(App* a, size_t i, int d) {
   }
 }
 
+// --- Generate screen -------------------------------------------------------
+// Four `primeparts-generate` parameters, edited with +/- (coarse steps) or a
+// precise numeric modal (Enter). The runner streams the subprocess output.
+size_t gen_opt_count() { return 4; }
+std::string gen_name(size_t i) {
+  static const char* n[] = {"start-idx", "count", "chunk-primes", "threads"};
+  return i < 4 ? n[i] : "";
+}
+int64_t gen_field(const App& a, size_t i) {
+  switch (i) {
+    case 0: return a.gen_start;
+    case 1: return a.gen_count;
+    case 2: return a.gen_chunk;
+    case 3: return a.gen_threads;
+  }
+  return 0;
+}
+std::string gen_value(const App& a, size_t i) {
+  if (i == 3 && a.gen_threads == 0) return "auto";
+  return std::to_string(gen_field(a, i));
+}
+void gen_adjust(App* a, size_t i, int d) {
+  switch (i) {
+    case 0: a->gen_start = std::max<int64_t>(1, a->gen_start + (int64_t)d * 1'000'000); break;
+    case 1: a->gen_count = std::max<int64_t>(1, a->gen_count + (int64_t)d * 10'000'000); break;
+    case 2: a->gen_chunk = std::max<int64_t>(1000, a->gen_chunk + (int64_t)d * 100'000); break;
+    case 3: a->gen_threads = std::max<int64_t>(0, a->gen_threads + d); break;
+  }
+}
+
+// Append a line to the (mutex-guarded) generation output, trimming to the cap.
+void gen_push(App* a, const std::string& line) {
+  std::lock_guard<std::mutex> lk(a->gen_mtx);
+  a->gen_out.push_back(line);
+  while (a->gen_out.size() > kGenMaxLines) a->gen_out.pop_front();
+}
+
+// Runs ON THE WORKER THREAD: fork+exec primeparts-generate, stream its merged
+// stdout/stderr into gen_out line by line, then publish gen_done (release). The
+// UI reads gen_exit only after observing gen_done (acquire).
+void gen_run_worker(App* a, std::string exe, std::vector<std::string> argv_s) {
+  int fds[2];
+  if (::pipe(fds) != 0) {
+    gen_push(a, "error: pipe() failed");
+    a->gen_exit.store(-1);
+    a->gen_done.store(true, std::memory_order_release);
+    return;
+  }
+  pid_t pid = ::fork();
+  if (pid < 0) {
+    gen_push(a, "error: fork() failed");
+    ::close(fds[0]); ::close(fds[1]);
+    a->gen_exit.store(-1);
+    a->gen_done.store(true, std::memory_order_release);
+    return;
+  }
+  if (pid == 0) {  // child: merge stdout+stderr into the pipe, then exec
+    ::dup2(fds[1], STDOUT_FILENO);
+    ::dup2(fds[1], STDERR_FILENO);
+    ::close(fds[0]); ::close(fds[1]);
+    std::vector<char*> av;
+    av.reserve(argv_s.size() + 2);
+    av.push_back(exe.data());
+    for (auto& s : argv_s) av.push_back(s.data());
+    av.push_back(nullptr);
+    ::execv(exe.c_str(), av.data());
+    ::_exit(127);  // exec failed
+  }
+  ::close(fds[1]);
+  a->gen_pid.store(pid);
+  if (FILE* fp = ::fdopen(fds[0], "r")) {
+    char buf[8192];
+    while (std::fgets(buf, sizeof buf, fp)) {
+      size_t n = std::strlen(buf);
+      while (n && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) buf[--n] = '\0';
+      gen_push(a, buf);
+    }
+    std::fclose(fp);
+  } else {
+    ::close(fds[0]);
+  }
+  int status = 0;
+  ::waitpid(pid, &status, 0);
+  int ec = WIFEXITED(status)    ? WEXITSTATUS(status)
+           : WIFSIGNALED(status) ? 128 + WTERMSIG(status)
+                                 : -1;
+  a->gen_pid.store(-1);
+  a->gen_exit.store(ec);
+  a->gen_done.store(true, std::memory_order_release);
+}
+
+// Launch the generation subprocess (UI stays live). No-op if one is running.
+void start_generate(App* a) {
+  if (a->gen_running.load()) return;
+  fs::path exe = binary_dir() / "primeparts-generate";
+  if (exe.empty() || !fs::exists(exe)) {
+    a->status_glyph = '!';
+    a->status_msg = "primeparts-generate not found next to the TUI binary";
+    return;
+  }
+  std::vector<std::string> argv = {"--start-idx", std::to_string(a->gen_start),
+                                   "--count", std::to_string(a->gen_count),
+                                   "--chunk-primes", std::to_string(a->gen_chunk)};
+  if (a->gen_threads > 0) {
+    argv.push_back("--threads");
+    argv.push_back(std::to_string(a->gen_threads));
+  }
+  argv.push_back("--warehouse");
+  argv.push_back(a->warehouse);
+  { std::lock_guard<std::mutex> lk(a->gen_mtx); a->gen_out.clear(); }
+  a->gen_scroll = 0;
+  std::string cmd = "$ primeparts-generate";
+  for (const auto& s : argv) cmd += ' ' + s;
+  gen_push(a, cmd);
+  gen_push(a, "(writes parquet + a JSONL manifest; commit is a separate step)");
+  a->gen_done.store(false);
+  a->gen_exit.store(0);
+  a->gen_running.store(true);
+  a->focus = Focus::Results;  // follow the streaming output
+  a->gen_worker = std::thread(gen_run_worker, a, exe.string(), std::move(argv));
+}
+
+// Scroll the output pane. delta > 0 scrolls toward older lines (up), < 0 toward
+// the tail (down). gen_scroll is the line distance from the tail (0 = follow).
+void gen_scroll_by(App* a, int delta) {
+  size_t total;
+  { std::lock_guard<std::mutex> lk(a->gen_mtx); total = a->gen_out.size(); }
+  int s = (int)a->gen_scroll + delta;
+  if (s < 0) s = 0;
+  if ((size_t)s > total) s = (int)total;
+  a->gen_scroll = (size_t)s;
+}
+void gen_page(App* a, int dir) {  // dir > 0 = older, < 0 = newer
+  unsigned rows, cols; ncplane_dim_yx(a->results, &rows, &cols); (void)cols;
+  int pg = (int)rows - 3; if (pg < 1) pg = 1;
+  gen_scroll_by(a, dir * pg);
+}
+
+void draw_generate(App* a) {
+  const bool foc = a->focus == Focus::Query;
+  unsigned iy, ix, irows, icols;
+  frame(a->query, "Generate", foc, &iy, &ix, &irows, &icols);
+  if (irows == 0) return;
+  ncplane_set_fg_rgb8(a->query, 0x77, 0x77, 0x88);
+  ncplane_printf_yx(a->query, (int)iy, (int)ix, "%.*s", (int)icols,
+                    "+/- adjust   Enter edit   g run   Tab output   Esc terminate");
+  ncplane_set_fg_default(a->query);
+  for (size_t i = 0; i < gen_opt_count() && iy + 1 + i < iy + irows; ++i) {
+    char line[96];
+    std::snprintf(line, sizeof line, "%-14s %s", gen_name(i).c_str(),
+                  gen_value(*a, i).c_str());
+    row(a->query, (int)(iy + 1 + i), (int)ix, (int)icols, line,
+        i == a->gen_cursor, foc, i);
+  }
+}
+
+void draw_gen_output(App* a) {
+  const bool foc = a->focus == Focus::Results;
+  std::vector<std::string> view;
+  size_t total;
+  {
+    std::lock_guard<std::mutex> lk(a->gen_mtx);
+    total = a->gen_out.size();
+    view.assign(a->gen_out.begin(), a->gen_out.end());
+  }
+  char title[48];
+  std::snprintf(title, sizeof title, "Output (%zu)", total);
+  unsigned iy, ix, irows, icols;
+  frame(a->results, title, foc, &iy, &ix, &irows, &icols);
+  if (irows == 0) return;
+  if (view.empty()) {
+    ncplane_set_fg_rgb8(a->results, 0x77, 0x77, 0x77);
+    ncplane_printf_yx(a->results, (int)iy, (int)ix,
+                      "(idle — set parameters above, then press g to run)");
+    ncplane_set_fg_default(a->results);
+    return;
+  }
+  const unsigned list_rows = irows;
+  const size_t shown = list_rows < total ? list_rows : total;
+  const size_t max_scroll = total - shown;
+  if (a->gen_scroll > max_scroll) a->gen_scroll = max_scroll;
+  const size_t top = total - shown - a->gen_scroll;
+  for (unsigned r = 0; r < shown; ++r)
+    ncplane_printf_yx(a->results, (int)(iy + r), (int)ix, "%-*.*s", (int)icols,
+                      (int)icols, view[top + r].c_str());
+  unsigned prows, pcols; ncplane_dim_yx(a->results, &prows, &pcols);
+  if (top > 0) ncplane_putstr_yx(a->results, 1, pcols - 1, "▲");
+  if (top + shown < total) ncplane_putstr_yx(a->results, prows - 2, pcols - 1, "▼");
+}
+
 void draw_config(App* a) {
   unsigned iy, ix, irows, icols;
   frame(a->query, "Configuration", true, &iy, &ix, &irows, &icols);
@@ -430,9 +664,7 @@ void redraw(App* a) {
     case Screen::Status:
       draw_stub(a, "Status", "warehouse status (max_p, rows, snapshots) — coming soon");
       ncplane_erase(a->results); break;
-    case Screen::Generate:
-      draw_stub(a, "Generate", "generation runner (subprocess) — coming soon");
-      ncplane_erase(a->results); break;
+    case Screen::Generate: draw_generate(a); draw_gen_output(a); break;
   }
   draw_status(a);
   if (a->modal_on) draw_modal(a);
@@ -561,6 +793,7 @@ void start_query(App* a) {
 void open_modal(App* a) {
   const Preset& p = a->presets[a->preset_idx];
   if (p.fields.empty()) { start_query(a); return; }
+  a->modal_kind = ModalKind::PresetFields;
   a->modal_buf.clear();
   for (const auto& f : p.fields) a->modal_buf.push_back(std::to_string(f.value));
   a->modal_field = a->cursor > 0 ? a->cursor - 1 : 0;
@@ -568,8 +801,38 @@ void open_modal(App* a) {
   a->modal_on = true;
 }
 
-// Confirm the modal: parse each box back into its field, then run.
+// Open the shared modal bound to the four generate parameters (precise entry).
+void open_gen_modal(App* a) {
+  a->modal_kind = ModalKind::GenFields;
+  a->modal_buf = {std::to_string(a->gen_start), std::to_string(a->gen_count),
+                  std::to_string(a->gen_chunk), std::to_string(a->gen_threads)};
+  a->modal_field = a->gen_cursor < 4 ? a->gen_cursor : 0;
+  a->modal_on = true;
+}
+
+size_t modal_field_count(App* a) {
+  return a->modal_kind == ModalKind::GenFields
+             ? gen_opt_count()
+             : a->presets[a->preset_idx].fields.size();
+}
+
+// Confirm the modal: parse each box back into its field. Preset fields then run
+// the query; generate params just commit the values (g runs the subprocess).
 void confirm_modal(App* a) {
+  if (a->modal_kind == ModalKind::GenFields) {
+    auto box = [&](size_t i, int64_t lo) -> int64_t {
+      const std::string& b = i < a->modal_buf.size() ? a->modal_buf[i] : "";
+      int64_t v = b.empty() ? 0 : std::strtoll(b.c_str(), nullptr, 10);
+      return v < lo ? lo : v;
+    };
+    a->gen_start = box(0, 1);
+    a->gen_count = box(1, 1);
+    a->gen_chunk = box(2, 1);
+    a->gen_threads = box(3, 0);
+    a->modal_on = false;
+    a->modal_kind = ModalKind::PresetFields;
+    return;
+  }
   Preset& p = a->presets[a->preset_idx];
   for (size_t i = 0; i < p.fields.size() && i < a->modal_buf.size(); ++i) {
     const std::string& b = a->modal_buf[i];
@@ -580,10 +843,11 @@ void confirm_modal(App* a) {
 }
 
 void draw_modal(App* a) {
-  const Preset& p = a->presets[a->preset_idx];
+  const bool gen = a->modal_kind == ModalKind::GenFields;
+  const Preset* p = gen ? nullptr : &a->presets[a->preset_idx];
   unsigned trows, tcols;
   notcurses_term_dim_yx(a->nc, &trows, &tcols);
-  const unsigned nf = (unsigned)p.fields.size();
+  const unsigned nf = (unsigned)modal_field_count(a);
   unsigned w = tcols < 52 ? (tcols > 8 ? tcols - 4 : 8) : 48;
   unsigned h = nf + 5;
   unsigned y0 = trows > h ? (trows - h) / 2 : 1;
@@ -596,7 +860,8 @@ void draw_modal(App* a) {
     ncplane_printf_yx(a->modal, (int)r, 0, "%*s", (int)w, "");
   ncplane_perimeter_rounded(a->modal, NCSTYLE_BOLD, 0, 0);
   ncplane_set_styles(a->modal, NCSTYLE_BOLD);
-  ncplane_printf_yx(a->modal, 0, 2, "┤ set fields: %s ├", p.id.c_str());
+  if (gen) ncplane_printf_yx(a->modal, 0, 2, "┤ generate parameters ├");
+  else ncplane_printf_yx(a->modal, 0, 2, "┤ set fields: %s ├", p->id.c_str());
   ncplane_set_styles(a->modal, NCSTYLE_NONE);
   for (unsigned i = 0; i < nf; ++i) {
     const bool foc = (i == a->modal_field);
@@ -605,8 +870,9 @@ void draw_modal(App* a) {
       ncplane_set_bg_rgb8(a->modal, 0x2c, 0x44, 0x66);
       ncplane_set_fg_rgb8(a->modal, 0xff, 0xff, 0xff);
     }
-    ncplane_printf_yx(a->modal, (int)(2 + i), 2, "%s%-8s [%-14s]",
-                      foc ? "> " : "  ", p.fields[i].name.c_str(),
+    const std::string label = gen ? gen_name(i) : p->fields[i].name;
+    ncplane_printf_yx(a->modal, (int)(2 + i), 2, "%s%-12s [%-14s]",
+                      foc ? "> " : "  ", label.c_str(),
                       a->modal_buf[i].c_str());
     ncplane_set_styles(a->modal, NCSTYLE_NONE);
     ncplane_set_bg_rgb8(a->modal, 0x20, 0x24, 0x30);
@@ -614,7 +880,8 @@ void draw_modal(App* a) {
   }
   ncplane_set_fg_rgb8(a->modal, 0x99, 0x99, 0xaa);
   ncplane_printf_yx(a->modal, (int)(h - 2), 2,
-                    "Enter:run  Esc/b:cancel  digits:edit  j/k:field");
+                    gen ? "Enter:set  Esc/b:cancel  digits:edit  j/k:field"
+                        : "Enter:run  Esc/b:cancel  digits:edit  j/k:field");
   ncplane_set_fg_default(a->modal);
   ncplane_set_bg_default(a->modal);
 }
@@ -847,6 +1114,7 @@ int main(int argc, char** argv) {
   App app;
   app.nc = nc;
   app.qs = qs.get();
+  app.warehouse = warehouse;
   app.presets_path = config_presets_path().string();  // ~/.config/primeparts/...
   app.config_path = config_file_path().string();
   load_config(&app);   // config.lua if present, else defaults
@@ -899,6 +1167,44 @@ int main(int argc, char** argv) {
       continue;
     }
 
+    // While generation runs, poll non-blocking: stream output, scroll, Esc
+    // terminates the subprocess (SIGTERM).
+    if (app.gen_running.load()) {
+      struct timespec ts{0, 60'000'000};  // 60 ms
+      ncinput pin;
+      uint32_t pk = notcurses_get(nc, &ts, &pin);
+      if (pk != 0 && pin.evtype != NCTYPE_RELEASE) {
+        if (pk == NCKEY_ESC) {
+          int pid = app.gen_pid.load();
+          if (pid > 0) ::kill(pid, SIGTERM);
+        } else if (pk == 'k' || pk == NCKEY_UP) {
+          gen_scroll_by(&app, +1);
+        } else if (pk == 'j' || pk == NCKEY_DOWN) {
+          gen_scroll_by(&app, -1);
+        } else if (pk == 'b' || pk == NCKEY_PGUP) {
+          gen_page(&app, +1);
+        } else if (pk == ' ' || pk == NCKEY_PGDOWN) {
+          gen_page(&app, -1);
+        }
+      }
+      if (app.gen_done.load(std::memory_order_acquire)) {
+        app.gen_worker.join();
+        app.gen_running.store(false);
+        int ec = app.gen_exit.load();
+        app.status_glyph = ec == 0 ? 'k' : '!';
+        app.status_msg = ec == 0 ? "generation complete (manifest written)"
+                                 : ("generation exited " + std::to_string(ec));
+      } else {
+        size_t ln;
+        { std::lock_guard<std::mutex> lk(app.gen_mtx); ln = app.gen_out.size(); }
+        char m[80];
+        std::snprintf(m, sizeof m, "generating... (%zu lines)  — Esc terminate", ln);
+        app.status_glyph = '.'; app.status_msg = m;
+      }
+      redraw(&app);
+      continue;
+    }
+
     ncinput in;
     uint32_t key = notcurses_get_blocking(nc, &in);
     if (in.evtype == NCTYPE_RELEASE) continue;
@@ -909,7 +1215,7 @@ int main(int argc, char** argv) {
     }
     // Modal field editor captures input while open.
     if (app.modal_on) {
-      const size_t nf = app.presets[app.preset_idx].fields.size();
+      const size_t nf = modal_field_count(&app);
       if (key == NCKEY_ESC || key == 'b') app.modal_on = false;
       else if (key == NCKEY_ENTER || key == '\n' || key == '\r') confirm_modal(&app);
       else if (key == 'j' || key == NCKEY_DOWN || key == NCKEY_TAB)
@@ -959,6 +1265,39 @@ int main(int argc, char** argv) {
       else if (key == 's') save_config(&app);
       redraw(&app); continue;
     }
+    // Generate screen input: Query focus edits params, Results focus scrolls
+    // the output; g runs the subprocess.
+    if (app.screen == Screen::Generate) {
+      switch (key) {
+        case NCKEY_TAB:
+          app.focus = app.focus == Focus::Query ? Focus::Results : Focus::Query;
+          break;
+        case 'j': case NCKEY_DOWN:
+          if (app.focus == Focus::Query) {
+            if (app.gen_cursor + 1 < gen_opt_count()) ++app.gen_cursor;
+          } else gen_scroll_by(&app, -1);
+          break;
+        case 'k': case NCKEY_UP:
+          if (app.focus == Focus::Query) {
+            if (app.gen_cursor > 0) --app.gen_cursor;
+          } else gen_scroll_by(&app, +1);
+          break;
+        case '+': case '=':
+          if (app.focus == Focus::Query) gen_adjust(&app, app.gen_cursor, +1);
+          break;
+        case '-':
+          if (app.focus == Focus::Query) gen_adjust(&app, app.gen_cursor, -1);
+          break;
+        case ' ': case NCKEY_PGDOWN: gen_page(&app, -1); break;
+        case 'b': case NCKEY_PGUP:   gen_page(&app, +1); break;
+        case NCKEY_ENTER: case '\n': case '\r':
+          if (app.focus == Focus::Query) open_gen_modal(&app);
+          break;
+        case 'g': start_generate(&app); break;
+        default: break;
+      }
+      redraw(&app); continue;
+    }
     // Stub screens consume nothing but the globals above.
     if (app.screen != Screen::RunQuery) { redraw(&app); continue; }
     switch (key) {
@@ -991,6 +1330,11 @@ int main(int argc, char** argv) {
   if (app.worker.joinable()) {  // cancel + join any in-flight query
     app.q_cancel.store(true);
     app.worker.join();
+  }
+  if (app.gen_worker.joinable()) {  // terminate + join any running generation
+    int pid = app.gen_pid.load();
+    if (pid > 0) ::kill(pid, SIGTERM);
+    app.gen_worker.join();
   }
   ncplane_destroy(app.topbar);
   ncplane_destroy(app.query);
