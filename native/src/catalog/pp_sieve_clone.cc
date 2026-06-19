@@ -81,11 +81,9 @@ int RunCloneSieve(const CloneSieveOptions& opts) {
   std::printf("  dest     : primeparts.%s\n", opts.dest_table.c_str());
   std::printf("  warehouse: %s\n", opts.warehouse.c_str());
 
-  std::string mode, err;
-  RestOptions ropts;
-  ropts.rest_uri = opts.rest_uri;
-  auto catalog = MakeCatalog(ropts, opts.warehouse, &mode, &err);
-  if (!catalog) { std::printf("FAIL (MakeCatalog: %s)\n", err.c_str()); return 1; }
+  std::string err;
+  auto catalog = MakeLocalCatalog(opts.warehouse, &err);
+  if (!catalog) { std::printf("FAIL (MakeLocalCatalog: %s)\n", err.c_str()); return 1; }
   if (!EnsureNamespace(catalog, iceberg::Namespace{{"primeparts"}}, &err)) {
     std::printf("FAIL (EnsureNamespace: %s)\n", err.c_str());
     return 1;

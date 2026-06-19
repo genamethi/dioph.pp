@@ -425,13 +425,11 @@ int main(int argc, char** argv) {
     return 2;
   }
 
-  // --- Load the table via IRC (both --report and --apply need it) ----------
-  std::string mode, err;
-  ppc::RestOptions ropts;
-  ropts.rest_uri = opts.rest_uri;
-  auto catalog = ppc::MakeCatalog(ropts, opts.warehouse, &mode, &err);
+  // --- Load the table via the local LMDB catalog (read + RowDelta commits) --
+  std::string err;
+  auto catalog = ppc::MakeLocalCatalog(opts.warehouse, &err);
   if (!catalog) {
-    std::fprintf(stderr, "error: MakeCatalog: %s\n", err.c_str());
+    std::fprintf(stderr, "error: MakeLocalCatalog: %s\n", err.c_str());
     return 1;
   }
   iceberg::TableIdentifier ident{.ns = iceberg::Namespace{{"primeparts"}},

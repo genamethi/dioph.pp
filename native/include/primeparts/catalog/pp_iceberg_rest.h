@@ -68,6 +68,14 @@ std::shared_ptr<iceberg::Catalog> MakeCatalog(const RestOptions& opts,
 std::shared_ptr<iceberg::Catalog> MakeLocalCatalog(const fs::path& warehouse,
                                                    std::string* error);
 
+/// Resolve a table's current metadata.json path through the catalog
+/// (LoadTable -> metadata_file_location, file: scheme stripped). Namespace is
+/// "primeparts". Empty path + *error on failure. This is the single seam every
+/// reader uses to turn a table name into a metadata path — never the filesystem
+/// or a raw catalog DB.
+fs::path TableMetadataPath(const std::shared_ptr<iceberg::Catalog>& catalog,
+                           const std::string& table, std::string* error);
+
 /// Ensure `ns` exists in the catalog, creating it if absent. False + `*error`
 /// on failure.
 bool EnsureNamespace(const std::shared_ptr<iceberg::Catalog>& catalog,

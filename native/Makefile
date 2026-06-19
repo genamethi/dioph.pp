@@ -48,7 +48,6 @@ CORE_OBJ := $(BUILD_DIR)/core.o
 BENCH_CORE_OBJ := $(BUILD_DIR)/bench_core.o
 BENCH_MATERIALIZE_OBJ := $(BUILD_DIR)/bench_materialize.o
 GENERATE_OBJ := $(BUILD_DIR)/generate.o
-GENERATE_ABI_OBJ := $(BUILD_DIR)/generate_abi.o
 WRITER_OBJ := $(BUILD_DIR)/writer.o
 SOURCE_SCAN_OBJ := $(BUILD_DIR)/source_scan.o
 PRIMITIVE_FACTORS_OBJ := $(BUILD_DIR)/primitive_factors.o
@@ -64,12 +63,9 @@ PP_LMDB_STORE_OBJ := $(BUILD_DIR)/pp_lmdb_store.o
 PP_LMDB_SMOKE_OBJ := $(BUILD_DIR)/pp_lmdb_smoke.o
 LMDB_LIB := $(BUILD_DIR)/liblmdb.a
 PP_CATALOG_MAIN_OBJ := $(BUILD_DIR)/pp_catalog_main.o
-UI_ICEBERG_OBJ := $(BUILD_DIR)/ui_iceberg.o
 TEST_OBJ := $(BUILD_DIR)/test_core.o
-TEST_UI_ICEBERG_OBJ := $(BUILD_DIR)/test_ui_iceberg.o
 TEST_ICEBERG_WRITER_OBJ := $(BUILD_DIR)/test_iceberg_writer.o
 TEST_PRIMITIVE_FACTORS_OBJ := $(BUILD_DIR)/test_primitive_factors.o
-TUI_FRONTEND_OBJ := $(BUILD_DIR)/tui_frontend.o
 MERSENNE_SIDECAR_OBJ := $(BUILD_DIR)/mersenne_sidecar.o
 
 .PHONY: all clean test smoke
@@ -82,7 +78,6 @@ all: $(BUILD_DIR)/libprimeparts_core.so \
      $(BUILD_DIR)/primeparts-covering-sieve \
      $(BUILD_DIR)/primeparts-sieve-triage \
      $(BUILD_DIR)/pp-catalog \
-     $(BUILD_DIR)/primeparts-test-ui-iceberg \
      $(BUILD_DIR)/mersenne-sidecar
 
 $(BUILD_DIR):
@@ -98,12 +93,6 @@ $(BENCH_MATERIALIZE_OBJ): src/materialize_bench.c include/primeparts/core.h | $(
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 $(GENERATE_OBJ): src/generate.cc include/primeparts/core.h include/primeparts/writer.h | $(BUILD_DIR)
-	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
-
-$(GENERATE_ABI_OBJ): src/generate.cc include/primeparts/core.h include/primeparts/generate.h include/primeparts/writer.h | $(BUILD_DIR)
-	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -DPRIMEPARTS_GENERATE_NO_MAIN -c $< -o $@
-
-$(UI_ICEBERG_OBJ): src/ui_iceberg.cc include/primeparts/ui_iceberg.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(WRITER_OBJ): src/writer.cc include/primeparts/writer.h | $(BUILD_DIR)
@@ -185,17 +174,11 @@ $(PP_CATALOG_MAIN_OBJ): src/catalog/pp_catalog_main.cc include/primeparts/catalo
 $(TEST_OBJ): tests/test_core.c include/primeparts/core.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
-$(TEST_UI_ICEBERG_OBJ): tests/test_ui_iceberg.c include/primeparts/ui_iceberg.h | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
-
 $(TEST_ICEBERG_WRITER_OBJ): tests/test_iceberg_writer.cc include/primeparts/writer.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(TEST_PRIMITIVE_FACTORS_OBJ): tests/test_primitive_factors.cc include/primeparts/primitive_factors.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
-
-$(TUI_FRONTEND_OBJ): src/tui_frontend.c include/primeparts/core.h include/primeparts/ui_iceberg.h | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(NOTCURSES_CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 $(MERSENNE_SIDECAR_OBJ): src/mersenne_sidecar.cc | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
@@ -224,14 +207,14 @@ $(BUILD_DIR)/primeparts-lmdb-smoke: $(PP_LMDB_SMOKE_OBJ) $(PP_LMDB_STORE_OBJ) $(
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $(PP_LMDB_SMOKE_OBJ) $(PP_LMDB_STORE_OBJ) \
 		$(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(LMDB_LIB) -pthread -o $@
 
-$(BUILD_DIR)/primeparts-primitive-factors: $(PRIMITIVE_FACTORS_MAIN_OBJ) $(PRIMITIVE_FACTORS_OBJ) $(SOURCE_SCAN_OBJ)
-	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(ICEBERG_LDLIBS) -lparquet -larrow -lsqlite3 -pthread -o $@
+$(BUILD_DIR)/primeparts-primitive-factors: $(PRIMITIVE_FACTORS_MAIN_OBJ) $(PRIMITIVE_FACTORS_OBJ) $(SOURCE_SCAN_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
+	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lparquet -larrow -lsqlite3 -pthread -o $@
 
 $(BUILD_DIR)/primeparts-covering-sieve: $(COVERING_SIEVE_MAIN_OBJ) $(PRIMITIVE_FACTORS_OBJ) $(SOURCE_SCAN_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_ROW_DELTA_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
 
-$(BUILD_DIR)/primeparts-sieve-triage: $(SIEVE_TRIAGE_MAIN_OBJ) $(SOURCE_SCAN_OBJ)
-	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(ICEBERG_LDLIBS) -lparquet -larrow -lsqlite3 -pthread -o $@
+$(BUILD_DIR)/primeparts-sieve-triage: $(SIEVE_TRIAGE_MAIN_OBJ) $(SOURCE_SCAN_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
+	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lparquet -larrow -lsqlite3 -pthread -o $@
 
 $(BUILD_DIR)/query-smoke: $(BUILD_DIR)/query_smoke.o $(SOURCE_SCAN_OBJ)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(ICEBERG_LDLIBS) -lparquet -larrow -lsqlite3 -pthread -o $@
@@ -240,9 +223,6 @@ $(BUILD_DIR)/query-smoke: $(BUILD_DIR)/query_smoke.o $(SOURCE_SCAN_OBJ)
 # before ICEBERG_LDLIBS; liblmdb.a backs pp_lmdb_store.o.
 $(BUILD_DIR)/query-service-smoke: $(BUILD_DIR)/query_service_smoke.o $(BUILD_DIR)/query_service.o $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(SOURCE_SCAN_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
-
-$(BUILD_DIR)/primeparts-test-ui-iceberg: $(UI_ICEBERG_OBJ) $(TEST_UI_ICEBERG_OBJ)
-	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(ICEBERG_LDLIBS) -lparquet -larrow -lsqlite3 -o $@
 
 $(BUILD_DIR)/primeparts-test-iceberg-writer: $(TEST_ICEBERG_WRITER_OBJ) $(WRITER_OBJ)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(ICEBERG_LDLIBS) -lparquet -larrow -pthread -o $@

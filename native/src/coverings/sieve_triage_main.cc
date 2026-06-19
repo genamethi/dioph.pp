@@ -1,4 +1,5 @@
 #include "primeparts/source_scan.h"
+#include "primeparts/catalog/pp_iceberg_rest.h"
 
 #include <arrow/api.h>
 #include <arrow/util/thread_pool.h>
@@ -26,24 +27,6 @@ void Usage(const char* argv0) {
                          "  --partition TAG        Tag to analyze (default: uncovered_pass1)\n"
                          "  --table NAME           Iceberg table (default: obstruction_catalog)\n"
                          "  --threads N            Number of Arrow threads (default: 6)\n", argv0);
-}
-
-std::optional<fs::path> LatestMetadataPath(const fs::path& dir) {
-  std::optional<fs::path> latest;
-  std::error_code ec;
-  for (const auto& entry : fs::directory_iterator(dir, ec)) {
-    if (ec) return std::nullopt;
-    if (!entry.is_regular_file()) continue;
-    auto path = entry.path();
-    if (path.extension() != ".json") continue;
-    if (path.filename().string().find(".metadata.json") == std::string::npos) {
-      continue;
-    }
-    if (!latest || path.filename().string() > latest->filename().string()) {
-      latest = path;
-    }
-  }
-  return latest;
 }
 
 } // namespace
@@ -86,17 +69,22 @@ int main(int argc, char** argv) {
     }
 
     std::string error;
-    fs::path metadata_dir = fs::path(opts.warehouse) / "primeparts" / opts.catalog_table / "metadata";
-    auto latest_metadata = LatestMetadataPath(metadata_dir);
-    if (!latest_metadata) {
-        std::cerr << "Error: Could not find table metadata in " << metadata_dir << "\n";
+    auto catalog = primeparts::catalog::MakeLocalCatalog(opts.warehouse, &error);
+    if (!catalog) {
+        std::cerr << "Error: MakeLocalCatalog: " << error << "\n";
+        return 1;
+    }
+    fs::path latest_metadata =
+        primeparts::catalog::TableMetadataPath(catalog, opts.catalog_table, &error);
+    if (latest_metadata.empty()) {
+        std::cerr << "Error: resolve " << opts.catalog_table << ": " << error << "\n";
         return 1;
     }
 
     std::cout << "Triaging gaps in partition: " << opts.partition_tag << "\n";
 
     auto reader = primeparts::SourceTableReader::OpenMetadata(
-        latest_metadata->string(), {"covering_system", "uncovered_mask"}, nullptr, &error);
+        latest_metadata.string(), {"covering_system", "uncovered_mask"}, nullptr, &error);
     if (!reader) {
         std::cerr << "Error opening metadata: " << error << "\n";
         return 1;

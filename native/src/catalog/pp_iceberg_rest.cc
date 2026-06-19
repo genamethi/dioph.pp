@@ -111,6 +111,21 @@ std::shared_ptr<iceberg::Catalog> MakeLocalCatalog(const fs::path& warehouse,
   return std::move(cat_r.value());
 }
 
+fs::path TableMetadataPath(const std::shared_ptr<iceberg::Catalog>& catalog,
+                           const std::string& table, std::string* error) {
+  iceberg::TableIdentifier id{.ns = iceberg::Namespace{{"primeparts"}},
+                              .name = table};
+  auto t = catalog->LoadTable(id);
+  if (!t.has_value()) {
+    if (error) *error = "LoadTable(primeparts." + table + "): " + t.error().message;
+    return {};
+  }
+  std::string loc(t.value()->metadata_file_location());
+  if (loc.rfind("file://", 0) == 0) loc = loc.substr(7);        // file:///path
+  else if (loc.rfind("file:", 0) == 0) loc = loc.substr(5);     // file:/path
+  return fs::path(loc);
+}
+
 bool EnsureNamespace(const std::shared_ptr<iceberg::Catalog>& catalog,
                      const iceberg::Namespace& ns, std::string* error) {
   auto exists = catalog->NamespaceExists(ns);

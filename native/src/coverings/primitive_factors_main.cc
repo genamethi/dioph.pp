@@ -1,4 +1,5 @@
 #include "primeparts/primitive_factors.h"
+#include "primeparts/catalog/pp_iceberg_rest.h"
 #include "primeparts/source_scan.h"
 
 #include <arrow/api.h>
@@ -38,8 +39,8 @@ namespace fs = std::filesystem;
 namespace {
 
 constexpr int64_t kReaderBatchSize = 1 << 20;
-const fs::path kDefaultMetadataDir =
-    "/media/extssd/research/dioph.pp/data/ib-staging/primeparts/primes/metadata";
+const fs::path kDefaultWarehouse =
+    "/media/extssd/research/dioph.pp/data/ib-staging";
 const fs::path kDefaultOutDir =
     "/media/extssd/research/dioph.pp/data/primitive-factors/k0-v1";
 
@@ -50,7 +51,8 @@ int DefaultWorkerThreads() {
 }
 
 struct Options {
-  fs::path metadata;
+  fs::path metadata;  // optional override; else resolved from the catalog
+  fs::path warehouse = kDefaultWarehouse;
   fs::path out_dir = kDefaultOutDir;
   fs::path partials_dir;
   int threads = DefaultWorkerThreads();
@@ -240,24 +242,6 @@ bool ParseOptions(int argc, char** argv, Options* opts) {
     opts->partials_dir = opts->out_dir / "partial_aggregates";
   }
   return true;
-}
-
-std::optional<fs::path> LatestMetadataPath(const fs::path& dir) {
-  std::optional<fs::path> latest;
-  std::error_code ec;
-  for (const auto& entry : fs::directory_iterator(dir, ec)) {
-    if (ec) return std::nullopt;
-    if (!entry.is_regular_file()) continue;
-    auto path = entry.path();
-    if (path.extension() != ".json") continue;
-    if (path.filename().string().find(".metadata.json") == std::string::npos) {
-      continue;
-    }
-    if (!latest || path.filename().string() > latest->filename().string()) {
-      latest = path;
-    }
-  }
-  return latest;
 }
 
 int32_t ParseBucketFromPath(const std::string& path) {
@@ -879,14 +863,19 @@ int main(int argc, char** argv) {
     Usage(argv[0]);
     return 2;
   }
-  if (opts.metadata.empty()) {
-    auto latest = LatestMetadataPath(kDefaultMetadataDir);
-    if (!latest) {
-      std::fprintf(stderr, "could not find metadata JSON under %s\n",
-                   kDefaultMetadataDir.c_str());
+  if (opts.metadata.empty()) {  // resolve through the catalog, not the filesystem
+    std::string cerr;
+    auto cat = primeparts::catalog::MakeLocalCatalog(opts.warehouse, &cerr);
+    if (!cat) {
+      std::fprintf(stderr, "MakeLocalCatalog: %s\n", cerr.c_str());
       return 1;
     }
-    opts.metadata = *latest;
+    fs::path mp = primeparts::catalog::TableMetadataPath(cat, "primes", &cerr);
+    if (mp.empty()) {
+      std::fprintf(stderr, "resolve primes metadata: %s\n", cerr.c_str());
+      return 1;
+    }
+    opts.metadata = mp;
   }
   auto cpu_st = arrow::SetCpuThreadPoolCapacity(opts.arrow_threads);
   if (!cpu_st.ok()) {
