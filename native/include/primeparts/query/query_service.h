@@ -46,6 +46,22 @@ struct ScanHit {
   int64_t prime_rank = 0;
 };
 
+/// Warehouse-status facts for one table, read from the catalog metadata and the
+/// current snapshot summary (rows / files / size — zero scan). `max_p` is the
+/// max of the "p" column's manifest upper bounds (a manifest aggregate, only
+/// computed on request and only for tables with a "p" column); -1 if absent.
+struct TableExtent {
+  std::string table;
+  bool ok = false;
+  int64_t row_count = -1;    // summary total-records
+  int64_t data_files = -1;   // summary total-data-files
+  int64_t file_bytes = -1;   // summary total-files-size
+  int64_t snapshots = 0;     // number of snapshots in history
+  int64_t snapshot_id = -1;  // current snapshot id (-1 if none)
+  int64_t sequence = -1;     // current snapshot sequence number
+  int64_t max_p = -1;        // max upper-bound of column "p" (-1 if no p column)
+};
+
 /// Cooperative control for a (possibly long) scan. `cancel` is checked once per
 /// batch — set it from another thread to stop promptly. `progress` is invoked
 /// periodically with (rows_scanned, rows_total) for a progress indicator. Both
@@ -92,6 +108,17 @@ class QueryService {
   /// referencing real schema fields (`target` must also be a declared field).
   /// Returns false + a human-readable `*error` on the first violation.
   bool ValidatePreset(const QueryPreset& p, std::string* error);
+
+  /// Table names registered under the primeparts namespace, sorted. The Status
+  /// screen's row source. Empty + *error on catalog failure.
+  std::vector<std::string> ListTables(std::string* error);
+
+  /// Warehouse status for one table. Summary facts (rows/files/size/snapshots)
+  /// are read from the current snapshot — zero scan. With `with_max_p`, also
+  /// aggregates the "p" column's manifest upper bounds (a manifest read, not a
+  /// data scan; cancellable via `ctl`). Sets *error only on a real failure.
+  TableExtent Extent(const std::string& table, bool with_max_p,
+                     std::string* error, const ScanControl& ctl = {});
 
  private:
   struct Impl;

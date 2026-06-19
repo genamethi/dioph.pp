@@ -109,6 +109,37 @@ int main(int argc, char** argv) {
     if (dt > 5.0) { std::printf("    [!] cancel too slow (>5s)\n"); ++failures; }
   }
 
+  // 5) warehouse status (the Status-tab seam): ListTables + Extent. Summary
+  // facts are zero-scan; max_p on `primes` is a manifest aggregate.
+  {
+    auto tables = qs->ListTables(&err);
+    std::printf("\n[status] %zu tables: ", tables.size());
+    for (auto& t : tables) std::printf("%s ", t.c_str());
+    std::printf("\n");
+    if (tables.empty()) { std::printf("    [!] expected registered tables\n"); ++failures; }
+
+    bool saw_primes = false;
+    for (const auto& t : tables) {
+      const bool want_p = (t == "primes");
+      auto t0 = std::chrono::steady_clock::now();
+      auto e = qs->Extent(t, want_p, &err);
+      double dt = secs_since(t0);
+      if (!e.ok) { std::printf("    [!] Extent(%s): %s\n", t.c_str(), err.c_str()); ++failures; continue; }
+      std::printf("    %-18s rows=%-13lld files=%-6lld bytes=%-13lld snaps=%lld snap_id=%lld",
+                  e.table.c_str(), (long long)e.row_count, (long long)e.data_files,
+                  (long long)e.file_bytes, (long long)e.snapshots, (long long)e.snapshot_id);
+      if (e.max_p >= 0) std::printf(" max_p=%lld", (long long)e.max_p);
+      std::printf("  (%.2fs)\n", dt);
+      if (want_p) {
+        saw_primes = true;
+        // Known dataset basics: ~21.7B rows, max_p ~5.6e11 (project memory).
+        if (e.row_count < 1'000'000'000LL) { std::printf("    [!] primes row_count implausibly small\n"); ++failures; }
+        if (e.max_p < 1'000'000'000LL) { std::printf("    [!] primes max_p missing/implausible\n"); ++failures; }
+      }
+    }
+    if (!saw_primes) { std::printf("    [!] primes table not listed\n"); ++failures; }
+  }
+
   std::printf("\n== query-service-smoke %s (%d failures) ==\n",
               failures == 0 ? "PASS" : "FAIL", failures);
   return failures == 0 ? 0 : 1;
