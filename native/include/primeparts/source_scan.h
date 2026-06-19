@@ -42,20 +42,9 @@ struct SourceFileInfo {
 
 class SourceTableReader {
  public:
-  // Open. `sqlite_path` is the catalog DB (read-only); `namespace_name`
-  // / `table_name` identify the table; `select_columns` is the
-  // projection — the reader returns only these columns, in this order.
-  // Returns nullptr on error and sets `*error`.
-  static std::unique_ptr<SourceTableReader> Open(
-      const fs::path& sqlite_path, std::string_view namespace_name,
-      std::string_view table_name,
-      const std::vector<std::string>& select_columns, 
-      std::shared_ptr<iceberg::Expression> filter,
-      std::string* error);
-
-  // Open directly from an Iceberg metadata JSON path. This is useful for
-  // staging tables that are already materialized but not registered in the
-  // local SQLite catalog.
+  // Open directly from an Iceberg metadata JSON path. Metadata is resolved
+  // through the catalog seam (MakeLocalCatalog -> LoadTable -> metadata_location)
+  // by callers; this reader just scans the given metadata.json.
   //
   // `select_columns` may include the reserved metadata columns "_pos"
   // (absolute ordinal of the row within its source data file) and "_file"

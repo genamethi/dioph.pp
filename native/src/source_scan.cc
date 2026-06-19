@@ -2,7 +2,6 @@
 
 #include <arrow/api.h>
 #include <arrow/c/bridge.h>
-#include <sqlite3.h>
 
 #include <algorithm>
 #include <fstream>
@@ -63,59 +62,6 @@ void ensure_format_registered() {
     iceberg::avro::RegisterAll();
     iceberg::parquet::RegisterAll();
   });
-}
-
-bool sqlite_lookup_metadata_location(const fs::path& sqlite_path,
-                                     std::string_view ns,
-                                     std::string_view tbl,
-                                     std::string* out,
-                                     std::string* error) {
-  sqlite3* db = nullptr;
-  if (sqlite3_open_v2(sqlite_path.c_str(), &db, SQLITE_OPEN_READONLY,
-                      nullptr) != SQLITE_OK) {
-    if (error) {
-      *error = "sqlite3_open_v2 ";
-      *error += sqlite_path.string();
-      if (db) {
-        *error += ": ";
-        *error += sqlite3_errmsg(db);
-      }
-    }
-    if (db) sqlite3_close(db);
-    return false;
-  }
-  const char* sql =
-      "SELECT metadata_location FROM iceberg_tables "
-      "WHERE table_namespace = ?1 AND table_name = ?2 LIMIT 1";
-  sqlite3_stmt* stmt = nullptr;
-  if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-    if (error) {
-      *error = "sqlite3_prepare_v2: ";
-      *error += sqlite3_errmsg(db);
-    }
-    sqlite3_close(db);
-    return false;
-  }
-  std::string ns_owned(ns), tbl_owned(tbl);
-  sqlite3_bind_text(stmt, 1, ns_owned.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text(stmt, 2, tbl_owned.c_str(), -1, SQLITE_TRANSIENT);
-  bool ok = false;
-  if (sqlite3_step(stmt) == SQLITE_ROW) {
-    const unsigned char* loc = sqlite3_column_text(stmt, 0);
-    if (loc) {
-      *out = strip_file_scheme(reinterpret_cast<const char*>(loc));
-      ok = !out->empty();
-    }
-  }
-  sqlite3_finalize(stmt);
-  sqlite3_close(db);
-  if (!ok && error) {
-    *error = "no iceberg_tables row for ";
-    *error += ns;
-    *error += '.';
-    *error += tbl;
-  }
-  return ok;
 }
 
 }  // namespace
@@ -318,20 +264,6 @@ std::unique_ptr<SourceTableReader> SourceTableReader::OpenMetadata(
 
   return std::unique_ptr<SourceTableReader>(
       new SourceTableReader(std::move(impl)));
-}
-
-std::unique_ptr<SourceTableReader> SourceTableReader::Open(
-    const fs::path& sqlite_path, std::string_view ns, std::string_view tbl,
-    const std::vector<std::string>& select_columns, 
-    std::shared_ptr<iceberg::Expression> filter,
-    std::string* error) {
-  std::string metadata_path;
-  if (!sqlite_lookup_metadata_location(sqlite_path, ns, tbl, &metadata_path,
-                                       error)) {
-    return nullptr;
-  }
-
-  return OpenMetadata(metadata_path, select_columns, filter, error);
 }
 
 SourceTableReader::SourceTableReader(std::unique_ptr<Impl> impl)

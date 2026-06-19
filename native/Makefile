@@ -55,7 +55,6 @@ PRIMITIVE_FACTORS_OBJ := $(BUILD_DIR)/primitive_factors.o
 PRIMITIVE_FACTORS_MAIN_OBJ := $(BUILD_DIR)/primitive_factors_main.o
 COVERING_SIEVE_MAIN_OBJ := $(BUILD_DIR)/covering_sieve_main.o
 SIEVE_TRIAGE_MAIN_OBJ := $(BUILD_DIR)/sieve_triage_main.o
-REWRITE_OBJ := $(BUILD_DIR)/rewrite.o
 PP_ICEBERG_REST_OBJ := $(BUILD_DIR)/pp_iceberg_rest.o
 PP_HIVE_SYNC_OBJ := $(BUILD_DIR)/pp_hive_sync.o
 PP_ROW_DELTA_OBJ := $(BUILD_DIR)/pp_row_delta.o
@@ -65,7 +64,6 @@ PP_LMDB_STORE_OBJ := $(BUILD_DIR)/pp_lmdb_store.o
 PP_LMDB_SMOKE_OBJ := $(BUILD_DIR)/pp_lmdb_smoke.o
 LMDB_LIB := $(BUILD_DIR)/liblmdb.a
 PP_CATALOG_MAIN_OBJ := $(BUILD_DIR)/pp_catalog_main.o
-PREFLIGHT_OBJ := $(BUILD_DIR)/preflight.o
 UI_ICEBERG_OBJ := $(BUILD_DIR)/ui_iceberg.o
 TEST_OBJ := $(BUILD_DIR)/test_core.o
 TEST_UI_ICEBERG_OBJ := $(BUILD_DIR)/test_ui_iceberg.o
@@ -150,9 +148,6 @@ $(BUILD_DIR)/lua_query_module.o: src/query/lua_query_module.cc include/primepart
 $(BUILD_DIR)/lua_query_smoke.o: src/query/lua_query_smoke.cc include/primeparts/query/lua_query_module.h include/primeparts/query/query_service.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(LUA_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(REWRITE_OBJ): src/rewriter/rewrite.cc include/primeparts/writer.h include/primeparts/source_scan.h include/primeparts/preflight.h | $(BUILD_DIR)
-	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
-
 $(PP_ICEBERG_REST_OBJ): src/catalog/pp_iceberg_rest.cc include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/catalog/pp_lmdb_store.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
@@ -187,9 +182,6 @@ $(PP_LMDB_SMOKE_OBJ): src/catalog/pp_lmdb_smoke.cc include/primeparts/catalog/pp
 $(PP_CATALOG_MAIN_OBJ): src/catalog/pp_catalog_main.cc include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/catalog/pp_hive_sync.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(PREFLIGHT_OBJ): src/rewriter/preflight.cc include/primeparts/preflight.h | $(BUILD_DIR)
-	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
-
 $(TEST_OBJ): tests/test_core.c include/primeparts/core.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
@@ -219,9 +211,6 @@ $(BUILD_DIR)/primeparts-bench-materialize: $(CORE_OBJ) $(BENCH_MATERIALIZE_OBJ)
 
 $(BUILD_DIR)/primeparts-generate: $(CORE_OBJ) $(GENERATE_OBJ) $(WRITER_OBJ)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(ICEBERG_LDLIBS) -lparquet -larrow -pthread -o $@
-
-$(BUILD_DIR)/primeparts-rewrite: $(REWRITE_OBJ) $(SOURCE_SCAN_OBJ) $(WRITER_OBJ) $(PREFLIGHT_OBJ)
-	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(ICEBERG_LDLIBS) -lparquet -larrow -lsqlite3 -pthread -o $@
 
 # pp_iceberg_rest now provides MakeLocalCatalog = SqlCatalog(LmdbStore), so every
 # consumer links the SQL-catalog engine + LMDB store. SQL_CATALOG_LDLIBS must
