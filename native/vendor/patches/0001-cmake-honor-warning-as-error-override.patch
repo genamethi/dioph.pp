@@ -1,0 +1,22 @@
+# primeparts patch 1/3 — honor -DCMAKE_COMPILE_WARNING_AS_ERROR override.
+# Upstream hard-set()s it ON, shadowing a user -D; GCC then trips a false
+# positive -Werror=free-nonheap-object in json_serde.cc.
+# RETIRE WHEN: upstream guards the set() (or drops warnings-as-error by default).
+#
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index b03e586..85d87e5 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -37,7 +37,11 @@ set(CMAKE_CXX_STANDARD 23)
+ set(CMAKE_CXX_STANDARD_REQUIRED ON)
+ set(CMAKE_CXX_EXTENSIONS OFF)
+ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+-set(CMAKE_COMPILE_WARNING_AS_ERROR ON)
++# primeparts: honor a user -DCMAKE_COMPILE_WARNING_AS_ERROR override instead of
++# hard-forcing it ON (GCC false-positive -Werror=free-nonheap-object).
++if(NOT DEFINED CMAKE_COMPILE_WARNING_AS_ERROR)
++  set(CMAKE_COMPILE_WARNING_AS_ERROR ON)
++endif()
+ 
+ option(ICEBERG_BUILD_STATIC "Build static library" ON)
+ option(ICEBERG_BUILD_SHARED "Build shared library" OFF)

@@ -101,7 +101,11 @@ cython_debug/
 scratch.pr
 funbuns_native/Cargo.lock
 pixi.lock
-native/vendor
+# native/vendor/{arrow,iceberg-cpp,lmdb} are git submodules (see .gitmodules);
+# patches/, PATCHES.md, README.md under native/vendor are tracked. Only ignore
+# the generated configure output and any repo-local install prefix.
+native/config.mk
+native/.local/
 native/data/tmp/
 native/bin/nth_prime_boundaries
 .codex

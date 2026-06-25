@@ -1,0 +1,307 @@
+#!/usr/bin/env sh
+# native/configure — rootless, portable provisioning for the primeparts native
+# build. Detects (and, if missing, builds from source into a profile prefix) the
+# C/C++ dependencies, materializes the on-demand Arrow + iceberg-cpp submodules,
+# and writes native/config.mk for the Makefile to include.
+#
+# No sudo, no required system package manager. Targets Arch and Debian with gcc.
+# Version policy: minimums, prefer latest, almost no caps (see native/vendor/README.md).
+#
+#   ./native/configure [--prefix DIR] [--with-arrow] [--build-missing]
+#                      [--jobs N] [--force] [--help]
+#
+# Stage A (always): toolchain probe + prerequisite detection (gmp, flint, pari,
+#   primesieve, primecount, notcurses, lua>=5.5<5.6, libcurl/openssl/sqlite3).
+#   Missing/too-old deps are built from source into PREFIX when --build-missing
+#   is set; otherwise they are reported with a distro install hint.
+# Stage B (--with-arrow): fetch Arrow main (blobless/sparse) + the latest
+#   iceberg-cpp tag, apply patches, build both static into PREFIX.
+set -eu
+
+# --------------------------------------------------------------------------
+# Locations & defaults
+# --------------------------------------------------------------------------
+NATIVE_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+REPO_ROOT=$(CDPATH= cd -- "$NATIVE_DIR/.." && pwd -P)
+PREFIX="${PREFIX:-$HOME/.local}"
+JOBS="${JOBS:-$(nproc 2>/dev/null || echo 4)}"
+WITH_ARROW=0
+BUILD_MISSING=0
+FORCE=0
+
+# Default source versions (recent-or-later; override via env). Arrow tracks a
+# branch, not a version — see ARROW_REF.
+GMP_VERSION="${GMP_VERSION:-6.3.0}"
+MPFR_VERSION="${MPFR_VERSION:-4.2.1}"
+FLINT_VERSION="${FLINT_VERSION:-3.5.0}"
+PARI_VERSION="${PARI_VERSION:-2.17.3}"
+PRIMESIEVE_VERSION="${PRIMESIEVE_VERSION:-12.14}"
+PRIMECOUNT_VERSION="${PRIMECOUNT_VERSION:-8.5}"
+NOTCURSES_VERSION="${NOTCURSES_VERSION:-3.0.17}"
+LUA_VERSION="${LUA_VERSION:-5.5.0}"   # must satisfy >=5.5,<5.6
+ARROW_REF="${ARROW_REF:-main}"        # Arrow has no >=25 release tag yet
+
+# --------------------------------------------------------------------------
+# Output helpers
+# --------------------------------------------------------------------------
+if [ -t 1 ]; then B=$(printf '\033[1m'); G=$(printf '\033[32m'); Y=$(printf '\033[33m'); R=$(printf '\033[31m'); Z=$(printf '\033[0m'); else B=; G=; Y=; R=; Z=; fi
+say()  { printf '%s==>%s %s\n' "$B" "$Z" "$*"; }
+ok()   { printf '  %sok%s   %s\n' "$G" "$Z" "$*"; }
+warn() { printf '  %swarn%s %s\n' "$Y" "$Z" "$*"; }
+die()  { printf '%serror:%s %s\n' "$R" "$Z" "$*" >&2; exit 1; }
+
+usage() { sed -n '2,/^set -eu/p' "$0" | sed 's/^# \{0,1\}//; /^set -eu/d'; exit 0; }
+
+# --------------------------------------------------------------------------
+# Argument parsing
+# --------------------------------------------------------------------------
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --prefix)        PREFIX=$2; shift 2;;
+    --prefix=*)      PREFIX=${1#*=}; shift;;
+    --jobs)          JOBS=$2; shift 2;;
+    --jobs=*)        JOBS=${1#*=}; shift;;
+    --with-arrow)    WITH_ARROW=1; shift;;
+    --build-missing) BUILD_MISSING=1; shift;;
+    --force)         FORCE=1; shift;;
+    -h|--help)       usage;;
+    *) die "unknown option: $1 (try --help)";;
+  esac
+done
+case "$PREFIX" in /*) ;; *) PREFIX=$(CDPATH= cd -- "$(dirname -- "$PREFIX")" 2>/dev/null && pwd -P)/$(basename -- "$PREFIX") || PREFIX="$PWD/$PREFIX";; esac
+
+WORK="${WORK:-$PREFIX/src/primeparts}"   # scratch source/build trees (outside the repo)
+mkdir -p "$PREFIX/lib/pkgconfig" "$PREFIX/include" "$PREFIX/bin" "$WORK"
+PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PREFIX/lib64/pkgconfig:${PKG_CONFIG_PATH:-/usr/lib/pkgconfig:/usr/lib64/pkgconfig:/usr/share/pkgconfig}"
+export PKG_CONFIG_PATH
+PKG_CONFIG="${PKG_CONFIG:-pkg-config}"
+
+# --------------------------------------------------------------------------
+# Distro detection (for install hints only — never invoked)
+# --------------------------------------------------------------------------
+DISTRO=unknown
+if [ -r /etc/os-release ]; then . /etc/os-release; case "${ID:-} ${ID_LIKE:-}" in *arch*) DISTRO=arch;; *debian*|*ubuntu*) DISTRO=debian;; esac; fi
+hint() { # hint <arch-pkg> <debian-pkg>
+  case "$DISTRO" in
+    arch)   warn "  install hint: sudo pacman -S --needed $1";;
+    debian) warn "  install hint: sudo apt install $2";;
+    *)      warn "  install hint (arch): $1   (debian): $2";;
+  esac
+}
+
+# --------------------------------------------------------------------------
+# Toolchain probe
+# --------------------------------------------------------------------------
+say "Toolchain"
+CC="${CC:-$(command -v gcc || true)}"
+CXX="${CXX:-$(command -v g++ || true)}"
+[ -n "$CC" ]  || die "gcc not found (set CC=)"
+[ -n "$CXX" ] || die "g++ not found (set CXX=)"
+for t in "$PKG_CONFIG" git; do command -v "$t" >/dev/null 2>&1 || die "$t not found in PATH"; done
+# cmake/make are only needed to build from source (Stage B or --build-missing).
+if [ "$WITH_ARROW" = 1 ] || [ "$BUILD_MISSING" = 1 ]; then
+  for t in cmake make; do command -v "$t" >/dev/null 2>&1 || die "$t not found in PATH (needed to build from source)"; done
+fi
+ok "CC=$CC"; ok "CXX=$CXX"
+command -v cmake >/dev/null 2>&1 && ok "cmake=$(cmake --version | head -1)" || warn "cmake absent (only needed for source builds)"
+ok "prefix=$PREFIX  jobs=$JOBS  distro=$DISTRO"
+
+# --------------------------------------------------------------------------
+# Generic detection: pkg-config module at a minimum version
+# --------------------------------------------------------------------------
+have_pc() { "$PKG_CONFIG" --exists "$1" 2>/dev/null; }            # have_pc <mod>
+pc_ver()  { "$PKG_CONFIG" --modversion "$1" 2>/dev/null; }
+# min_ok <mod> <minver>  — true if module present and >= minver
+min_ok()  { have_pc "$1" && "$PKG_CONFIG" --atleast-version="$2" "$1" 2>/dev/null; }
+# max_ok <mod> <ltver>   — true if module present and < ltver
+max_ok()  { have_pc "$1" && ! "$PKG_CONFIG" --atleast-version="$2" "$1" 2>/dev/null; }
+
+fetch() { # fetch <url> <outfile>
+  [ -f "$2" ] && return 0
+  if command -v curl >/dev/null 2>&1; then curl -fsSL --retry 3 -o "$2.part" "$1"; else wget -qO "$2.part" "$1"; fi
+  mv "$2.part" "$2"
+}
+cmake_build() { # cmake_build <srcdir> [extra cmake args...]
+  src=$1; shift
+  cmake -S "$src" -B "$src/_bld" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+        -DCMAKE_PREFIX_PATH="$PREFIX" -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" \
+        -DBUILD_SHARED_LIBS=ON "$@" >/dev/null
+  cmake --build "$src/_bld" -j "$JOBS" >/dev/null
+  cmake --install "$src/_bld" >/dev/null
+}
+# Autotools recipes find PREFIX-built deps first, then fall back to system.
+ac_env() { CPPFLAGS="-I$PREFIX/include ${CPPFLAGS:-}"; LDFLAGS="-L$PREFIX/lib ${LDFLAGS:-}"; export CPPFLAGS LDFLAGS; }
+
+# --------------------------------------------------------------------------
+# Stage A — prerequisites
+# --------------------------------------------------------------------------
+MISSING=""
+need() { # need <label> <pkgconfig-test-expr-as-fn> <arch-pkg> <debian-pkg> <build-fn>
+  label=$1 testfn=$2 apkg=$3 dpkg=$4 buildfn=$5
+  if "$testfn"; then ok "$label present"; return 0; fi
+  if [ "$BUILD_MISSING" = 1 ] && [ -n "$buildfn" ]; then
+    say "building $label from source -> $PREFIX"; "$buildfn"; "$testfn" && ok "$label built" || die "$label build did not satisfy $testfn"
+  else
+    warn "$label missing or too old"; hint "$apkg" "$dpkg"; MISSING="$MISSING $label"
+  fi
+}
+
+# --- detection predicates (named so `need` can re-test after a build) ---
+t_gmp()        { ensure_gmp_pc; have_pc gmp; }
+t_mpfr()       { min_ok mpfr 4.0.0 || { [ -f "$PREFIX/include/mpfr.h" ] && return 0; ld_has mpfr; }; }
+t_flint()      { min_ok flint 3.0.0; }
+t_pari()       { ld_has pari || [ -f "$PREFIX/include/pari/pari.h" ] || have_pc pari; }
+t_primesieve() { min_ok primesieve 11.0; }
+t_primecount() { min_ok primecount 7.0; }
+t_notcurses()  { have_pc notcurses-core || have_pc notcurses; }
+t_lua()        { for m in lua5.5 lua-5.5 lua; do min_ok "$m" 5.5.0 && max_ok "$m" 5.6.0 && return 0; done; return 1; }
+t_curl()       { have_pc libcurl; }
+t_ssl()        { have_pc openssl || have_pc libssl; }
+t_sqlite()     { have_pc sqlite3; }
+
+ld_has() { echo 'int main(void){return 0;}' | "$CC" -x c - -L"$PREFIX/lib" -L/usr/lib -l"$1" -o /dev/null 2>/dev/null; }
+
+# GMP upstream ships no gmp.pc; synthesize one if libgmp is present but unseen.
+ensure_gmp_pc() {
+  have_pc gmp && return 0
+  if [ -f /usr/include/gmp.h ] || [ -f "$PREFIX/include/gmp.h" ]; then
+    v=$(awk -F'[ "]+' '/define __GNU_MP_VERSION /{a=$3} /define __GNU_MP_VERSION_MINOR /{b=$3} /define __GNU_MP_VERSION_PATCHLEVEL /{c=$3} END{print a"."b"."c}' /usr/include/gmp.h 2>/dev/null || echo "6.0.0")
+    cat > "$PREFIX/lib/pkgconfig/gmp.pc" <<EOF
+prefix=/usr
+Name: gmp
+Description: GNU Multiple Precision arithmetic library (synthesized by native/configure)
+Version: ${v:-6.0.0}
+Libs: -lgmp
+Cflags:
+EOF
+  fi
+}
+
+# --- source build recipes (rootless, into PREFIX) ---
+b_gmp() { fetch "https://gmplib.org/download/gmp/gmp-$GMP_VERSION.tar.xz" "$WORK/gmp.tar.xz"; tar -C "$WORK" -xf "$WORK/gmp.tar.xz"
+  ( cd "$WORK/gmp-$GMP_VERSION" && ./configure --prefix="$PREFIX" --enable-cxx >/dev/null && make -j"$JOBS" >/dev/null && make install >/dev/null ); ensure_gmp_pc; }
+b_mpfr() { fetch "https://ftp.gnu.org/gnu/mpfr/mpfr-$MPFR_VERSION.tar.xz" "$WORK/mpfr.tar.xz"; tar -C "$WORK" -xf "$WORK/mpfr.tar.xz"
+  ( cd "$WORK/mpfr-$MPFR_VERSION" && ac_env && ./configure --prefix="$PREFIX" >/dev/null && make -j"$JOBS" >/dev/null && make install >/dev/null ); }
+b_flint() { fetch "https://github.com/flintlib/flint/releases/download/v$FLINT_VERSION/flint-$FLINT_VERSION.tar.gz" "$WORK/flint.tar.gz"; tar -C "$WORK" -xf "$WORK/flint.tar.gz"
+  # FLINT's CMake build is Windows-only; Linux uses the (bootstrapped) autotools
+  # path. gmp/mpfr are found via CPPFLAGS/LDFLAGS (PREFIX first, then system).
+  ( cd "$WORK/flint-$FLINT_VERSION" && ac_env && ./configure --prefix="$PREFIX" CC="$CC" >/dev/null && make -j"$JOBS" >/dev/null && make install >/dev/null ); }
+b_pari() { fetch "https://pari.math.u-bordeaux.fr/pub/pari/unix/pari-$PARI_VERSION.tar.gz" "$WORK/pari.tar.gz"; tar -C "$WORK" -xf "$WORK/pari.tar.gz"
+  ( cd "$WORK/pari-$PARI_VERSION" && ac_env && ./Configure --prefix="$PREFIX" >/dev/null && make -j"$JOBS" gp >/dev/null && make install >/dev/null ); }
+b_primesieve() { fetch "https://github.com/kimwalisch/primesieve/archive/refs/tags/v$PRIMESIEVE_VERSION.tar.gz" "$WORK/primesieve.tar.gz"; tar -C "$WORK" -xf "$WORK/primesieve.tar.gz"
+  cmake_build "$WORK/primesieve-$PRIMESIEVE_VERSION"; }
+b_primecount() { fetch "https://github.com/kimwalisch/primecount/archive/refs/tags/v$PRIMECOUNT_VERSION.tar.gz" "$WORK/primecount.tar.gz"; tar -C "$WORK" -xf "$WORK/primecount.tar.gz"
+  cmake_build "$WORK/primecount-$PRIMECOUNT_VERSION" -DCMAKE_PREFIX_PATH="$PREFIX"; }
+b_notcurses() { fetch "https://github.com/dankamongmen/notcurses/archive/refs/tags/v$NOTCURSES_VERSION.tar.gz" "$WORK/notcurses.tar.gz"; tar -C "$WORK" -xf "$WORK/notcurses.tar.gz"
+  cmake_build "$WORK/notcurses-$NOTCURSES_VERSION" -DUSE_MULTIMEDIA=none -DUSE_DOCTEST=off \
+    -DBUILD_TESTING=off -DUSE_PANDOC=off -DUSE_DEFLATE=off; }
+b_lua() { fetch "https://www.lua.org/ftp/lua-$LUA_VERSION.tar.gz" "$WORK/lua.tar.gz"; tar -C "$WORK" -xf "$WORK/lua.tar.gz"
+  ( cd "$WORK/lua-$LUA_VERSION" && make CC="$CC" MYCFLAGS=-fPIC -j"$JOBS" >/dev/null && make INSTALL_TOP="$PREFIX" install >/dev/null )
+  mm=$(echo "$LUA_VERSION" | cut -d. -f1,2)
+  cat > "$PREFIX/lib/pkgconfig/lua.pc" <<EOF
+prefix=$PREFIX
+Name: Lua
+Description: Lua language engine (built by native/configure)
+Version: $LUA_VERSION
+Libs: -L$PREFIX/lib -llua -lm -ldl
+Cflags: -I$PREFIX/include
+EOF
+  cp -f "$PREFIX/lib/pkgconfig/lua.pc" "$PREFIX/lib/pkgconfig/lua$mm.pc" 2>/dev/null || true
+}
+
+say "Prerequisites (Stage A)"
+need "gmp"        t_gmp        gmp        libgmp-dev        b_gmp
+need "mpfr"       t_mpfr       mpfr       libmpfr-dev       b_mpfr
+need "flint>=3"   t_flint      flint      libflint-dev      b_flint
+need "pari"       t_pari       pari       libpari-dev       b_pari
+need "primesieve" t_primesieve primesieve libprimesieve-dev b_primesieve
+need "primecount" t_primecount primecount ""               b_primecount
+need "notcurses"  t_notcurses  notcurses  libnotcurses-dev  b_notcurses
+need "lua 5.5.x"  t_lua        lua        liblua5.4-dev     b_lua
+need "libcurl"    t_curl       curl       libcurl4-openssl-dev ""
+need "openssl"    t_ssl        openssl    libssl-dev        ""
+need "sqlite3"    t_sqlite     sqlite     libsqlite3-dev    ""
+
+# --------------------------------------------------------------------------
+# Stage B — Arrow + iceberg-cpp (on demand)
+# --------------------------------------------------------------------------
+sub_init() { # sub_init <path>  — ensure an on-demand submodule is materialized
+  d="$REPO_ROOT/$1"
+  [ -e "$d/.git" ] || git -C "$REPO_ROOT" submodule update --init --checkout -- "$1"
+}
+
+build_arrow() {
+  say "Arrow ($ARROW_REF) -> $PREFIX  [this is a long build]"
+  sub_init native/vendor/arrow
+  git -C "$REPO_ROOT/native/vendor/arrow" fetch --depth 1 origin "$ARROW_REF" >/dev/null 2>&1 || true
+  git -C "$REPO_ROOT/native/vendor/arrow" checkout -q FETCH_HEAD 2>/dev/null || true
+  git -C "$REPO_ROOT/native/vendor/arrow" sparse-checkout set cpp >/dev/null 2>&1 || true
+  cmake -S "$REPO_ROOT/native/vendor/arrow/cpp" -B "$REPO_ROOT/native/vendor/arrow/cpp/_bld" \
+    -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+    -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" \
+    -DARROW_BUILD_STATIC=ON -DARROW_BUILD_SHARED=OFF -DARROW_DEPENDENCY_USE_SHARED=OFF \
+    -DARROW_PARQUET=ON -DARROW_WITH_ZSTD=ON -DARROW_WITH_SNAPPY=ON -DARROW_WITH_BROTLI=ON \
+    -DARROW_FILESYSTEM=ON -DARROW_COMPUTE=ON -DARROW_JSON=ON \
+    -DARROW_BUILD_TESTS=OFF -DARROW_DEPENDENCY_SOURCE=BUNDLED >/dev/null
+  cmake --build "$REPO_ROOT/native/vendor/arrow/cpp/_bld" -j "$JOBS"
+  cmake --install "$REPO_ROOT/native/vendor/arrow/cpp/_bld" >/dev/null
+}
+
+build_iceberg() {
+  say "iceberg-cpp (latest tag >=0.3.x) -> $PREFIX"
+  sub_init native/vendor/iceberg-cpp
+  # latest qualifying tag
+  git -C "$REPO_ROOT/native/vendor/iceberg-cpp" fetch --tags --depth 1 >/dev/null 2>&1 || true
+  # latest release tag (floor v0.3.0 is documented policy; current tags top out there)
+  tag=$(git -C "$REPO_ROOT/native/vendor/iceberg-cpp" tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+  [ -n "$tag" ] && git -C "$REPO_ROOT/native/vendor/iceberg-cpp" checkout -q "$tag"
+  sh "$REPO_ROOT/scripts/apply_vendor_patches.sh"
+  cmake -S "$REPO_ROOT/native/vendor/iceberg-cpp" -B "$REPO_ROOT/native/vendor/iceberg-cpp/_bld" \
+    -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_PREFIX_PATH="$PREFIX" \
+    -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" -DCMAKE_COMPILE_WARNING_AS_ERROR=OFF \
+    -DICEBERG_BUILD_STATIC=ON -DICEBERG_BUILD_SHARED=OFF -DICEBERG_BUILD_BUNDLE=ON \
+    -DICEBERG_BUILD_REST=ON -DICEBERG_BUILD_SQL_CATALOG=ON -DICEBERG_BUILD_TESTS=OFF >/dev/null
+  cmake --build "$REPO_ROOT/native/vendor/iceberg-cpp/_bld" -j "$JOBS"
+  cmake --install "$REPO_ROOT/native/vendor/iceberg-cpp/_bld" >/dev/null
+}
+
+if [ "$WITH_ARROW" = 1 ]; then
+  say "Arrow + iceberg-cpp (Stage B)"
+  { min_ok arrow 25.0.0 && min_ok parquet 25.0.0 && [ "$FORCE" = 0 ]; } && ok "arrow/parquet >=25 already in prefix" || build_arrow
+  # iceberg-cpp ships no .pc; key on the installed archives (incl. sql_catalog).
+  { [ -f "$PREFIX/lib/libiceberg.a" ] && [ -f "$PREFIX/lib/libiceberg_sql_catalog.a" ] && [ "$FORCE" = 0 ]; } \
+    && ok "iceberg already in prefix" || build_iceberg
+else
+  warn "Stage B skipped (no --with-arrow): Arrow/iceberg targets won't build until you run with --with-arrow"
+fi
+
+# --------------------------------------------------------------------------
+# Emit native/config.mk
+# --------------------------------------------------------------------------
+say "Writing native/config.mk"
+luamod=lua; for m in lua5.5 lua-5.5 lua; do have_pc "$m" && { luamod=$m; break; }; done
+NOTCURSES_RPATH="-Wl,-rpath,$PREFIX/lib"
+
+{
+  echo "# Generated by native/configure on $(date -u +%Y-%m-%dT%H:%M:%SZ). Do not edit."
+  echo "PREFIX := $PREFIX"
+  echo "PKG_CONFIG_PATH := $PKG_CONFIG_PATH"
+  echo "CC := $CC"
+  echo "CXX := $CXX"
+  echo "LUA_CPPFLAGS := \$(shell PKG_CONFIG_PATH=\$(PKG_CONFIG_PATH) \$(PKG_CONFIG) --cflags $luamod 2>/dev/null)"
+  echo "LUA_LDLIBS := \$(shell PKG_CONFIG_PATH=\$(PKG_CONFIG_PATH) \$(PKG_CONFIG) --libs $luamod 2>/dev/null) -lm -ldl"
+  echo "NOTCURSES_RPATH := $NOTCURSES_RPATH"
+} > "$NATIVE_DIR/config.mk"
+ok "native/config.mk written"
+
+# --------------------------------------------------------------------------
+# Summary
+# --------------------------------------------------------------------------
+echo
+if [ -n "$MISSING" ]; then
+  warn "missing prerequisites:$MISSING"
+  warn "re-run with --build-missing to build them from source into $PREFIX, or install via the hints above."
+fi
+say "Done. Build with:  make -C native all   (or a specific target)"
+[ "$WITH_ARROW" = 0 ] && say "Arrow/iceberg targets need:  native/configure --with-arrow --build-missing"
+exit 0

@@ -1,0 +1,38 @@
+# Vendored native dependencies.
+#
+# lmdb        — pinned, small, populated by default (`git submodule update
+#               --init native/vendor/lmdb`); its mdb.c/midl.c are compiled
+#               directly by native/Makefile into build/liblmdb.a.
+# iceberg-cpp — on-demand (update = none); native/configure checks out the
+#               latest tag >= 0.3.x and applies native/vendor/patches/*.patch.
+# arrow       — on-demand (update = none); tracks `main` (the unreleased 25.x
+#               dev line — Arrow has no >=25 release tag yet). native/configure
+#               does a blobless, sparse (cpp/) shallow fetch and builds it.
+#
+# `ignore = all` keeps the moving checkout, applied patches, and build trees of
+# the on-demand submodules out of `git status`. A normal clone does NOT populate
+# arrow/iceberg-cpp; run native/configure (or `git submodule update --init
+# --checkout <path>`) to materialize them.
+
+[submodule "native/vendor/lmdb"]
+	path = native/vendor/lmdb
+	url = https://github.com/LMDB/lmdb
+	branch = mdb.master3
+	shallow = true
+
+[submodule "native/vendor/iceberg-cpp"]
+	path = native/vendor/iceberg-cpp
+	url = https://github.com/apache/iceberg-cpp
+	update = none
+	shallow = true
+	ignore = all
+	fetchRecurseSubmodules = false
+
+[submodule "native/vendor/arrow"]
+	path = native/vendor/arrow
+	url = https://github.com/apache/arrow
+	branch = main
+	update = none
+	shallow = true
+	ignore = all
+	fetchRecurseSubmodules = false

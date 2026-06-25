@@ -41,11 +41,35 @@ If this reports orphaned local files, register them explicitly from their
 `native_files_*.jsonl` manifest or remove them only after verifying they are
 not needed. The generation path will refuse to skip past or overwrite them.
 
-Build and smoke test:
+## Provisioning the native dependencies (rootless, no sudo)
+
+Dependencies are git submodules + a `configure` script that builds the
+fast-moving pieces from source into a profile prefix (`$HOME/.local` by
+default). No system package manager is required; it targets Arch and Debian with
+gcc. See `vendor/README.md` for the version policy and `vendor/PATCHES.md` for
+the iceberg-cpp local patches.
 
 ```sh
-pixi run native-build
-pixi run native-test
+# 1. populate the small pinned submodule (LMDB); arrow/iceberg are on-demand.
+git submodule update --init native/vendor/lmdb
+
+# 2. detect deps, build any missing prereqs, and build Arrow(main)+iceberg-cpp.
+#    Drop --with-arrow for the number-theory-only binaries (no Arrow build).
+native/configure --prefix "$HOME/.local" --with-arrow --build-missing
+
+# 3. build (the Makefile picks up native/config.mk written by configure).
+make -C native all          # or: pixi run native-build
+make -C native test         # or: pixi run native-test
+```
+
+`configure` is detect-or-build: present, new-enough deps are reused; only what's
+missing is built. Slow movers (gmp/flint/pari/primesieve/primecount/notcurses/
+lua-5.5.x) can also come from your distro — `configure` prints the
+`pacman`/`apt` hint when one is absent and `--build-missing` is off.
+
+Quick check after provisioning:
+
+```sh
 native/build/primeparts-bench-core --start-idx 1 --count 1000000
 native/build/primeparts-tui
 ```
