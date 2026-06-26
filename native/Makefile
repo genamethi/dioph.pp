@@ -83,7 +83,8 @@ all: $(BUILD_DIR)/libprimeparts_core.so \
      $(BUILD_DIR)/primeparts-covering-sieve \
      $(BUILD_DIR)/primeparts-sieve-triage \
      $(BUILD_DIR)/pp-catalog \
-     $(BUILD_DIR)/mersenne-sidecar
+     $(BUILD_DIR)/mersenne-sidecar \
+     $(BUILD_DIR)/primeparts-tui
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -262,8 +263,16 @@ test: $(BUILD_DIR)/test_core \
 	$(BUILD_DIR)/test_core
 	$(BUILD_DIR)/primeparts-test-primitive-factors
 
-smoke: $(BUILD_DIR)/primeparts-lmdb-smoke
+# Exercises the LMDB catalog seam + the embedded-Lua path (presets/config DSL and
+# the reader `query` module). The Lua smokes degrade gracefully with no
+# warehouse; lua-presets-smoke runs from the repo root so it finds
+# scripts/lua/queries.lua.
+smoke: $(BUILD_DIR)/primeparts-lmdb-smoke \
+       $(BUILD_DIR)/primeparts-lua-presets-smoke \
+       $(BUILD_DIR)/primeparts-lua-query-smoke
 	$(BUILD_DIR)/primeparts-lmdb-smoke
+	cd .. && native/$(BUILD_DIR)/primeparts-lua-presets-smoke
+	cd .. && native/$(BUILD_DIR)/primeparts-lua-query-smoke
 
 clean:
 	rm -rf $(BUILD_DIR)
