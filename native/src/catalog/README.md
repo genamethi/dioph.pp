@@ -1,52 +1,29 @@
 # primeparts/catalog
 
-Catalog management for primeparts native tools, split by the two distinct
-backends a native commit has to talk to.
+The native local catalog of record and its tools. The engine is an in-process
+`iceberg::sql::SqlCatalog` (upstream, store-agnostic) backed by a vendored
+**LMDB** `CatalogStore`; base tables stay as Parquet + `metadata.json` on the
+filesystem, read/written through iceberg-cpp FileIO.
 
 | File | Role |
 |---|---|
-| `pp_iceberg_rest.{h,cc}` | iceberg REST (IRC) catalog: `MakeCatalog`, `EnsureNamespace`, `PublishTable` (register-or-create+FastAppend), `LatestMetadataJson`, `LocalIO`. Consolidates logic that was duplicated across `drop_bucket_cols_main.cc`, `backfill_prime_rank_main.cc`, and `covering_sieve_main.cc`. |
-| `pp_hive_sync.{h,cc}` | Hive engine sync. Deliberately thin: there is no iceberg-cpp API for making the Hive engine adopt an externally-committed snapshot — the mechanism is `ALTER TABLE ... SET TBLPROPERTIES('metadata_location'=...)` over beeline, which is a subprocess to the JVM. So this forks `scripts/hive_register.sh` rather than reimplementing a JDBC client in C++. |
-| `pp_catalog_main.cc` | `pp-catalog` binary. Wraps both halves; primary entry point is `--smoke-test`. |
+| `pp_lmdb_store.{h,cc}` | `LmdbCatalogStore : iceberg::sql::CatalogStore` over vendored `liblmdb`. Two named sub-DBs (`tables`, `nsprops`); single-writer under one recursive mutex. `MakeLmdbCatalogStore(path, name, map_size)`. |
+| `pp_iceberg_rest.{h,cc}` | Catalog construction + shared helpers: `MakeLocalCatalog` (SqlCatalog over the LMDB store — the catalog of record), `MakeCatalog` (a RestCatalog/IRC client), `EnsureNamespace`, `PublishTable` (register-or-create + FastAppend), `LatestMetadataJson`, `LocalIO`. |
+| `pp_row_delta.{h,cc}` | Committable position-delete `SnapshotUpdate` (merge-on-read v2). Underpins the covering-sieve's progress persistence. |
+| `pp_sieve_clone.{h,cc}` | `--clone-sieve`: stand up `primes_k0_sieve` as a v2 MOR shallow clone of `primes_k0` (native CreateTable + FastAppend of its data files, zero row-copy). |
+| `pp_catalog_main.cc` | `pp-catalog` binary: `--register` (cutover: register on-disk base tables into the LMDB catalog) and `--clone-sieve`. |
+| `pp_lmdb_smoke.cc` | `make smoke` — store-contract + SqlCatalog round-trip over the LMDB store. |
 
-## Why the split, not a `pp-hive.cc` C++ catalog
+## The catalog seam
 
-The IRC side has real iceberg-cpp API surface worth unifying in C++. The Hive
-side is inherently "drive the JVM": building a classpath and exec'ing beeline.
-A C++ `pp-hive.cc` would just be a `fork/exec` wrapper around the already-working
-`scripts/hive_register.sh`, so we call the script as a subprocess instead.
+Tools never touch LMDB directly. `MakeLocalCatalog` returns an
+`iceberg::Catalog` whose metadata engine (apply `TableUpdate`s, write
+`metadata.json`, optimistic-concurrency commit) lives in `SqlCatalog`; the LMDB
+store is injected through its `CatalogStore` interface and holds only the head
+pointer per table (the `metadata_location` CAS). See
+`markdown/data_eng/irc_catalog_design.md` for the full design and the
+write/commit model, and `HANDOFF.md` §6 for the verified Phase 0/1 state.
 
-## Two backends, two visibility steps
-
-A native IRC commit (`PublishTable`) writes the HMS *table row* and is enough
-for IRC clients. It is **not** enough for the running Hive *engine* to adopt a
-*snapshot-advancing* change — that needs the separate Hive sync. Verified
-2026-05-31; see `HANDOFF.md` "HMS sync is a separate, required step" and memory
-`project-hms-sync-beeline-verified`.
-
-## Smoke test
-
-```
-pp-catalog --smoke-test [--rest-uri URI] [--warehouse DIR] [--keep]
-```
-
-Run after cluster config changes or image rebuilds. It:
-
-1. checks beeline connectivity (`SELECT 1`);
-2. creates a uniquely-named throwaway `primeparts.zz_ppcatalog_smoke_<ts>` with
-   3 rows (via beeline DDL);
-3. loads it through the IRC `RestCatalog` (`pp_iceberg_rest`);
-4. runs the Hive-sync round-trip `3 → (sync to empty 00000) → 0 →
-   (sync to current) → 3` via `hive_register.sh` as a subprocess;
-5. drops the throwaway (unless `--keep`).
-
-Exits non-zero on any failure. The metadata-file scan skips Hadoop `.crc`
-sidecars and other dot-files (a real bug caught on first run).
-
-Other subcommands: `--hive-exec "SQL"`, `--hive-sync DB.TABLE METADATA_URI`.
-
-## Build prerequisites (host)
-
-The beeline subprocess (`scripts/hive_register.sh`) needs **Java 21** and the
-locally-built Hive 4.2 dist; see that script's header for the exact classpath
-and jline/transport requirements.
+The next build (Phase 2) is `pp-catalogd`, a native IRC HTTP server that wraps
+this same `MakeLocalCatalog` engine behind the REST routes from
+`native/vendor/iceberg-refs/rest-catalog-open-api.yaml`.

@@ -11,15 +11,12 @@
 // position-delete files then land only in primes_k0_sieve's metadata tree.
 //
 // CAVEAT: the two tables share physical data files, so do NOT `REBUILD` the
-// primes_k0 MV (or run orphan-file cleanup on it) while the sieve campaign is
-// live, or the clone's referenced files could be replaced/removed.
+// primes_k0 source (or run orphan-file cleanup on it) while the sieve campaign
+// is live, or the clone's referenced files could be replaced/removed.
 //
-// v2 verification: native CreateTable against this HMS REST servlet has not been
-// exercised before (every prior table was Hive-DDL-created), and the REST
-// CreateTableRequest carries no explicit format-version field. So this tool
-// reads the resulting metadata.json back and asserts format-version==2; if it
-// comes back v1 (or CreateTable is rejected), drop the fresh table and fall back
-// to the proven Hive-DDL shell printed in the failure path.
+// v2 verification: the REST CreateTableRequest carries no explicit
+// format-version field, so this tool reads the resulting metadata.json back and
+// asserts format-version==2.
 
 #pragma once
 
@@ -28,9 +25,8 @@
 namespace primeparts::catalog {
 
 struct CloneSieveOptions {
-  std::string rest_uri;                       // IRC endpoint (RestCatalog)
   std::string warehouse;                       // on-disk warehouse root (…/ib-staging)
-  std::string source_table = "primes_k0";      // MV to clone (read-only)
+  std::string source_table = "primes_k0";      // table to clone (read-only)
   std::string dest_table = "primes_k0_sieve";  // delete target to create
 };
 

@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "primeparts/catalog/pp_iceberg_rest.h"
+#include "primeparts/common/uri.h"
 
 #include "iceberg/catalog.h"
 #include "iceberg/manifest/manifest_entry.h"
@@ -28,11 +29,7 @@ namespace primeparts::catalog {
 
 namespace {
 
-std::string StripFileScheme(std::string_view uri) {
-  constexpr std::string_view kPfx = "file:";
-  if (uri.substr(0, kPfx.size()) == kPfx) uri.remove_prefix(kPfx.size());
-  return std::string(uri);
-}
+using primeparts::common::StripFileScheme;
 
 // Pull the first integer value for "key" out of a metadata.json blob. Handles
 // both bare-number (`"format-version":2`) and quoted-number (`"total-records":
@@ -149,16 +146,6 @@ int RunCloneSieve(const CloneSieveOptions& opts) {
                              iceberg::SortOrder::Unsorted(), dst_location, props);
     if (!created.has_value()) {
       std::printf("FAIL (CreateTable: %s)\n", created.error().message.c_str());
-      std::printf(
-          "  -> this HMS REST servlet did not honor native CreateTable.\n"
-          "     Fall back to the proven Hive-DDL shell, then re-run --clone-sieve\n"
-          "     (it will DropTable the shell and CreateTable again, OR adapt to\n"
-          "     FastAppend onto the existing shell):\n"
-          "     pp-catalog --hive-exec \"CREATE TABLE primeparts.%s "
-          "(p bigint, prime_rank bigint) STORED BY ICEBERG STORED AS PARQUET "
-          "TBLPROPERTIES('format-version'='2','write.delete.mode'='merge-on-read',"
-          "'write.merge.mode'='merge-on-read','write.update.mode'='merge-on-read')\"\n",
-          opts.dest_table.c_str());
       return 1;
     }
     auto dst = created.value();
@@ -205,8 +192,7 @@ int RunCloneSieve(const CloneSieveOptions& opts) {
               dst_records == src_records;
     if (fv != 2) {
       std::printf(
-          "  NOTE: format-version is %lld, not 2 — position deletes require v2.\n"
-          "        Drop this table and use the Hive-DDL shell fallback.\n",
+          "  NOTE: format-version is %lld, not 2 — position deletes require v2.\n",
           fv);
     }
     std::printf("\n== clone-sieve %s ==\n", ok ? "PASSED" : "FAILED");

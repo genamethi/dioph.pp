@@ -1,5 +1,6 @@
-#include "primeparts/primitive_factors.h"
+#include "primeparts/coverings/primitive_factors.h"
 #include "primeparts/catalog/pp_iceberg_rest.h"
+#include "primeparts/common/thread_pool.h"
 #include "primeparts/source_scan.h"
 
 #include <arrow/api.h>
@@ -877,14 +878,9 @@ int main(int argc, char** argv) {
     }
     opts.metadata = mp;
   }
-  auto cpu_st = arrow::SetCpuThreadPoolCapacity(opts.arrow_threads);
-  if (!cpu_st.ok()) {
-    std::fprintf(stderr, "set Arrow CPU pool: %s\n", cpu_st.ToString().c_str());
-    return 1;
-  }
-  auto io_st = arrow::io::SetIOThreadPoolCapacity(opts.arrow_threads);
-  if (!io_st.ok()) {
-    std::fprintf(stderr, "set Arrow IO pool: %s\n", io_st.ToString().c_str());
+  std::string tp_err;
+  if (!primeparts::common::SetupArrowThreadPools(opts.arrow_threads, &tp_err)) {
+    std::fprintf(stderr, "%s\n", tp_err.c_str());
     return 1;
   }
   if (opts.flush_entries > 0) {

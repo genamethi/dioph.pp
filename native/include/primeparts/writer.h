@@ -1,5 +1,5 @@
-// Shared parquet write primitive used by both primeparts-generate and
-// primeparts-rewrite. The writer takes a stream of arrow::RecordBatches
+// Shared parquet write primitive used by primeparts-generate. The writer
+// takes a stream of arrow::RecordBatches
 // and rolls files at a target row count, producing one or more parquet
 // files in a directory + a vector of WrittenFile records describing
 // them. It owns the iceberg-cpp Schema → arrow-with-PARQUET:field_id
@@ -107,10 +107,9 @@ struct WriterConfig {
   bool simple_filename = false;
 };
 
-// Field-id-aware arrow schema derived from an iceberg::Schema. Public
-// because the rewriter also wants to stamp PARQUET:field_id on its
-// source-projected schemas before re-writing. Returns nullptr on
-// unsupported type id and sets `*error`.
+// Field-id-aware arrow schema derived from an iceberg::Schema. Public so
+// callers can stamp PARQUET:field_id on source-projected schemas before
+// writing. Returns nullptr on unsupported type id and sets `*error`.
 //
 // If `partition_spec` is non-null, fields whose IDs are the source IDs of
 // identity-transform partition fields are omitted from the resulting arrow

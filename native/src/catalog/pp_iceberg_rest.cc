@@ -1,8 +1,4 @@
 // primeparts/catalog/pp_iceberg_rest.cc — see header for rationale.
-//
-// Logic lifted verbatim (modulo the RestOptions struct) from
-// drop_bucket_cols_main.cc's MakeCatalog / EnsureNamespace / PublishTable /
-// LatestMetadataJson / LocalIO, which is the current reference implementation.
 
 #include "primeparts/catalog/pp_iceberg_rest.h"
 
@@ -10,18 +6,17 @@
 #include <utility>
 
 #include "iceberg/arrow/arrow_io_util.h"
-#include "iceberg/arrow/arrow_register.h"
-#include "iceberg/avro/avro_register.h"
 #include "iceberg/catalog/memory/in_memory_catalog.h"
 #include "iceberg/catalog/rest/catalog_properties.h"
 #include "iceberg/catalog/rest/rest_catalog.h"
 #include "iceberg/catalog/sql/sql_catalog.h"
-#include "iceberg/parquet/parquet_register.h"
 #include "iceberg/sort_order.h"
 #include "iceberg/table.h"
 #include "iceberg/update/fast_append.h"
 
 #include "primeparts/catalog/pp_lmdb_store.h"
+#include "primeparts/common/arrow_init.h"
+#include "primeparts/common/uri.h"
 
 namespace primeparts::catalog {
 
@@ -57,13 +52,7 @@ std::shared_ptr<iceberg::Catalog> MakeCatalog(const RestOptions& opts,
                                               std::string* mode,
                                               std::string* error) {
   if (!opts.rest_uri.empty()) {
-    // Register arrow IO + the avro (manifest) and parquet (data/delete) format
-    // factories. Scanning and manifest read/write need all three; an
-    // arrow-only registration fails PlanFiles with "Missing reader factory for
-    // file format: avro".
-    iceberg::arrow::RegisterAll();
-    iceberg::avro::RegisterAll();
-    iceberg::parquet::RegisterAll();
+    common::EnsureArrowRegistration();
     auto config = iceberg::rest::RestCatalogProperties::default_properties();
     config.Set(iceberg::rest::RestCatalogProperties::kUri, opts.rest_uri)
         .Set(iceberg::rest::RestCatalogProperties::kName, opts.rest_name)
@@ -87,12 +76,7 @@ std::shared_ptr<iceberg::Catalog> MakeCatalog(const RestOptions& opts,
 
 std::shared_ptr<iceberg::Catalog> MakeLocalCatalog(const fs::path& warehouse,
                                                    std::string* error) {
-  // Scanning + manifest read/write need all three format factories (an
-  // arrow-only registration fails PlanFiles with "Missing reader factory for
-  // file format: avro").
-  iceberg::arrow::RegisterAll();
-  iceberg::avro::RegisterAll();
-  iceberg::parquet::RegisterAll();
+  common::EnsureArrowRegistration();
 
   auto store_r = MakeLmdbCatalogStore(warehouse / "catalog.lmdb", "primeparts");
   if (!store_r.has_value()) {
@@ -120,10 +104,7 @@ fs::path TableMetadataPath(const std::shared_ptr<iceberg::Catalog>& catalog,
     if (error) *error = "LoadTable(primeparts." + table + "): " + t.error().message;
     return {};
   }
-  std::string loc(t.value()->metadata_file_location());
-  if (loc.rfind("file://", 0) == 0) loc = loc.substr(7);        // file:///path
-  else if (loc.rfind("file:", 0) == 0) loc = loc.substr(5);     // file:/path
-  return fs::path(loc);
+  return fs::path(common::StripFileScheme(t.value()->metadata_file_location()));
 }
 
 bool EnsureNamespace(const std::shared_ptr<iceberg::Catalog>& catalog,

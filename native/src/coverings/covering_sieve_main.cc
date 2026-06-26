@@ -30,11 +30,13 @@
 //     tally (a modulus of order d tiles exactly one class), and rank the orders.
 //     We do NOT test candidate moduli per prime, and we add ONE modulus per pass.
 
-#include "primeparts/primitive_factors.h"
+#include "primeparts/coverings/primitive_factors.h"
 #include "primeparts/source_scan.h"
 
 #include "primeparts/catalog/pp_iceberg_rest.h"
 #include "primeparts/catalog/pp_row_delta.h"
+#include "primeparts/common/thread_pool.h"
+#include "primeparts/common/uri.h"
 
 #include <arrow/api.h>
 #include <arrow/util/thread_pool.h>
@@ -123,11 +125,7 @@ int FloorLog2(uint64_t x) {
   return 63 - __builtin_clzll(x);
 }
 
-std::string StripFileScheme(std::string_view uri) {
-  constexpr std::string_view kPfx = "file:";
-  if (uri.substr(0, kPfx.size()) == kPfx) uri.remove_prefix(kPfx.size());
-  return std::string(uri);
-}
+using primeparts::common::StripFileScheme;
 
 // Barrett reduction by a fixed small modulus s (avoids hardware divide in the
 // hot loop; mu = floor(2^64 / s), one 64x64->128 multiply-high + correction).
@@ -290,8 +288,7 @@ int ClassifyRun(const std::shared_ptr<iceberg::Table>& tbl, const Options& opts)
                       ? opts.threads
                       : static_cast<int>(std::thread::hardware_concurrency());
   if (n_workers < 1) n_workers = 1;
-  (void)arrow::SetCpuThreadPoolCapacity(n_workers);
-  (void)arrow::io::SetIOThreadPoolCapacity(n_workers);
+  (void)primeparts::common::SetupArrowThreadPools(n_workers);
 
   std::string err;
   const std::string meta_path = StripFileScheme(tbl->metadata_file_location());
@@ -472,8 +469,7 @@ int main(int argc, char** argv) {
                       ? opts.threads
                       : static_cast<int>(std::thread::hardware_concurrency());
   if (n_workers < 1) n_workers = 1;
-  (void)arrow::SetCpuThreadPoolCapacity(n_workers);
-  (void)arrow::io::SetIOThreadPoolCapacity(n_workers);
+  (void)primeparts::common::SetupArrowThreadPools(n_workers);
 
   std::printf("== covering-sieve pass %d ==\n", pass_index);
   std::printf("  table   : primeparts.%s\n", opts.table.c_str());

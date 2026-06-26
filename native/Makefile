@@ -60,9 +60,7 @@ PRIMITIVE_FACTORS_MAIN_OBJ := $(BUILD_DIR)/primitive_factors_main.o
 COVERING_SIEVE_MAIN_OBJ := $(BUILD_DIR)/covering_sieve_main.o
 SIEVE_TRIAGE_MAIN_OBJ := $(BUILD_DIR)/sieve_triage_main.o
 PP_ICEBERG_REST_OBJ := $(BUILD_DIR)/pp_iceberg_rest.o
-PP_HIVE_SYNC_OBJ := $(BUILD_DIR)/pp_hive_sync.o
 PP_ROW_DELTA_OBJ := $(BUILD_DIR)/pp_row_delta.o
-PP_DELETE_SPIKE_OBJ := $(BUILD_DIR)/pp_delete_spike.o
 PP_SIEVE_CLONE_OBJ := $(BUILD_DIR)/pp_sieve_clone.o
 PP_LMDB_STORE_OBJ := $(BUILD_DIR)/pp_lmdb_store.o
 PP_LMDB_SMOKE_OBJ := $(BUILD_DIR)/pp_lmdb_smoke.o
@@ -104,19 +102,19 @@ $(GENERATE_OBJ): src/generate.cc include/primeparts/core.h include/primeparts/wr
 $(WRITER_OBJ): src/writer.cc include/primeparts/writer.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(SOURCE_SCAN_OBJ): src/source_scan.cc include/primeparts/source_scan.h | $(BUILD_DIR)
+$(SOURCE_SCAN_OBJ): src/source_scan.cc include/primeparts/source_scan.h include/primeparts/common/arrow_init.h include/primeparts/common/uri.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(PRIMITIVE_FACTORS_OBJ): src/coverings/primitive_factors.cc include/primeparts/primitive_factors.h | $(BUILD_DIR)
+$(PRIMITIVE_FACTORS_OBJ): src/coverings/primitive_factors.cc include/primeparts/coverings/primitive_factors.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(PRIMITIVE_FACTORS_MAIN_OBJ): src/coverings/primitive_factors_main.cc include/primeparts/primitive_factors.h include/primeparts/source_scan.h | $(BUILD_DIR)
+$(PRIMITIVE_FACTORS_MAIN_OBJ): src/coverings/primitive_factors_main.cc include/primeparts/coverings/primitive_factors.h include/primeparts/source_scan.h include/primeparts/common/thread_pool.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(COVERING_SIEVE_MAIN_OBJ): src/coverings/covering_sieve_main.cc include/primeparts/primitive_factors.h include/primeparts/source_scan.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/catalog/pp_row_delta.h | $(BUILD_DIR)
+$(COVERING_SIEVE_MAIN_OBJ): src/coverings/covering_sieve_main.cc include/primeparts/coverings/primitive_factors.h include/primeparts/source_scan.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/catalog/pp_row_delta.h include/primeparts/common/thread_pool.h include/primeparts/common/uri.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(SIEVE_TRIAGE_MAIN_OBJ): src/coverings/sieve_triage_main.cc include/primeparts/source_scan.h | $(BUILD_DIR)
+$(SIEVE_TRIAGE_MAIN_OBJ): src/coverings/sieve_triage_main.cc include/primeparts/source_scan.h include/primeparts/common/thread_pool.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/query_smoke.o: src/query/query_smoke.cc include/primeparts/source_scan.h | $(BUILD_DIR)
@@ -143,19 +141,13 @@ $(BUILD_DIR)/lua_query_module.o: src/query/lua_query_module.cc include/primepart
 $(BUILD_DIR)/lua_query_smoke.o: src/query/lua_query_smoke.cc include/primeparts/query/lua_query_module.h include/primeparts/query/query_service.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(LUA_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(PP_ICEBERG_REST_OBJ): src/catalog/pp_iceberg_rest.cc include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/catalog/pp_lmdb_store.h | $(BUILD_DIR)
+$(PP_ICEBERG_REST_OBJ): src/catalog/pp_iceberg_rest.cc include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/catalog/pp_lmdb_store.h include/primeparts/common/arrow_init.h include/primeparts/common/uri.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
-
-$(PP_HIVE_SYNC_OBJ): src/catalog/pp_hive_sync.cc include/primeparts/catalog/pp_hive_sync.h | $(BUILD_DIR)
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(PP_ROW_DELTA_OBJ): src/catalog/pp_row_delta.cc include/primeparts/catalog/pp_row_delta.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(PP_DELETE_SPIKE_OBJ): src/catalog/pp_delete_spike.cc include/primeparts/catalog/pp_delete_spike.h include/primeparts/catalog/pp_row_delta.h include/primeparts/source_scan.h | $(BUILD_DIR)
-	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
-
-$(PP_SIEVE_CLONE_OBJ): src/catalog/pp_sieve_clone.cc include/primeparts/catalog/pp_sieve_clone.h include/primeparts/catalog/pp_iceberg_rest.h | $(BUILD_DIR)
+$(PP_SIEVE_CLONE_OBJ): src/catalog/pp_sieve_clone.cc include/primeparts/catalog/pp_sieve_clone.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/common/uri.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 # --- LMDB catalog store --------------------------------------------------
@@ -174,7 +166,7 @@ $(PP_LMDB_STORE_OBJ): src/catalog/pp_lmdb_store.cc include/primeparts/catalog/pp
 $(PP_LMDB_SMOKE_OBJ): src/catalog/pp_lmdb_smoke.cc include/primeparts/catalog/pp_lmdb_store.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(PP_CATALOG_MAIN_OBJ): src/catalog/pp_catalog_main.cc include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/catalog/pp_hive_sync.h | $(BUILD_DIR)
+$(PP_CATALOG_MAIN_OBJ): src/catalog/pp_catalog_main.cc include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/catalog/pp_sieve_clone.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(TEST_OBJ): tests/test_core.c include/primeparts/core.h | $(BUILD_DIR)
@@ -183,7 +175,7 @@ $(TEST_OBJ): tests/test_core.c include/primeparts/core.h | $(BUILD_DIR)
 $(TEST_ICEBERG_WRITER_OBJ): tests/test_iceberg_writer.cc include/primeparts/writer.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(TEST_PRIMITIVE_FACTORS_OBJ): tests/test_primitive_factors.cc include/primeparts/primitive_factors.h | $(BUILD_DIR)
+$(TEST_PRIMITIVE_FACTORS_OBJ): tests/test_primitive_factors.cc include/primeparts/coverings/primitive_factors.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(MERSENNE_SIDECAR_OBJ): src/mersenne_sidecar.cc | $(BUILD_DIR)
@@ -204,7 +196,7 @@ $(BUILD_DIR)/primeparts-generate: $(CORE_OBJ) $(GENERATE_OBJ) $(WRITER_OBJ)
 # pp_iceberg_rest now provides MakeLocalCatalog = SqlCatalog(LmdbStore), so every
 # consumer links the SQL-catalog engine + LMDB store. SQL_CATALOG_LDLIBS must
 # precede ICEBERG_LDLIBS (static link order); liblmdb.a backs pp_lmdb_store.o.
-$(BUILD_DIR)/pp-catalog: $(PP_CATALOG_MAIN_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_HIVE_SYNC_OBJ) $(PP_ROW_DELTA_OBJ) $(PP_DELETE_SPIKE_OBJ) $(PP_SIEVE_CLONE_OBJ) $(SOURCE_SCAN_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
+$(BUILD_DIR)/pp-catalog: $(PP_CATALOG_MAIN_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_SIEVE_CLONE_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
 
 # libiceberg_sql_catalog.a must precede the iceberg core archives so its

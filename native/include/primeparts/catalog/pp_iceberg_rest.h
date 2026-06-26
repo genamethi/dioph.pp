@@ -1,18 +1,11 @@
 // primeparts/catalog/pp_iceberg_rest.h
 //
-// Shared iceberg REST (IRC) catalog helpers for primeparts native tools.
+// Shared iceberg catalog helpers for primeparts native tools.
 //
-// This consolidates the RestCatalog construction + table-publish logic that was
-// duplicated across drop_bucket_cols_main.cc, backfill_prime_rank_main.cc, and
-// covering_sieve_main.cc. The IRC commit path writes the HMS table row that
-// exposes a native-written iceberg table to any IRC client.
-//
-// NOTE on Hive engine visibility: an IRC RegisterTable / FastAppend commit is
-// NOT by itself adopted by the running Hive engine for a *snapshot-advancing*
-// change — that requires a separate HMS sync (ALTER TABLE ... SET
-// TBLPROPERTIES('metadata_location'=...)). That step is the Hive side and lives
-// in scripts/hive_register.sh, invoked as a subprocess (see pp-catalog). This
-// header is the iceberg-cpp/IRC side only.
+// Two construction entry points: `MakeLocalCatalog` (the catalog of record:
+// SqlCatalog over an LMDB CatalogStore) and `MakeCatalog` (a RestCatalog/IRC
+// client, used to talk to an external IRC server such as pp-catalogd). Plus the
+// shared table-publish + metadata-resolution helpers every tool consumes.
 
 #pragma once
 
@@ -32,14 +25,14 @@ namespace primeparts::catalog {
 
 namespace fs = std::filesystem;
 
-/// Connection settings for an iceberg REST catalog (IRC). When `rest_uri` is
-/// empty, callers should fall back to an in-memory catalog (on-disk only,
-/// invisible to Hive) — see MakeCatalog.
+/// Connection settings for an iceberg REST catalog (IRC) client. When
+/// `rest_uri` is empty, callers fall back to an in-memory catalog (on-disk
+/// only) — see MakeCatalog.
 struct RestOptions {
-  std::string rest_uri;        // e.g. http://192.168.1.202:9090/iceberg
+  std::string rest_uri;        // e.g. http://localhost:PORT/iceberg (pp-catalogd)
   std::string rest_name = "primeparts";
   std::string rest_warehouse;  // defaults to `warehouse` arg of MakeCatalog
-  std::string rest_prefix;     // usually empty for this HMS deployment
+  std::string rest_prefix;     // usually empty
 };
 
 /// A FileIO backed by the local filesystem (arrow). Used by the in-memory
@@ -85,8 +78,8 @@ bool EnsureNamespace(const std::shared_ptr<iceberg::Catalog>& catalog,
 ///
 /// Two paths, matching the existing tools:
 ///  1. An on-disk metadata.json already exists: DropTable(purge=false) then
-///     RegisterTable against it — preserves snapshot history, stamps the HMS
-///     location pointer. No-op if the catalog already points there.
+///     RegisterTable against it — preserves snapshot history, updates the
+///     catalog location pointer. No-op if the catalog already points there.
 ///  2. No metadata.json: CreateTable + (if `files` non-empty) FastAppend,
 ///     writing a fresh metadata.json. Used by the in-memory bootstrap path.
 ///

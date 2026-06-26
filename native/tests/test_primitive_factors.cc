@@ -1,4 +1,4 @@
-#include "primeparts/primitive_factors.h"
+#include "primeparts/coverings/primitive_factors.h"
 
 #include <iostream>
 #include <string>

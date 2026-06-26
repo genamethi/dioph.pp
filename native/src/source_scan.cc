@@ -15,9 +15,11 @@
 
 #include <nlohmann/json.hpp>
 
+#include "primeparts/common/arrow_init.h"
+#include "primeparts/common/uri.h"
+
 #include "iceberg/arrow/arrow_io_util.h"  // iceberg::arrow::MakeLocalFileIO (was arrow_file_io.h pre-v0.3.0)
 #include "iceberg/arrow_c_data.h"
-#include "iceberg/avro/avro_register.h"
 #include "iceberg/data/file_scan_task_reader.h"
 #include "iceberg/file_io.h"
 #include "iceberg/manifest/manifest_entry.h"
@@ -25,7 +27,6 @@
 #include "iceberg/manifest/manifest_reader.h"
 #include "iceberg/metadata_columns.h"
 #include "iceberg/snapshot.h"
-#include "iceberg/parquet/parquet_register.h"
 #include "iceberg/partition_spec.h"
 #include "iceberg/schema.h"
 #include "iceberg/schema_field.h"
@@ -39,11 +40,6 @@ namespace {
 
 constexpr int32_t kPColumnFieldId = 1;  // `p` is field_id 1 in both source tables.
 
-std::string strip_file_scheme(const std::string& uri) {
-  if (uri.rfind("file://", 0) == 0) return uri.substr(7);
-  return uri;
-}
-
 int64_t decode_int64_le(const std::vector<uint8_t>& bytes) {
   int64_t v = 0;
   const size_t n = bytes.size() < 8 ? bytes.size() : 8;
@@ -54,14 +50,6 @@ int64_t decode_int64_le(const std::vector<uint8_t>& bytes) {
     v |= ~static_cast<int64_t>(0) << 32;
   }
   return v;
-}
-
-void ensure_format_registered() {
-  static std::once_flag once;
-  std::call_once(once, [] {
-    iceberg::avro::RegisterAll();
-    iceberg::parquet::RegisterAll();
-  });
 }
 
 }  // namespace
@@ -133,7 +121,7 @@ std::unique_ptr<SourceTableReader> SourceTableReader::OpenMetadata(
     std::shared_ptr<iceberg::Expression> filter,
     std::string* error,
     int shard_index, int shard_count) {
-  ensure_format_registered();
+  primeparts::common::EnsureArrowRegistration();
 
   auto impl = std::make_unique<SourceTableReader::Impl>();
   auto unique_io = iceberg::arrow::MakeLocalFileIO();
@@ -155,7 +143,7 @@ std::unique_ptr<SourceTableReader> SourceTableReader::OpenMetadata(
   auto snap_r = impl->metadata->Snapshot();
   if (snap_r.has_value() && snap_r.value()) {
     auto list_r = iceberg::ManifestListReader::Make(
-        strip_file_scheme(snap_r.value()->manifest_list), impl->io);
+        primeparts::common::StripFileScheme(snap_r.value()->manifest_list), impl->io);
     if (list_r.has_value()) {
       auto files_r = list_r.value()->Files();
       if (files_r.has_value()) {
@@ -314,7 +302,7 @@ std::vector<SourceFileInfo> SourceTableReader::source_files() const {
   for (const auto& task : impl_->tasks) {
     const auto* df = task->data_file().get();
     SourceFileInfo info;
-    info.path = strip_file_scheme(df->file_path);
+    info.path = primeparts::common::StripFileScheme(df->file_path);
     info.record_count = static_cast<int64_t>(df->record_count);
     auto lo_it = df->lower_bounds.find(kPColumnFieldId);
     auto hi_it = df->upper_bounds.find(kPColumnFieldId);

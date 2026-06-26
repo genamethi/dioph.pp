@@ -164,6 +164,20 @@ nginx/Lua were considered for the edge and **bracketed**: there is no Iceberg
 metadata library outside C++ here, so the engine must stay in iceberg-cpp; a
 reverse proxy can front the server later if it goes remote.
 
+### 5.2 Write model (single-writer) — pointer
+
+The catalog is **single-writer by design**: one `generate` at a time, enforced by
+a warehouse write lock acquired *before* the hot `pp_process_rank_batch` kernel.
+Bucketing is a read/analysis metadata axis, not write parallelism — concurrent
+writes fail fast. Commits write parquet/manifests/`metadata.json` in place
+**first**, then the LMDB head-pointer CAS **last** (the CAS *is* the publish;
+under single-writer a `CAS→0` is a bug, not a race). Default is commit-at-end
+(resume from the committed `primes` frontier); `--temp` is the only ephemeral mode.
+`generate` commits `primes` + `partitions`, so they must be committed atomically
+(`commitTransaction`) or `partitions`-before-`primes` to keep resume hole-free.
+**Full detail + the commit-contract interface:
+`markdown/data_eng/irc_catalog_design.md` → "Write & commit model".**
+
 ---
 
 ## 6. Native local catalog — DONE + VERIFIED (Phase 0/1)
@@ -519,22 +533,33 @@ flowchart TD
    **`make smoke` PASSes**. If iceberg-cpp is later bumped past `v0.3.0` and the
    main-line ABI returns, this migration becomes live again; until then #6 is
    not a blocker.
-2. **Phase 2 — `pp-catalogd`.** cpp-httplib IRC routes over
-   `SqlCatalog(LmdbStore)`; server-side JSON shapes (~12 core table/namespace
-   routes from `native/vendor/iceberg-refs/rest-catalog-open-api.yaml`).
-   Acceptance = iceberg-cpp `RestCatalog` client round-trip (createTable + commit
+2. **Phase 2 — `pp-catalogd` (the next build).** cpp-httplib IRC routes over
+   `SqlCatalog(LmdbStore)` (via `MakeLocalCatalog`); ~12 core table/namespace
+   routes from the now-vendored spec
+   `native/vendor/iceberg-refs/rest-catalog-open-api.yaml`. The substance is the
+   **commit-contract** serde: parse `CommitTableRequest { requirements[],
+   updates[] }` / `CreateTableRequest` / `RegisterTableRequest`, serialize
+   `LoadTableResult`; the engine validates requirements + applies updates + does
+   the store CAS. The **commit** handler is mandatory — native `FastAppend` /
+   `RowDelta` route through `updateTable` (contract detail in
+   `irc_catalog_design.md` → "Commit-contract interface"). Acceptance =
+   iceberg-cpp `RestCatalog` client round-trip (createTable + commit + LoadTable
    e2e against `pp-catalogd`); `curl GET /v1/config` first. **This JSON
    shape-matching is the real work.**
 3. **Phase 3 — consolidate + de-Hive** (the source reorg; detail in §11).
-   **Largely landed already** (§11): the source-tree reorg is done, `make all`
-   is green, and the three raw-`sqlite3_open` readers were **re-pointed onto the
-   catalog** (commit `route all metadata resolution through the local catalog`)
-   — `grep sqlite3_open` now finds nothing, and the dead `rewriter/{rewrite,
-   preflight}` + `ui_iceberg.cc` were deleted. **Remaining de-Hive work:** excise
-   `pp_hive_sync.{h,cc}` (still present) + the `pp-catalog` `--hive-*` /
-   `--smoke-test` subcommands + `scripts/hive_register.sh` / `scripts/hive_sql.py`
-   / `mr3/kubernetes/`; fold `sieve_triage` into the stepper. Lower urgency now
-   that the readers no longer depend on SQLite.
+   **DONE as of 2026-06-25.** The source-tree reorg is complete, `make all` is
+   green, `make smoke` passes, and the raw-`sqlite3_open` readers were
+   **re-pointed onto the catalog** (`grep sqlite3_open` finds nothing). The
+   de-Hive cleanup landed: `pp_hive_sync.{h,cc}`, `pp_delete_spike.{h,cc}` (the
+   beeline-driven spike harnesses), the `pp-catalog` `--hive-exec` /
+   `--hive-sync` / `--smoke-test` / `--delete-spike` / `--mor-verify`
+   subcommands, the stray `native/src/fix.patch`, and the unused
+   `calibration.h` were **deleted**; `scripts/hive_*` and `mr3/kubernetes/` were
+   already gone. A **`common/`** shared-infra layer was introduced (see §11) and
+   `primitive_factors.h` moved under `coverings/`. **Remaining:** fold
+   `sieve_triage` into the covering-sieve stepper (deferred with the triage
+   integration); the `CommitFiles` seam refactor is folded into the Phase-2
+   `pp-catalogd` build.
 4. **Phase 4 — derivative data (separate track).** LMDB-backed derived indexes +
    **igraph** implicit-graph read paths for fast number-theoretic reads (the MV
    replacement). Sketch only so far.
@@ -563,14 +588,30 @@ native/src/
   core.c  generate.cc  writer.cc  source_scan.cc
   mersenne_sidecar.cc  bench.c  materialize_bench.c              # root
   catalog/     pp_lmdb_store  pp_lmdb_smoke  pp_iceberg_rest  pp_row_delta
-               pp_sieve_clone  pp_delete_spike  pp_catalog_main  pp_hive_sync  README.md
+               pp_sieve_clone  pp_catalog_main  README.md
   coverings/   covering_sieve_main  primitive_factors  primitive_factors_main  sieve_triage_main
   query/       query_service  query_smoke  query_service_smoke  lua_query_module  lua_query_smoke
   tui/         tui_main  lua_presets  lua_presets_smoke
 ```
 
-Headers remain flat under `include/primeparts/` (with subdirs for `catalog/`,
-`query/`, `tui/`). `pp_hive_sync` is the main remaining Hive carry-over (Phase 3).
+**Header scheme (refreshed 2026-06-25).** The include tree mirrors `src/`:
+subfolders are cohesive modules, flat headers are the C ABI + cross-module I/O
+infra, and a new `common/` holds cross-cutting helpers shared by ≥2 modules.
+
+```
+include/primeparts/
+  core.h  generate.h            # C ABI
+  writer.h  source_scan.h       # cross-module I/O infra
+  common/    arrow_init.h (EnsureArrowRegistration) · thread_pool.h
+             (SetupArrowThreadPools) · uri.h (StripFileScheme)   # header-only dedup
+  catalog/   pp_iceberg_rest · pp_lmdb_store · pp_row_delta · pp_sieve_clone
+  coverings/ primitive_factors.h
+  query/     query_service · query_preset · lua_query_module
+  tui/       lua_presets
+```
+
+All Hive carry-overs are gone (`pp_hive_sync`, `pp_delete_spike`,
+`calibration.h`, `fix.patch` deleted).
 
 ### 11.2 Removed in `9e6d8ad` (one-time staging binaries; git history only)
 
@@ -600,19 +641,21 @@ fetched into the prefix by `native/configure`.
 
 ### 11.4 DRY consolidation plan (from the source explorations)
 
-**Catalog module — remove / keep / refactor:**
-- **Remove:** `pp_hive_sync.{h,cc}` (100 % Hive); `pp_catalog_main`'s
-  `--smoke-test` / `--hive-exec` / `--hive-sync`; `pp_delete_spike`'s
-  beeline-driven `RunDeleteSpike`.
-- **Refactor:** `pp_iceberg_rest` — add a `MakeLocalCatalog` factory that builds
-  `SqlCatalog(LmdbStore)` (for in-process use / the server's engine), drop Hive
-  comments; swap `RunMorVerify`'s `HiveExec` create/drop for native
-  `CreateTable`/`DropTable`.
-- **Keep:** `pp_row_delta` (pure iceberg-cpp); `pp_sieve_clone` (drop the Hive
-  fallback messaging).
+**Catalog module — status (DONE 2026-06-25):**
+- **Removed:** `pp_hive_sync.{h,cc}`; `pp_catalog_main`'s `--smoke-test` /
+  `--hive-exec` / `--hive-sync`; the whole `pp_delete_spike` unit (both the
+  beeline `RunDeleteSpike` and `RunMorVerify`, which also seeded throwaway tables
+  via beeline). `pp-catalog` is now just `--register` + `--clone-sieve`, both on
+  `MakeLocalCatalog`.
+- **Refactored:** `pp_iceberg_rest` already has the `MakeLocalCatalog` factory
+  (`SqlCatalog(LmdbStore)`); Hive comments dropped; `pp_sieve_clone` Hive
+  fallback messaging removed.
+- **Kept:** `pp_row_delta` (pure iceberg-cpp); `pp_sieve_clone`.
 - Minimal `Catalog` surface the codebase actually uses: `NamespaceExists`,
   `CreateNamespace`, `LoadTable`, `CreateTable`, `DropTable`, `RegisterTable`, plus
   the commit path (`NewFastAppend` / `RowDelta`).
+- **Deferred:** the `CommitFiles(catalog, table, schema, spec, files)` seam
+  (refactor of `PublishTable`) — folded into the Phase-2 `pp-catalogd` build.
 
 **The raw-SQLite reader coupling — RESOLVED (2026-06-25).** Three readers used to
 open `iceberg_tables` **directly via `sqlite3_open`** (triplicated lookup),
@@ -622,13 +665,15 @@ now routes through the local catalog (commit `route all metadata resolution
 through the local catalog`). `grep -r sqlite3_open native/src` finds nothing.
 The remaining seam work is the de-Hive cleanup above, not reader re-pointing.
 
-**Other DRY hotspots (shared headers).** Arrow thread-pool setup (several mains),
-`MakeCatalog` boilerplate, and progress bar / monitor are candidates for shared
-headers. Confirm the Arrow `RegisterAll` once-guard is present and consistent
-across every entry point that opens Iceberg I/O (`pp_iceberg_rest`,
-`source_scan`, the `query/` + `tui/` mains — verify none double-register).
-`source_scan` and `writer` are already clean seams. Fold `sieve_triage` into
-`covering_sieve`.
+**Other DRY hotspots (shared headers) — DONE 2026-06-25.** The `common/` layer
+now holds the deduplicated cross-cutting helpers: `arrow_init.h`
+(`EnsureArrowRegistration` — one once-guarded RegisterAll for arrow/avro/parquet,
+replacing the inconsistent per-site blocks in `pp_iceberg_rest` and
+`source_scan`), `thread_pool.h` (`SetupArrowThreadPools`, was triplicated across
+the coverings mains), and `uri.h` (`StripFileScheme`, was copy-pasted in four
+files). **Still open:** progress bar / monitor consolidation (generate.cc vs
+primitive_factors_main.cc have genuinely divergent designs — deferred); fold
+`sieve_triage` into `covering_sieve`.
 
 ## 12. Native tooling inventory
 
@@ -672,9 +717,7 @@ across every entry point that opens Iceberg I/O (`pp_iceberg_rest`,
     `MakeLocalCatalog` factory + dropping the Hive comments (§11.4).
   - `pp_row_delta.{h,cc}` (**§7**): committable position-delete `SnapshotUpdate`.
   - `pp_sieve_clone.{h,cc}`: `--clone-sieve` shallow clone.
-  - `pp_delete_spike.{h,cc}`, `pp_catalog_main.cc` → `pp-catalog`.
-  - **Slated for removal (Phase 3):** `pp_hive_sync.{h,cc}` + the Hive
-    subcommands.
+  - `pp_catalog_main.cc` → `pp-catalog` (`--register`, `--clone-sieve`).
 
 ### Where state lives (agent memory + docs)
 - Design doc: `markdown/data_eng/irc_catalog_design.md` (the catalog system).

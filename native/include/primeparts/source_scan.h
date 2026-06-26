@@ -1,12 +1,13 @@
-// Source-table reader for the rewriter. Opens an Iceberg table from a
-// sqlite catalog (read-only), uses iceberg-cpp's TableScan to plan
-// FileScanTasks, sorts them by `p` lower-bound so the producer streams
-// in p-order, and exposes `Next(&batch)` returning arrow RecordBatches
-// projected to the caller's column list.
+// Shared delete-aware source-table reader. Opens an Iceberg table from a
+// metadata.json path (resolved through the local catalog), uses iceberg-cpp's
+// TableScan to plan FileScanTasks, sorts them by `p` lower-bound so the
+// producer streams in p-order, and exposes `Next(&batch)` returning arrow
+// RecordBatches projected to the caller's column list. Optional sharding
+// (shard_index, shard_count) splits the planned tasks for parallel readers.
 //
-// This is the read-side counterpart to writer.h. Both are deliberately
-// thin: source_scan owns scan plumbing, writer owns write plumbing,
-// the rewriter just connects them with a sort-merge.
+// The read-side counterpart to writer.h, consumed by the covering-sieve and
+// the query layer. Both are deliberately thin: source_scan owns scan
+// plumbing, writer owns write plumbing.
 
 #pragma once
 

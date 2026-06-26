@@ -1,5 +1,6 @@
 #include "primeparts/source_scan.h"
 #include "primeparts/catalog/pp_iceberg_rest.h"
+#include "primeparts/common/thread_pool.h"
 
 #include <arrow/api.h>
 #include <arrow/util/thread_pool.h>
@@ -57,14 +58,9 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    auto cpu_st = arrow::SetCpuThreadPoolCapacity(opts.threads);
-    if (!cpu_st.ok()) {
-        std::cerr << "Error setting CPU thread pool: " << cpu_st.ToString() << "\n";
-        return 1;
-    }
-    auto io_st = arrow::io::SetIOThreadPoolCapacity(opts.threads);
-    if (!io_st.ok()) {
-        std::cerr << "Error setting IO thread pool: " << io_st.ToString() << "\n";
+    std::string tp_err;
+    if (!primeparts::common::SetupArrowThreadPools(opts.threads, &tp_err)) {
+        std::cerr << "Error: " << tp_err << "\n";
         return 1;
     }
 
