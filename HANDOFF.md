@@ -533,19 +533,37 @@ flowchart TD
    **`make smoke` PASSes**. If iceberg-cpp is later bumped past `v0.3.0` and the
    main-line ABI returns, this migration becomes live again; until then #6 is
    not a blocker.
-2. **Phase 2 — `pp-catalogd` (the next build).** cpp-httplib IRC routes over
-   `SqlCatalog(LmdbStore)` (via `MakeLocalCatalog`); ~12 core table/namespace
-   routes from the now-vendored spec
-   `native/vendor/iceberg-refs/rest-catalog-open-api.yaml`. The substance is the
-   **commit-contract** serde: parse `CommitTableRequest { requirements[],
-   updates[] }` / `CreateTableRequest` / `RegisterTableRequest`, serialize
-   `LoadTableResult`; the engine validates requirements + applies updates + does
-   the store CAS. The **commit** handler is mandatory — native `FastAppend` /
-   `RowDelta` route through `updateTable` (contract detail in
-   `irc_catalog_design.md` → "Commit-contract interface"). Acceptance =
-   iceberg-cpp `RestCatalog` client round-trip (createTable + commit + LoadTable
-   e2e against `pp-catalogd`); `curl GET /v1/config` first. **This JSON
-   shape-matching is the real work.**
+2. **Phase 2 — `pp-catalogd` — SCAFFOLDED 2026-06-25.** `primeparts-catalogd`
+   (`native/src/catalog/pp_catalogd.{h,cc}` + `pp_catalogd_main.cc`): a
+   cpp-httplib IRC server over `SqlCatalog(LmdbStore)` via `MakeLocalCatalog`.
+   All ~12 routes are wired (config; namespaces list/create/load/exists/drop/
+   properties; tables list/create/load/exists/**commit**/drop/register/rename;
+   metrics→204) from the vendored spec
+   `native/vendor/iceberg-refs/rest-catalog-open-api.yaml`.
+   - **Key reuse:** request/response JSON serde is iceberg-cpp's own *internal*
+     serde (`json_serde_internal.h`, `catalog/rest/json_serde_internal.h`) —
+     exported symbols in the static archives — so the server is a thin adapter,
+     not a hand-written serializer. The object compiles with
+     `-Ivendor/iceberg-cpp/src` (internal headers only; public headers still
+     resolve from `$PREFIX`). New provisioning: header-only **cpp-httplib** and
+     **nlohmann json_fwd.hpp** are now fetched by `native/configure`.
+   - **HEAD** exists-checks are served by the GET handlers (cpp-httplib
+     dispatches HEAD→GET): 200 if it loads, 404 if absent.
+   - **Commit** parses `requirements[]`/`updates[]` with `TableRequirementFromJson`
+     / `TableUpdateFromJson` (→ `unique_ptr`) and calls `Catalog::UpdateTable`;
+     the engine validates + applies + CASes. The handler is **deletion-vector
+     forward-compatible** — DV/Puffin specifics ride inside `add-snapshot`
+     updates, which the element serde + engine handle with no change to this
+     layer (the DV work itself is writer-side; see Phase 4 note below).
+   - **Verified:** `make all` green; live round-trip through the LMDB engine for
+     `GET /v1/config`, namespace create/list/exists/properties, and table 404 +
+     the IRC `{"error":{message,type,code}}` envelope.
+   - **Remaining (next iteration):** a client-side acceptance smoke — point the
+     iceberg-cpp `RestCatalog` client (`MakeCatalog`, `rest_uri=localhost:PORT`)
+     at `pp-catalogd` and run `PublishTable` e2e (createTable + FastAppend commit
+     + LoadTable); the create/commit serde paths are wired but not yet exercised
+     end-to-end. Then re-target the sieve `--clone-sieve` / RowDelta commits and
+     `generate` onto `pp-catalogd`.
 3. **Phase 3 — consolidate + de-Hive** (the source reorg; detail in §11).
    **DONE as of 2026-06-25.** The source-tree reorg is complete, `make all` is
    green, `make smoke` passes, and the raw-`sqlite3_open` readers were
