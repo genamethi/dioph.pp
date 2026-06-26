@@ -325,6 +325,11 @@ fi
 # --------------------------------------------------------------------------
 say "Writing native/config.mk"
 luamod=lua; for m in lua5.5 lua-5.5 lua; do have_pc "$m" && { luamod=$m; break; }; done
+# Resolve Lua flags HERE (literal values) — config.mk is -include'd before the
+# Makefile defines PKG_CONFIG, so a deferred $(shell ... $(PKG_CONFIG) ...) would
+# expand against an empty PKG_CONFIG and silently drop -llua.
+LUA_CPPFLAGS_R=$("$PKG_CONFIG" --cflags "$luamod" 2>/dev/null || true)
+LUA_LDLIBS_R=$("$PKG_CONFIG" --libs "$luamod" 2>/dev/null || true)
 NOTCURSES_RPATH="-Wl,-rpath,$PREFIX/lib"
 
 {
@@ -333,8 +338,8 @@ NOTCURSES_RPATH="-Wl,-rpath,$PREFIX/lib"
   echo "PKG_CONFIG_PATH := $PKG_CONFIG_PATH"
   echo "CC := $CC"
   echo "CXX := $CXX"
-  echo "LUA_CPPFLAGS := \$(shell PKG_CONFIG_PATH=\$(PKG_CONFIG_PATH) \$(PKG_CONFIG) --cflags $luamod 2>/dev/null)"
-  echo "LUA_LDLIBS := \$(shell PKG_CONFIG_PATH=\$(PKG_CONFIG_PATH) \$(PKG_CONFIG) --libs $luamod 2>/dev/null) -lm -ldl"
+  echo "LUA_CPPFLAGS := $LUA_CPPFLAGS_R"
+  echo "LUA_LDLIBS := $LUA_LDLIBS_R -lm -ldl"
   echo "NOTCURSES_RPATH := $NOTCURSES_RPATH"
 } > "$NATIVE_DIR/config.mk"
 ok "native/config.mk written"
