@@ -474,7 +474,7 @@ blueprinted on iceberg-rust's `iceberg-catalog-hms`), **not usable yet**.
 ```mermaid
 flowchart TD
   p01["Phase 0/1 ✅ LMDB store + SqlCatalog round-trip (make smoke)"]
-  t6["#6 SnapshotUpdate migration<br/>pp_row_delta / pp_delete_spike"]
+  t6["#6 SnapshotUpdate migration ✅<br/>(no-op at iceberg-cpp v0.3.0)<br/>pp_row_delta / pp_delete_spike"]
   p2["Phase 2: pp-catalogd IRC server<br/>(cpp-httplib /v1 routes)"]
   p3["Phase 3: consolidate + de-Hive"]
   p4["Phase 4: derivative data (LMDB-KV + igraph)"]
@@ -491,7 +491,18 @@ flowchart TD
    `std::span<const ContentFileWithSequenceNumber>`; `fast_append.h` mirrors the
    `Status` change. **Nuance:** `covering_sieve_main.cc` depends on
    `pp_row_delta`, so the validated sieve binary **won't recompile against the
-   rebuilt lib until #6 lands.** This is what currently blocks a full `make all`.
+   rebuilt lib until #6 lands.**
+
+   **RESOLVED (2026-06-25, against the now-pinned iceberg-cpp `v0.3.0`).** The
+   project now vendors iceberg-cpp as a submodule pinned at the `v0.3.0` release
+   tag (see `BUILD.md` / `native/vendor/README.md`), and `pp_row_delta.cc` /
+   `pp_delete_spike` compile **clean** against that tag's SnapshotUpdate API —
+   the `void→Status` / `SetSummaryProperty` / `WriteDeleteManifests` deltas above
+   were an artifact of the unreleased 2026-06-08 main snapshot, not of `v0.3.0`.
+   **`make all` is GREEN** (incl. `covering-sieve` / `sieve-triage`) and
+   **`make smoke` PASSes**. If iceberg-cpp is later bumped past `v0.3.0` and the
+   main-line ABI returns, this migration becomes live again; until then #6 is
+   not a blocker.
 2. **Phase 2 — `pp-catalogd`.** cpp-httplib IRC routes over
    `SqlCatalog(LmdbStore)`; server-side JSON shapes (~12 core table/namespace
    routes from `native/vendor/iceberg-refs/rest-catalog-open-api.yaml`).

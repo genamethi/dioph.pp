@@ -106,6 +106,10 @@ fi
 ok "CC=$CC"; ok "CXX=$CXX"
 command -v cmake >/dev/null 2>&1 && ok "cmake=$(cmake --version | head -1)" || warn "cmake absent (only needed for source builds)"
 ok "prefix=$PREFIX  jobs=$JOBS  distro=$DISTRO"
+# LMDB is small + pinned + compiled directly by the Makefile; ensure it's present.
+if [ ! -f "$REPO_ROOT/native/vendor/lmdb/libraries/liblmdb/mdb.c" ]; then
+  say "initializing lmdb submodule"; git -C "$REPO_ROOT" submodule update --init --checkout -- native/vendor/lmdb
+fi
 
 # --------------------------------------------------------------------------
 # Generic detection: pkg-config module at a minimum version
