@@ -15,7 +15,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include "iceberg/arrow/arrow_file_io.h"
+#include "iceberg/arrow/arrow_io_util.h"  // iceberg::arrow::MakeLocalFileIO (was arrow_file_io.h pre-v0.3.0)
 #include "iceberg/arrow_c_data.h"
 #include "iceberg/avro/avro_register.h"
 #include "iceberg/data/file_scan_task_reader.h"

@@ -28,7 +28,7 @@
 #include <string_view>
 #include <vector>
 
-#include "iceberg/arrow/arrow_file_io.h"
+#include "iceberg/arrow/arrow_io_util.h"  // iceberg::arrow::MakeLocalFileIO (was arrow_file_io.h pre-v0.3.0)
 #include "iceberg/catalog/sql/catalog_store.h"
 #include "iceberg/catalog/sql/sql_catalog.h"
 #include "iceberg/file_io.h"

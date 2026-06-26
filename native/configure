@@ -39,6 +39,7 @@ PRIMESIEVE_VERSION="${PRIMESIEVE_VERSION:-12.14}"
 PRIMECOUNT_VERSION="${PRIMECOUNT_VERSION:-8.5}"
 NOTCURSES_VERSION="${NOTCURSES_VERSION:-3.0.17}"
 LUA_VERSION="${LUA_VERSION:-5.5.0}"   # must satisfy >=5.5,<5.6
+NLOHMANN_VERSION="${NLOHMANN_VERSION:-3.11.3}"  # header-only, used by the project directly
 ARROW_REF="${ARROW_REF:-main}"        # Arrow has no >=25 release tag yet
 
 # --------------------------------------------------------------------------
@@ -155,6 +156,7 @@ t_primesieve() { min_ok primesieve 11.0; }
 t_primecount() { min_ok primecount 7.0; }
 t_notcurses()  { have_pc notcurses-core || have_pc notcurses; }
 t_lua()        { for m in lua5.5 lua-5.5 lua; do min_ok "$m" 5.5.0 && max_ok "$m" 5.6.0 && return 0; done; return 1; }
+t_nlohmann()   { [ -f "$PREFIX/include/nlohmann/json.hpp" ] || [ -f /usr/include/nlohmann/json.hpp ] || [ -f /usr/local/include/nlohmann/json.hpp ]; }
 t_curl()       { have_pc libcurl; }
 t_ssl()        { have_pc openssl || have_pc libssl; }
 t_sqlite()     { have_pc sqlite3; }
@@ -195,6 +197,8 @@ b_primecount() { fetch "https://github.com/kimwalisch/primecount/archive/refs/ta
 b_notcurses() { fetch "https://github.com/dankamongmen/notcurses/archive/refs/tags/v$NOTCURSES_VERSION.tar.gz" "$WORK/notcurses.tar.gz"; tar -C "$WORK" -xf "$WORK/notcurses.tar.gz"
   cmake_build "$WORK/notcurses-$NOTCURSES_VERSION" -DUSE_MULTIMEDIA=none -DUSE_DOCTEST=off \
     -DBUILD_TESTING=off -DUSE_PANDOC=off -DUSE_DEFLATE=off; }
+b_nlohmann() { mkdir -p "$PREFIX/include/nlohmann"
+  fetch "https://github.com/nlohmann/json/releases/download/v$NLOHMANN_VERSION/json.hpp" "$PREFIX/include/nlohmann/json.hpp"; }
 b_lua() { fetch "https://www.lua.org/ftp/lua-$LUA_VERSION.tar.gz" "$WORK/lua.tar.gz"; tar -C "$WORK" -xf "$WORK/lua.tar.gz"
   ( cd "$WORK/lua-$LUA_VERSION" && make CC="$CC" MYCFLAGS=-fPIC -j"$JOBS" >/dev/null && make INSTALL_TOP="$PREFIX" install >/dev/null )
   mm=$(echo "$LUA_VERSION" | cut -d. -f1,2)
@@ -218,6 +222,7 @@ need "primesieve" t_primesieve primesieve libprimesieve-dev b_primesieve
 need "primecount" t_primecount primecount ""               b_primecount
 need "notcurses"  t_notcurses  notcurses  libnotcurses-dev  b_notcurses
 need "lua 5.5.x"  t_lua        lua        liblua5.4-dev     b_lua
+need "nlohmann-json" t_nlohmann nlohmann-json nlohmann-json3-dev b_nlohmann
 need "libcurl"    t_curl       curl       libcurl4-openssl-dev ""
 need "openssl"    t_ssl        openssl    libssl-dev        ""
 need "sqlite3"    t_sqlite     sqlite     libsqlite3-dev    ""
