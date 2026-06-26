@@ -1,13 +1,21 @@
 # Project Handoff: Prime Power Partition Obstruction Analysis
 
-**Branch:** `pure-local` · **Date:** 2026-06-08
-**Big shift on this branch:** Hive / MR3 / Kubernetes and the Python layer are
+**Branch:** `tui-query` (was `pure-local`) · **Date:** 2026-06-08, build/provisioning sections refreshed 2026-06-25
+**Big shift:** Hive / MR3 / Kubernetes and the Python layer are
 being **removed**. The query/MV engine moves to native C++ + **igraph**; the
 catalog of record moves to a **native local Iceberg REST Catalog (IRC) backed by
 LMDB**. This document is comprehensive and self-contained — it intentionally
 duplicates material from `markdown/data_eng/irc_catalog_design.md`, the
 `delete_primitive_spike.md` spike doc, `native/vendor/PATCHES.md`, and the agent
 memory files so it can be read alone.
+
+> **Provisioning note (2026-06-25):** the native dependency stack (Arrow,
+> iceberg-cpp, FLINT, PARI, …) is now built **rootless from source into
+> `$HOME/.local`** by `native/configure`, with the vendored sources as **git
+> submodules**. iceberg-cpp is pinned at the **`v0.3.0`** release tag. **`make
+> all` is GREEN and `make smoke` PASSes.** See `BUILD.md` (canonical build doc),
+> `native/vendor/README.md`, and `native/vendor/PATCHES.md`. The build/link and
+> source-reorg sections below (§6.3, §9, §11–12) were refreshed against this.
 
 ---
 
@@ -253,23 +261,28 @@ open an LMDB file). We keep IRC interop (via the Phase-2 server) and standard
 on-disk `metadata.json`. The `CatalogStore` seam keeps SQLite available later
 (config swap) if interop is ever wanted — no need to build both now.
 
-### 6.3 Build & link
+### 6.3 Build & link (refreshed 2026-06-25 — see `BUILD.md`)
 
-- **Vendored deps** (`native/vendor` is gitignored; provision-by-clone, keep
-  `.git`): LMDB at `native/vendor/lmdb` (mirror `lmdb/lmdb`, branch
-  `mdb.master3`, v0.9.90); sources `libraries/liblmdb/{mdb.c,midl.c,lmdb.h}`.
-- **`liblmdb.a`** is built from `mdb.c` + `midl.c` (Makefile `$(LMDB_LIB)`,
-  `LMDB_CFLAGS = -O3 -g -fPIC -pthread`, `LMDB_CPPFLAGS = -I$(LMDB_DIR)`).
-- **Installed iceberg libs** at `/usr/local/lib` are **static `.a`** (rebuilt
-  2026-06-08, static, `BUNDLE=ON REST=ON SQL_CATALOG=ON`). Mixing static / shared
-  / prebuilt → double-free at exit; keep everything static from one build.
-- **Link gotchas (static, both real failure modes hit):**
+- **Provisioning is now `native/configure` + git submodules**, rootless into
+  `$HOME/.local` (override with `--prefix`; a non-writable prefix triggers
+  sudo for installs only). The vendored sources are submodules under
+  `native/vendor/`: `lmdb` (`mdb.master3`, populated), `iceberg-cpp` (`v0.3.0`,
+  on-demand), `arrow` (tracks `main` = 25-dev, on-demand). Arrow + iceberg-cpp
+  are built **static** into the prefix; the number-theory libs (FLINT/PARI/
+  primesieve/primecount/GMP) link via pkg-config (system or prefix).
+- **`liblmdb.a`** is built from `native/vendor/lmdb/libraries/liblmdb/{mdb.c,
+  midl.c}` (Makefile `$(LMDB_LIB)`, `LMDB_CFLAGS = -O3 -g -fPIC -pthread`).
+- **iceberg-cpp** is built `BUNDLE=ON REST=ON SQL_CATALOG=ON`, **static**.
+  Because we build Arrow ourselves (static, into the prefix), the whole
+  Arrow/iceberg cluster is one consistent static set — no static/shared mix.
+- **Link gotchas (still apply, all-static cluster):**
   1. `-liceberg_sql_catalog` (`SQL_CATALOG_LDLIBS`) must come **before** the
      iceberg core archives (`ICEBERG_LDLIBS`) so its references resolve in static
      link order.
-  2. Do **not** append a trailing `-lparquet -larrow` after `ICEBERG_LDLIBS` —
-     the static `.a` are already inside it, and the bare `-l` pulls the missing
-     shared `libarrow.so.2500` at runtime ("cannot open shared object").
+  2. Do **not** append a trailing `-lparquet -larrow` after `ICEBERG_LDLIBS` if a
+     *shared* Arrow is also present — the static `.a` are already inside it. With
+     the configure-built Arrow there is no shared Arrow, so this is moot, but the
+     ordering rule stands if a distro Arrow ever enters the picture.
 
 ### 6.4 Verification — `make smoke` (0 failures)
 
@@ -433,9 +446,14 @@ Full sieve state: agent memory `project_sieve_build_state`.
 
 ## 9. Vendored iceberg-cpp local patches (`native/vendor/PATCHES.md`)
 
-`native/vendor/iceberg-cpp` tracks Apache iceberg-cpp; we carry **4 local
-patches** that a naive re-vendor / `git checkout` / clean pull **silently
-destroys**. Re-apply from `PATCHES.md` and rebuild+reinstall the static libs.
+`native/vendor/iceberg-cpp` is a submodule pinned at **`v0.3.0`**; we carry
+**3 active local patches** (was 4 — patch #4 below was upstreamed in v0.3.0 and
+is now **retired**). They are checked-in `.patch` files in
+`native/vendor/patches/`, applied idempotently by
+`scripts/apply_vendor_patches.sh` (run automatically by `native/configure`); a
+sentinel keyed on the submodule HEAD makes re-runs no-ops. `native/vendor/
+PATCHES.md` is the authoritative index. On a tag bump, a patch that fails to
+re-apply has been upstreamed (retire it) or needs a forward-port.
 
 1. **`CMakeLists.txt` — honor `-DCMAKE_COMPILE_WARNING_AS_ERROR`.** Upstream
    hard-`set()`s it ON, shadowing `-D` overrides; guarded so a user `-D` wins
@@ -452,15 +470,13 @@ destroys**. Re-apply from `PATCHES.md` and rebuild+reinstall the static libs.
    `LocalFileSystem`. **Without this, native iceberg-cpp cannot scan ANY
    Hive-created table** (incl. the `primes_k0` MV the sieve consumes). Re-apply if
    re-vendored. (Memory: `project_icebergcpp_hive_uri_patch`.)
-4. **`json_serde.cc` — `assert-ref-snapshot-id` requirement field is `ref`, not
-   `ref-name`.** The REST spec uses `ref` for the `AssertRefSnapshotId`
-   *requirement* but `ref-name` for the snapshot-ref *updates*; iceberg-cpp
-   collapsed both onto one `kRefName`. Added a distinct `kRef = "ref"` used **only**
-   in the requirement serde. **This gates ALL snapshot-advancing native IRC
-   commits** (FastAppend, RowDelta) — without it, commits fail with
-   `IllegalArgumentException: Cannot parse missing string: ref`. PR drafted at
-   `iceberg-refs/upstream-pr-ref-field.md`; retires if merged. The cached
-   spec/tracker lives at `native/vendor/iceberg-refs/` (`refresh.sh`).
+4. **RETIRED (upstreamed in v0.3.0) — `json_serde.cc` `ref` requirement field.**
+   The REST spec uses `ref` for the `AssertRefSnapshotId` *requirement* but
+   `ref-name` for the snapshot-ref *updates*; pre-0.3 iceberg-cpp collapsed both
+   onto one `kRefName`. **v0.3.0 ships the distinct `kRef = "ref"`** in the
+   requirement serde, so we no longer carry this patch. (It gated all
+   snapshot-advancing native IRC commits — FastAppend, RowDelta — which now work
+   against stock v0.3.0.)
 
 The merge that brought in SqlCatalog (#273) also brought a **#689 Hive-catalog
 skeleton** (option + `src/iceberg/catalog/hive/` export header only, no working
@@ -509,17 +525,16 @@ flowchart TD
    Acceptance = iceberg-cpp `RestCatalog` client round-trip (createTable + commit
    e2e against `pp-catalogd`); `curl GET /v1/config` first. **This JSON
    shape-matching is the real work.**
-3. **Phase 3 — consolidate + de-Hive** (the source reorg; **full detail in §11**).
-   The Makefile is already reconciled with the new subdir tree (§11.3); a full
-   `make all` additionally needs the `rewriter/rewrite.cc` `WriterProperties`
-   rename ported (small, independent of #6). Then excise Hive (`pp_hive_sync`,
-   `pp-catalog`
-   `--hive-*` / `--smoke-test`, `scripts/hive_register.sh`, `scripts/hive_sql.py`,
-   `mr3/kubernetes/`); **re-point the three raw-`sqlite3_open` readers**
-   (`source_scan.cc`, `rewriter/preflight.cc`, `ui_iceberg.cc`) onto the catalog
-   seam (§11.4) — they strand when the catalog moves off SQLite; hoist shared
-   boilerplate into `iceberg_util.h`; fold `sieve_triage` into the stepper.
-   **Must land with the catalog cutover or the scan/TUI tools break.**
+3. **Phase 3 — consolidate + de-Hive** (the source reorg; detail in §11).
+   **Largely landed already** (§11): the source-tree reorg is done, `make all`
+   is green, and the three raw-`sqlite3_open` readers were **re-pointed onto the
+   catalog** (commit `route all metadata resolution through the local catalog`)
+   — `grep sqlite3_open` now finds nothing, and the dead `rewriter/{rewrite,
+   preflight}` + `ui_iceberg.cc` were deleted. **Remaining de-Hive work:** excise
+   `pp_hive_sync.{h,cc}` (still present) + the `pp-catalog` `--hive-*` /
+   `--smoke-test` subcommands + `scripts/hive_register.sh` / `scripts/hive_sql.py`
+   / `mr3/kubernetes/`; fold `sieve_triage` into the stepper. Lower urgency now
+   that the readers no longer depend on SQLite.
 4. **Phase 4 — derivative data (separate track).** LMDB-backed derived indexes +
    **igraph** implicit-graph read paths for fast number-theoretic reads (the MV
    replacement). Sketch only so far.
@@ -531,30 +546,31 @@ native CreateTable + FastAppend + RowDelta the same way the HMS servlet did.
 
 ---
 
-## 11. Source-tree reorganization (IN PROGRESS — read before `make all`)
+## 11. Source-tree reorganization (LARGELY COMPLETE)
 
-Commit `9e6d8ad` ("Started the reorganization of files with ./native/src path")
-began moving the flat `native/src/*.cc` layout into purpose subdirectories **and
-removed the one-time staging binaries.** The **Makefile was reconciled with the
-new tree (2026-06-08)** — paths repointed, the two removed targets dropped — so
-all rules now resolve. What still blocks a full `make all` is **two code
-migrations against the rebuilt iceberg lib** (§11.3), not build wiring.
+The flat `native/src/*.cc` layout was moved into purpose subdirectories, the
+one-time staging binaries removed, and the Makefile reconciled. As of
+2026-06-25 the blocking code migrations are resolved and **`make all` is GREEN**.
+Since the original reorg note: `rewriter/` (`rewrite` + `preflight`),
+`ui_iceberg.cc`, `tui_frontend.c`, and the stray `fix.patch` were all **deleted**;
+a new **`tui/`** (notcurses workbench on `QueryService`) and **`query/`**
+(QueryService + embedded-Lua presets/query module) landed.
 
 ### 11.1 Current on-disk layout
 
 ```
 native/src/
-  core.c  generate.cc  writer.cc  source_scan.cc  ui_iceberg.cc
-  mersenne_sidecar.cc  bench.c  materialize_bench.c  tui_frontend.c   # root — not yet sorted
+  core.c  generate.cc  writer.cc  source_scan.cc
+  mersenne_sidecar.cc  bench.c  materialize_bench.c              # root
   catalog/     pp_lmdb_store  pp_lmdb_smoke  pp_iceberg_rest  pp_row_delta
                pp_sieve_clone  pp_delete_spike  pp_catalog_main  pp_hive_sync  README.md
   coverings/   covering_sieve_main  primitive_factors  primitive_factors_main  sieve_triage_main
-  rewriter/    rewrite  preflight
-  fix.patch    # stray — investigate / remove
+  query/       query_service  query_smoke  query_service_smoke  lua_query_module  lua_query_smoke
+  tui/         tui_main  lua_presets  lua_presets_smoke
 ```
 
-Headers were **not** moved — `include/primeparts/*.h` is still flat (incl.
-`preflight.h`, `primitive_factors.h`, which now live apart from their sources).
+Headers remain flat under `include/primeparts/` (with subdirs for `catalog/`,
+`query/`, `tui/`). `pp_hive_sync` is the main remaining Hive carry-over (Phase 3).
 
 ### 11.2 Removed in `9e6d8ad` (one-time staging binaries; git history only)
 
@@ -565,29 +581,22 @@ Headers were **not** moved — `include/primeparts/*.h` is still flat (incl.
   `DataFile` — now survives only in git history; preserve it if any future tool
   writes data files.
 
-### 11.3 Makefile state — reconciled; two code migrations remain
+### 11.3 Makefile state — reconciled; migrations RESOLVED (2026-06-25)
 
-The Makefile now points at the new subdir paths (`coverings/`, `rewriter/`,
-`catalog/`) and the `primeparts-backfill-rank` / `primeparts-drop-bucket-cols`
-targets are gone. Compiling each object against the rebuilt iceberg lib gives:
+`make all` builds every target in `all:` (`libprimeparts_core.so`, bench-core,
+bench-materialize, generate, primitive-factors, covering-sieve, sieve-triage,
+pp-catalog, mersenne-sidecar) plus `make smoke` / `make test`. The two code
+migrations the original note flagged are both gone:
 
-- **OK:** `primitive_factors`, `primitive_factors_main`, `sieve_triage_main`,
-  `preflight`, `pp_iceberg_rest`, `pp_sieve_clone`, `source_scan`, `writer`,
-  plus the LMDB targets (`make smoke` green).
-- **FAIL — task #6 (`RowDelta` `SnapshotUpdate` ABI):** `pp_row_delta`,
-  `pp_delete_spike`, and `covering_sieve_main` (transitively, via
-  `pp_row_delta.h`). The override `CleanUncommitted` was declared `void` but the
-  rebuilt base now returns `Status` → "conflicting return type." This blocks
-  `pp-catalog` and `primeparts-covering-sieve`.
-- **FAIL — separate API drift:** `rewriter/rewrite.cc` references
-  `iceberg::WriterProperties::kParquetDataPageSize` /
-  `kParquetMaxRowGroupLength` / `kParquetDictionaryEnabledColumnPrefix` /
-  `kParquetEncodingColumnPrefix`, which the rebuilt lib renamed/removed. Smaller,
-  independent of #6. (`primeparts-rewrite` is not in `all:`, so this doesn't block
-  `make all` — but the object won't build until ported.)
+- **Task #6 (`RowDelta` `SnapshotUpdate` ABI)** — **no-op at iceberg-cpp v0.3.0.**
+  `pp_row_delta` / `pp_delete_spike` / `covering_sieve_main` compile clean; the
+  `void→Status` ABI delta was a main-snapshot artifact, not v0.3.0 (see §10, Task #6).
+- **`rewriter/rewrite.cc` `WriterProperties` rename** — **moot:** `rewriter/` was
+  deleted (`rewrite` + `preflight` were dead code).
 
-So a full `make all` needs #6 finished (for the catalog/sieve targets) and the
-`WriterProperties` rename mapped in `rewrite.cc`.
+One genuinely new provisioning dep surfaced and is handled: `nlohmann/json.hpp`
+(header-only, used by `source_scan.cc` / `primitive_factors_main.cc`) is now
+fetched into the prefix by `native/configure`.
 
 ### 11.4 DRY consolidation plan (from the source explorations)
 
@@ -605,34 +614,21 @@ So a full `make all` needs #6 finished (for the catalog/sieve targets) and the
   `CreateNamespace`, `LoadTable`, `CreateTable`, `DropTable`, `RegisterTable`, plus
   the commit path (`NewFastAppend` / `RowDelta`).
 
-**The raw-SQLite reader coupling (key — breaks on cutover).** Three readers open
-`iceberg_tables` **directly via `sqlite3_open`** (identical lookup + `file:` strip
-+ int64 decode, triplicated), bypassing the catalog API:
-`src/source_scan.cc`, `src/rewriter/preflight.cc`, `src/ui_iceberg.cc`. Moving the
-catalog to LMDB **strands all three** unless they resolve metadata through the
-catalog seam. Consolidate the duplicated bits into
-`include/primeparts/iceberg_util.h` **and** re-point metadata resolution onto the
-catalog (`LoadTable`), not raw SQLite.
+**The raw-SQLite reader coupling — RESOLVED (2026-06-25).** Three readers used to
+open `iceberg_tables` **directly via `sqlite3_open`** (triplicated lookup),
+bypassing the catalog API. That is **gone**: `preflight.cc` / `ui_iceberg.cc`
+were deleted, `source_scan.cc` had SQLite stripped, and all metadata resolution
+now routes through the local catalog (commit `route all metadata resolution
+through the local catalog`). `grep -r sqlite3_open native/src` finds nothing.
+The remaining seam work is the de-Hive cleanup above, not reader re-pointing.
 
-```mermaid
-flowchart LR
-    subgraph today["today — two disjoint read paths"]
-      t1["covering-sieve"] -->|"RestCatalog client"| rc["RestCatalog"]
-      t2["source_scan / preflight / ui_iceberg"] -->|"raw sqlite3 read of iceberg_tables"| db[("catalog.db")]
-    end
-    subgraph target["target — one seam"]
-      a1["all tools"] -->|"LoadTable"| seam["catalog seam<br/>(client → pp-catalogd → SqlCatalog)"]
-      seam --> lm[("LMDB")]
-    end
-```
-
-**Other DRY hotspots (shared headers).** Arrow thread-pool setup (≈4 mains),
-`MakeCatalog` + `RestOptions` boilerplate (≈2), and progress bar / monitor (≈2–3)
-are candidates for shared headers. Confirm the Arrow `RegisterAll` once-guard is
-present and consistent across every entry point that opens Iceberg I/O
-(`pp_iceberg_rest`, `source_scan`, `ui_iceberg`, `rewriter/{preflight,rewrite}`
-each reference it — verify none double-register). `source_scan` and `writer` are
-already clean seams. Fold `sieve_triage` into `covering_sieve`.
+**Other DRY hotspots (shared headers).** Arrow thread-pool setup (several mains),
+`MakeCatalog` boilerplate, and progress bar / monitor are candidates for shared
+headers. Confirm the Arrow `RegisterAll` once-guard is present and consistent
+across every entry point that opens Iceberg I/O (`pp_iceberg_rest`,
+`source_scan`, the `query/` + `tui/` mains — verify none double-register).
+`source_scan` and `writer` are already clean seams. Fold `sieve_triage` into
+`covering_sieve`.
 
 ## 12. Native tooling inventory
 
@@ -648,12 +644,19 @@ already clean seams. Fold `sieve_triage` into `covering_sieve`.
   source fields (`p_bucket_version`, `p_bucket`) from the physical schema. The
   `BucketParquetWriter` "refuse to overwrite" check needs care in MT runs.
 - `native/src/source_scan.cc`: delete-aware streaming reader; `OpenMetadata`
-  with `(shard_index, shard_count)` sharding. **Reads `iceberg_tables` via raw
-  `sqlite3_open` — Phase-3 re-point target.**
-- `native/src/rewriter/{rewrite,preflight}.cc`: in-place stream-and-rewrite path;
-  `preflight.cc` is one of the three raw-`sqlite3_open` readers (§11.4).
-- `drop_bucket_cols_main.cc` / `backfill_prime_rank_main.cc`: **removed** in
-  `9e6d8ad` (§11.2); git history only.
+  with `(shard_index, shard_count)` sharding. Metadata now resolves through the
+  local catalog (raw SQLite stripped, §11.4).
+- `native/src/query/`: `query_service.{cc}` (point lookup + k-scan over the LMDB
+  catalog seam) + `lua_query_module.cc` (embedded-Lua `query` module: number
+  theory + `pget`/`kget`) + smokes. The reader query layer the TUI runs on.
+- `native/src/tui/`: `tui_main.cc` (notcurses workbench on `QueryService`) +
+  `lua_presets.cc` (load/validate/serialize embedded-Lua query presets). Replaces
+  the deleted `tui_frontend.c` / `ui_iceberg.cc`.
+- `rewriter/{rewrite,preflight}.cc`, `ui_iceberg.cc`, `tui_frontend.c`,
+  `drop_bucket_cols_main.cc`, `backfill_prime_rank_main.cc`: **all removed**; git
+  history only. (`drop_bucket_cols`'s `MakeDataFile` partition-value pattern is
+  the reference for omitting identity-partition columns from a committed
+  `DataFile` if a future tool needs it.)
 - `native/src/mersenne_sidecar.cc` → `mersenne-sidecar`: builds
   `mersenne_reference.parquet` (factorization + primitive factors of
   $M_m = 2^m-1$) for $\mathrm{ord}_s(2)$ lookup.
