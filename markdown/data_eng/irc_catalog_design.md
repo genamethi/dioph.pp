@@ -139,9 +139,10 @@ iceberg-cpp serde where the direction exists; hand-write the inverse with vendor
 no tool calls `catalog->UpdateTable` directly — `FastAppend`/`RowDelta` commits
 route through the IRC `updateTable` endpoint.
 
-> Note: snapshot-advancing native→IRC commits depend on the vendored
-> `assert-ref-snapshot-id` `ref`-field patch (`native/vendor/PATCHES.md` §4).
-> Re-apply on any re-vendor.
+> Note: snapshot-advancing native→IRC commits need the distinct `ref`
+> requirement field for `assert-ref-snapshot-id`. This is **upstream as of
+> iceberg-cpp v0.3.0** — the former local patch is retired (HANDOFF §9 is the
+> source of truth).
 
 **Acceptance:** point the unchanged RestCatalog client (`MakeCatalog` with
 `rest_uri=http://localhost:PORT`) at `pp-catalogd` and run `PublishTable`
@@ -153,6 +154,74 @@ end-to-end (createTable + FastAppend commit + LoadTable).
 (`LocalIO`, `EnsureNamespace`, `PublishTable`, `LatestMetadataJson`) work against
 any `iceberg::Catalog`. We add a `MakeLocalCatalog` factory that builds
 `SqlCatalog(LmdbStore)` for in-process use / the server's engine.
+
+## Write & commit model
+
+The catalog is **single-writer by design.** Exactly one `generate` may write at a
+time; this is enforced with a warehouse-level write lock acquired **at startup,
+before `pp_init` and before any `pp_process_rank_batch`** (the hot kernel) so a
+rejected second writer costs ~nothing. Bucketing (`p_bucket_version` / `p_bucket`)
+is an **organizational/metadata axis for reads & analysis**, *not* a
+write-parallelism scheme — concurrent or multi-bucket writing is unsupported and
+fails fast. Readers are unaffected (LMDB is multi-reader MVCC; parquet and
+`metadata.json` are immutable once written).
+
+**Commit ordering — LMDB is last.** A commit writes parquet → manifests →
+`metadata.json` to the filesystem **in place first**, then performs the LMDB
+`UpdateTableMetadataLocation` CAS **last** (verified in `sql_catalog.cc:405-409`
+for create, `:454-466` for commit). Nothing references the new files until that
+pointer swap, so the swap *is* the publish. LMDB is the **head ref** (git
+analogy): one mutable pointer per table to the current `metadata.json`; the
+snapshot history lives in the metadata.json chain, not LMDB. On commit the CAS
+checks exactly one thing — "is the head still where I read it" — which under
+single-writer always holds; a `CAS→0` therefore signals a bug / lock bypass (hard
+error), **not** a race to retry. No CAS-retry loops, no multi-process plumbing.
+
+**Cadence.** Default is **commit-at-end** (a resume run continues from the
+committed `primes` frontier, then commits once generation completes). Periodic
+checkpoint commits are an optional crash-resilience add-on — each checkpoint is a
+snapshot and thus a resume point. `--temp` is the only ephemeral mode: writes
+`data/tmp/<run-id>`, starts from p=3/5, never commits, cleans up after.
+
+**Two-table atomicity (the one real subtlety).** `generate` commits both `primes`
+and `partitions`; resume reads the `primes` frontier, so a crash *between* the two
+commits could resume past a hole. Resolve by the IRC `commitTransaction`
+multi-table atomic endpoint (a point in favor of `pp-catalogd`), or — without the
+server — by **ordering**: commit `partitions` first, then `primes`, so "primes
+present ⇒ partitions present" always holds (a crash leaves only harmless,
+re-derivable orphan partitions). Ordered is the recommended no-server fallback.
+
+### Commit-contract interface
+
+The seam shared by `generate`, the sieve, and the server's engine. At the HTTP
+boundary it is the IRC contract; in-process it is the `iceberg::Catalog` API.
+
+- **IRC contract (server boundary).** A commit is one verb:
+  `POST /v1/{prefix}/namespaces/{ns}/tables/{table}` → `updateTable` with
+  `CommitTableRequest { identifier, requirements[], updates[] }`, returning
+  `CommitTableResponse { metadata-location, metadata }`. `requirements` are
+  assertions validated against the current `TableMetadata` (`assert-create`,
+  `assert-table-uuid`, `assert-ref-snapshot-id`, `assert-current-schema-id`,
+  `assert-last-assigned-{field,partition}-id`,
+  `assert-default-{spec,sort-order}-id`); `updates` are `TableUpdate` actions
+  (`add-snapshot`, `set-snapshot-ref`, …). Multi-table atomic commits use
+  `POST /v1/{prefix}/transactions/commit`.
+- **Engine does the work.** `SqlCatalog` loads current metadata, validates
+  requirements, applies updates, writes the new `metadata.json`, and performs the
+  store CAS — a layered flow: semantic requirement checks at the metadata layer,
+  the narrow head-pointer CAS at the storage layer. The server is a thin
+  JSON↔Catalog adapter; tools never touch LMDB directly.
+- **In-process realization (DRY endpoint — design intent).** `FastAppend` /
+  `RowDelta` already express the `add-snapshot` update; the minimal `Catalog`
+  surface the codebase uses is `NamespaceExists`, `CreateNamespace`, `LoadTable`,
+  `CreateTable`, `DropTable`, `RegisterTable` + that commit path. Fold the
+  duplicated create-or-load + FastAppend + cleanup into one reusable
+  `CommitFiles(catalog, table, schema, spec, files)` (a refactor of `PublishTable`,
+  `pp_iceberg_rest.cc:139`) fed by a single `{schema, spec}` provider so the
+  partition spec the writer uses (`writer.cc:56`) and the one `CreateTable` records
+  cannot drift. `generate` should accumulate the in-memory `DataFile`s the writer
+  already builds (`writer.cc:362`, `WrittenFile.data_file`) and call this helper —
+  retiring the dead `files.jsonl` text bridge.
 
 ## Source consolidation (DRY) — woven into the cutover
 
@@ -247,7 +316,10 @@ Fold `sieve_triage` into `covering_sieve`.
    commit round-trip against the iceberg-cpp client early.
 2. **Raw-SQLite reader migration** (Phase 3) — must land with the catalog cutover or
    scan/TUI tools break.
-3. **Commit depends on the vendored `ref`-field patch** — re-apply on re-vendor.
+3. **Two-table atomicity** — `generate` commits `primes` + `partitions`; resume
+   reads the `primes` frontier. Use `commitTransaction` or commit `partitions`
+   before `primes` so a crash never leaves a resumable hole (see Write & commit
+   model).
 4. **Derivative-data access pattern** — server endpoints vs. shared read env — TBD.
 
 ## Verification
