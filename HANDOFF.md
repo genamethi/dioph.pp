@@ -1,6 +1,6 @@
 # Project Handoff: Prime Power Partition Obstruction Analysis
 
-**Branch:** `tui-query` (was `pure-local`) · **Date:** 2026-06-08; build/provisioning + Phase 2/3 sections refreshed 2026-06-25 (de-Hive cleanup landed; `pp-catalogd` IRC server built + verified)
+**Branch:** `tui-query` (was `pure-local`) · **Date:** 2026-06-08; build/provisioning + Phase 2/3 sections refreshed 2026-06-25 (de-Hive cleanup landed; `pp-catalogd` IRC server built + verified); `generate` commit re-targeted onto `pp-catalogd` via the new `CommitFiles` seam 2026-06-26
 **Big shift:** Hive / MR3 / Kubernetes and the Python layer are
 being **removed**. The query/MV engine moves to native C++ + **igraph**; the
 catalog of record moves to a **native local Iceberg REST Catalog (IRC) backed by
@@ -568,9 +568,29 @@ flowchart TD
      client appends `/v1/...` to the base URI, so `rest_uri` must have **no**
      context-path suffix; and `format-version` is a **reserved** property the
      engine rejects in the user properties map.)
-   - **Remaining (next iteration):** re-target the sieve `--clone-sieve` /
-     RowDelta commits and `generate` onto `pp-catalogd` (they previously ran
-     against the HMS servlet); fold in the `CommitFiles` helper.
+   - **`generate` re-target — DONE 2026-06-26.** `generate` now publishes its
+     written `DataFile`s through the new **`CommitFiles`** seam
+     (`pp_iceberg_rest.{h,cc}`: ensure-namespace → **load-or-create** table →
+     FastAppend → refresh; `PublishTable`'s fresh-create branch delegates to
+     it). At end-of-run (unless `--temp`) it commits **partitions then primes**
+     (partitions-before-primes keeps the resume frontier hole-free, so the
+     multi-table `transactions/commit` route is **not** needed yet). New
+     `--rest-uri URL` flag (+ C-ABI `rest_uri`): set it → commit routes through a
+     `pp-catalogd` RestCatalog client; omit → in-process `MakeLocalCatalog`. Both
+     funnel through the same `CommitFiles`, so the snapshot path is identical.
+     Verified by **`primeparts-generate-smoke`** (`src/generate_smoke.cc`, now in
+     `make smoke`): forks `pp-catalogd`, execs the real `generate` binary twice
+     over REST, asserts clean snapshots (1000 primes / 1934 partitions) and the
+     **load-and-append resume** (2nd run → 2000 records / 2 data files, not a
+     recreate).
+   - **Remaining (next iteration):** re-target the **sieve** `--clone-sieve` /
+     RowDelta commits onto `pp-catalogd` (still default the dead
+     `192.168.1.202:9090` `kDefaultRestUri` at `covering_sieve_main.cc:77`, though
+     it already uses `MakeLocalCatalog` — vestigial, delete with the re-target);
+     commit `funbuns.boundaries` through the catalog on `--bucket-is-new` (today
+     `generate` only writes the JSONL sidecar boundary row); add the multi-table
+     `POST /v1/{prefix}/transactions/commit` route if true two-table atomicity is
+     wanted over partitions-before-primes.
 3. **Phase 3 — consolidate + de-Hive** (the source reorg; detail in §11).
    **DONE as of 2026-06-25.** The source-tree reorg is complete, `make all` is
    green, `make smoke` passes, and the raw-`sqlite3_open` readers were
@@ -589,15 +609,16 @@ flowchart TD
    **igraph** implicit-graph read paths for fast number-theoretic reads (the MV
    replacement). Sketch only so far.
 
-**Re-target (Phase 2 follow-up, partly answered):** the sieve's position-delete
-MOR commits and `--clone-sieve` ran against the HMS REST servlet; they must
-re-target the local catalog. The core question — *does the local IRC server honor
-native CreateTable + FastAppend the same way?* — is **answered YES** by
-`primeparts-catalogd-smoke` (createTable + FastAppend commit + reload-scan all
-pass against `pp-catalogd`). RowDelta routes through the same `updateTable`
-endpoint as FastAppend, so it should follow; the remaining work is wiring
-`--clone-sieve`/the sieve/`generate` to point at `pp-catalogd` (or in-process
-`MakeLocalCatalog`) instead of the dead `192.168.1.202:9090`.
+**Re-target (Phase 2 follow-up):** the sieve's position-delete MOR commits and
+`--clone-sieve` ran against the HMS REST servlet; they must re-target the local
+catalog. The core question — *does the local IRC server honor native CreateTable
++ FastAppend the same way?* — is **answered YES** by `primeparts-catalogd-smoke`
+and now **`primeparts-generate-smoke`** (the real `generate` binary commits
+partitions + primes through `pp-catalogd` over REST, with resume append). RowDelta
+routes through the same `updateTable` endpoint as FastAppend, so the **sieve**
+re-target should follow the same `CommitFiles`/RestCatalog pattern `generate`
+now uses; that wiring (and deleting the dead `192.168.1.202:9090` default at
+`covering_sieve_main.cc:77`) is the remaining Phase-2 work.
 
 ---
 
@@ -686,8 +707,10 @@ fetched into the prefix by `native/configure`.
 - Minimal `Catalog` surface the codebase actually uses: `NamespaceExists`,
   `CreateNamespace`, `LoadTable`, `CreateTable`, `DropTable`, `RegisterTable`, plus
   the commit path (`NewFastAppend` / `RowDelta`).
-- **Deferred:** the `CommitFiles(catalog, table, schema, spec, files)` seam
-  (refactor of `PublishTable`) — folded into the Phase-2 `pp-catalogd` build.
+- **DONE 2026-06-26:** the `CommitFiles(catalog, warehouse, table, schema, spec,
+  files)` seam — extracted from `PublishTable`'s create+append branch but with
+  **load-or-create** semantics (incremental, resume-safe append). `generate` is
+  its first consumer; the sieve re-target is next.
 
 **The raw-SQLite reader coupling — RESOLVED (2026-06-25).** Three readers used to
 open `iceberg_tables` **directly via `sqlite3_open`** (triplicated lookup),
@@ -741,12 +764,12 @@ primitive_factors_main.cc have genuinely divergent designs — deferred); fold
   `markdown/math/modular-filter-idea.md`, `modular_filter_more_ideas.md`).
 - `native/src/catalog/`:
   - `pp_lmdb_store.{h,cc}` (**new, §6.2**) + `pp_lmdb_smoke.cc` (`make smoke`).
-  - `pp_iceberg_rest.{h,cc}`: IRC/RestCatalog client — `MakeCatalog`,
-    `EnsureNamespace`, `PublishTable`, `LatestMetadataJson`, `LocalIO`. The
-    IRC-mains consolidation is effectively done: `coverings/covering_sieve_main.cc`
-    now `#include`s this lib, and the two mains that copied the logic
-    (backfill, drop_bucket) were removed (§11.2). Phase-3 work left here is the
-    `MakeLocalCatalog` factory + dropping the Hive comments (§11.4).
+  - `pp_iceberg_rest.{h,cc}`: catalog construction + commit helpers —
+    `MakeLocalCatalog` (SqlCatalog over LMDB, the catalog of record),
+    `MakeCatalog` (RestCatalog/IRC client → `pp-catalogd`), `EnsureNamespace`,
+    `PublishTable`, **`CommitFiles`** (incremental load-or-create + FastAppend,
+    consumed by `generate`), `LatestMetadataJson`, `LocalIO`. The IRC-mains
+    consolidation is done and the Phase-3 factory/Hive-comment cleanup landed.
   - `pp_row_delta.{h,cc}` (**§7**): committable position-delete `SnapshotUpdate`.
   - `pp_sieve_clone.{h,cc}`: `--clone-sieve` shallow clone.
   - `pp_catalog_main.cc` → `pp-catalog` (`--register`, `--clone-sieve`).

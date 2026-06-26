@@ -148,34 +148,61 @@ bool PublishTable(const std::shared_ptr<iceberg::Catalog>& catalog,
     return true;
   }
 
-  std::error_code ec;
-  fs::create_directories(md_dir, ec);
-  auto created = catalog->CreateTable(
-      ident, schema, spec, iceberg::SortOrder::Unsorted(),
-      (warehouse / "primeparts" / table_name).string(),
-      {{"write.parquet.compression-codec", "zstd"},
-       {"write.parquet.compression-level", "3"}});
-  if (!created.has_value()) {
-    *error = "CreateTable " + table_name + ": " + created.error().message;
-    return false;
+  // No on-disk metadata.json: fresh create + append. Shared with CommitFiles.
+  return CommitFiles(catalog, warehouse, table_name, schema, spec, files,
+                     metadata_location, error);
+}
+
+bool CommitFiles(const std::shared_ptr<iceberg::Catalog>& catalog,
+                 const fs::path& warehouse, const std::string& table_name,
+                 const std::shared_ptr<iceberg::Schema>& schema,
+                 const std::shared_ptr<iceberg::PartitionSpec>& spec,
+                 const std::vector<std::shared_ptr<iceberg::DataFile>>& files,
+                 std::string* metadata_location, std::string* error) {
+  iceberg::TableIdentifier ident{
+      .ns = iceberg::Namespace{{"primeparts"}}, .name = table_name};
+  if (!EnsureNamespace(catalog, ident.ns, error)) return false;
+
+  // Load the table if the catalog already knows it (incremental append onto
+  // its snapshot history); otherwise create it fresh. We probe with LoadTable
+  // rather than disk state so this works identically over a RestCatalog client.
+  std::shared_ptr<iceberg::Table> table;
+  auto loaded = catalog->LoadTable(ident);
+  if (loaded.has_value()) {
+    table = std::move(loaded.value());
+  } else {
+    // FileIO does not mkdir parents — pre-create the metadata dir.
+    std::error_code ec;
+    fs::create_directories(warehouse / "primeparts" / table_name / "metadata",
+                           ec);
+    auto created = catalog->CreateTable(
+        ident, schema, spec, iceberg::SortOrder::Unsorted(),
+        (warehouse / "primeparts" / table_name).string(),
+        {{"write.parquet.compression-codec", "zstd"},
+         {"write.parquet.compression-level", "3"}});
+    if (!created.has_value()) {
+      *error = "CreateTable " + table_name + ": " + created.error().message;
+      return false;
+    }
+    table = std::move(created.value());
   }
-  auto table = std::move(created.value());
+
   if (!files.empty()) {
     auto app_r = table->NewFastAppend();
     if (!app_r.has_value()) {
-      *error = "NewFastAppend: " + app_r.error().message;
+      *error = "NewFastAppend " + table_name + ": " + app_r.error().message;
       return false;
     }
     auto app = std::move(app_r.value());
     for (const auto& f : files) app->AppendFile(f);
     auto cs = app->Commit();
     if (!cs.has_value()) {
-      *error = "Commit: " + cs.error().message;
+      *error = "Commit " + table_name + ": " + cs.error().message;
       return false;
     }
     auto rs = table->Refresh();
     if (!rs.has_value()) {
-      *error = "Refresh: " + rs.error().message;
+      *error = "Refresh " + table_name + ": " + rs.error().message;
       return false;
     }
   }

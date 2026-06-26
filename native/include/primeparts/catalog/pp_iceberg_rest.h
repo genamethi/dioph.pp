@@ -92,4 +92,22 @@ bool PublishTable(const std::shared_ptr<iceberg::Catalog>& catalog,
                   const std::vector<std::shared_ptr<iceberg::DataFile>>& files,
                   std::string* metadata_location, std::string* error);
 
+/// Commit a batch of already-written `DataFile`s to `primeparts.<table_name>`
+/// as a single FastAppend snapshot. Unlike PublishTable (which drops+registers
+/// an on-disk metadata.json), this is the incremental-append seam: it ensures
+/// the namespace, **loads the table if the catalog already knows it, else
+/// creates it**, then appends `files` in one snapshot and refreshes. Resume-safe
+/// — repeated `generate` runs append onto the existing snapshot history.
+///
+/// Works against any `iceberg::Catalog`: in-process `MakeLocalCatalog` or a
+/// `MakeCatalog` RestCatalog client pointed at `pp-catalogd` (the commit then
+/// routes through the server's updateTable endpoint). On success sets
+/// `*metadata_location`. A no-op (`files` empty) still ensures the table exists.
+bool CommitFiles(const std::shared_ptr<iceberg::Catalog>& catalog,
+                 const fs::path& warehouse, const std::string& table_name,
+                 const std::shared_ptr<iceberg::Schema>& schema,
+                 const std::shared_ptr<iceberg::PartitionSpec>& spec,
+                 const std::vector<std::shared_ptr<iceberg::DataFile>>& files,
+                 std::string* metadata_location, std::string* error);
+
 }  // namespace primeparts::catalog

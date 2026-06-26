@@ -5,6 +5,7 @@
 // JSONL manifest format the rewriter produces, so the commit step
 // doesn't care whether bytes came from FLINT or from a rewrite pass.
 
+#include "primeparts/catalog/pp_iceberg_rest.h"
 #include "primeparts/core.h"
 #include "primeparts/generate.h"
 #include "primeparts/writer.h"
@@ -49,6 +50,7 @@ namespace fs = std::filesystem;
 using primeparts::BucketDataDir;
 using primeparts::BucketParquetWriter;
 using primeparts::NextFileSeq;
+using primeparts::BucketPartitionSpec;
 using primeparts::PartitionsSchema;
 using primeparts::PrimesSchema;
 using primeparts::WriterConfig;
@@ -96,6 +98,12 @@ struct Options {
   bool temp = false;
   fs::path warehouse;
   fs::path manifest;
+  // Catalog target for the end-of-run commit. Non-empty => commit through a
+  // pp-catalogd RestCatalog client at this base URI (e.g. http://127.0.0.1:8181,
+  // no /v1 suffix — the client appends the IRC routes); empty => commit
+  // in-process via MakeLocalCatalog. Both funnel through CommitFiles, so the
+  // snapshot path is identical either way.
+  std::string rest_uri;
 };
 
 struct BatchHolder {
@@ -257,6 +265,10 @@ void usage(FILE* stream) {
       "Options:\n"
       "  --temp                    Create $FUNBUNS_DATA_DIR/tmp/iceberg_temp_<ts>/warehouse\n"
       "                            (FUNBUNS_DATA_DIR default: /media/extssd/research/dioph.pp/data)\n"
+      "  --rest-uri URL            Commit through a pp-catalogd RestCatalog\n"
+      "                            client at URL, a bare base (e.g.\n"
+      "                            http://127.0.0.1:8181, no /v1 suffix);\n"
+      "                            default commits in-process\n"
       "  --warehouse PATH          Warehouse root to write under\n"
       "  --manifest PATH           JSONL file list to write\n"
       "  --chunk-primes N          Materialization chunk size (default: 500000)\n"
@@ -625,6 +637,7 @@ bool parse_args(int argc, char** argv, Options* options) {
       {"warehouse", required_argument, nullptr, 'w'},
       {"manifest", required_argument, nullptr, 'm'},
       {"temp", no_argument, nullptr, 1004},
+      {"rest-uri", required_argument, nullptr, 1005},
       {"help", no_argument, nullptr, 'h'},
       {nullptr, 0, nullptr, 0},
   };
@@ -658,6 +671,7 @@ bool parse_args(int argc, char** argv, Options* options) {
       case 'w': options->warehouse = optarg; break;
       case 'm': options->manifest = optarg; break;
       case 1004: options->temp = true; break;
+      case 1005: options->rest_uri = optarg; break;
       case 'h': usage(stdout); std::exit(0);
       default: return false;
     }
@@ -738,6 +752,12 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
     auto p_schema = PrimesSchema();
     auto d_schema = PartitionsSchema();
 
+    // DataFiles accumulated across all groups for the end-of-run catalog
+    // commit. Each WrittenFile already carries a built iceberg::DataFile;
+    // we FastAppend them in one snapshot per table after the run.
+    std::vector<std::shared_ptr<iceberg::DataFile>> primes_data_files;
+    std::vector<std::shared_ptr<iceberg::DataFile>> partitions_data_files;
+
     int64_t total_chunks =
         (options.count + options.chunk_primes - 1) / options.chunk_primes;
     int64_t group_width = options.threads > 0 ? options.threads : 1;
@@ -792,6 +812,7 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
         append_manifest_file(manifest, wf);
         files_written++;
         bytes_written += wf.bytes;
+        if (wf.data_file) primes_data_files.push_back(wf.data_file);
       }
       primes_file_seq += static_cast<int32_t>(primes_files.size());
 
@@ -811,6 +832,7 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
           append_manifest_file(manifest, wf);
           files_written++;
           bytes_written += wf.bytes;
+          if (wf.data_file) partitions_data_files.push_back(wf.data_file);
         }
         partitions_file_seq += static_cast<int32_t>(partitions_files.size());
       }
@@ -840,6 +862,63 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
     progress.finish();
 
     manifest.close();
+
+    // End-of-run commit. --temp is the ephemeral mode (files only, no
+    // catalog publish). Otherwise publish both tables as one FastAppend
+    // snapshot each, partitions BEFORE primes so a resume always sees a
+    // hole-free primes frontier (HANDOFF §5.2 write model). Both commits go
+    // through CommitFiles — over a pp-catalogd RestCatalog client when
+    // --rest-uri is set, else in-process MakeLocalCatalog.
+    if (!options.temp) {
+      std::shared_ptr<iceberg::Catalog> catalog;
+      if (!options.rest_uri.empty()) {
+        primeparts::catalog::RestOptions ropts;
+        ropts.rest_uri = options.rest_uri;
+        std::string mode;
+        catalog = primeparts::catalog::MakeCatalog(ropts, options.warehouse,
+                                                   &mode, &error);
+      } else {
+        catalog = primeparts::catalog::MakeLocalCatalog(options.warehouse,
+                                                        &error);
+      }
+      if (!catalog) {
+        set_last_error("commit: open catalog: " + error);
+        log_line(callbacks, "%s", g_last_error.c_str());
+        pp_shutdown();
+        return 1;
+      }
+      auto p_spec = BucketPartitionSpec(*p_schema, &error);
+      auto d_spec = BucketPartitionSpec(*d_schema, &error);
+      if (!p_spec || !d_spec) {
+        set_last_error("commit: build partition spec: " + error);
+        log_line(callbacks, "%s", g_last_error.c_str());
+        pp_shutdown();
+        return 1;
+      }
+      std::string meta_loc;
+      if (!partitions_data_files.empty() &&
+          !primeparts::catalog::CommitFiles(
+              catalog, options.warehouse, "partitions", d_schema, d_spec,
+              partitions_data_files, &meta_loc, &error)) {
+        set_last_error("commit partitions: " + error);
+        log_line(callbacks, "%s", g_last_error.c_str());
+        pp_shutdown();
+        return 1;
+      }
+      if (!primeparts::catalog::CommitFiles(
+              catalog, options.warehouse, "primes", p_schema, p_spec,
+              primes_data_files, &meta_loc, &error)) {
+        set_last_error("commit primes: " + error);
+        log_line(callbacks, "%s", g_last_error.c_str());
+        pp_shutdown();
+        return 1;
+      }
+      log_line(callbacks,
+               "committed | partitions_files=%zu | primes_files=%zu | primes=%s",
+               partitions_data_files.size(), primes_data_files.size(),
+               meta_loc.c_str());
+    }
+
     auto run_end = std::chrono::steady_clock::now();
     double elapsed_s =
         std::chrono::duration<double>(run_end - run_start).count();
@@ -893,6 +972,7 @@ int pp_gen_run(const pp_gen_options* options,
   internal.temp = options->temp != 0;
   if (options->warehouse) internal.warehouse = options->warehouse;
   if (options->manifest) internal.manifest = options->manifest;
+  if (options->rest_uri) internal.rest_uri = options->rest_uri;
   if (internal.start_idx <= 0 || internal.count < 0 || internal.chunk_primes <= 0 || internal.threads < 0) {
     set_last_error("invalid pp_gen_options values");
     return 1;

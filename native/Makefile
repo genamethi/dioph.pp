@@ -104,7 +104,7 @@ $(BENCH_CORE_OBJ): src/bench.c include/primeparts/core.h | $(BUILD_DIR)
 $(BENCH_MATERIALIZE_OBJ): src/materialize_bench.c include/primeparts/core.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
-$(GENERATE_OBJ): src/generate.cc include/primeparts/core.h include/primeparts/writer.h | $(BUILD_DIR)
+$(GENERATE_OBJ): src/generate.cc include/primeparts/core.h include/primeparts/writer.h include/primeparts/generate.h include/primeparts/catalog/pp_iceberg_rest.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(WRITER_OBJ): src/writer.cc include/primeparts/writer.h | $(BUILD_DIR)
@@ -188,6 +188,12 @@ $(PP_CATALOGD_MAIN_OBJ): src/catalog/pp_catalogd_main.cc include/primeparts/cata
 $(BUILD_DIR)/pp_catalogd_smoke.o: src/catalog/pp_catalogd_smoke.cc include/primeparts/catalog/pp_catalogd.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/writer.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
+# generate-commit smoke: pure RestCatalog client that forks the server and
+# execs the real primeparts-generate binary (no generate.o link — it has its
+# own main). Same client compile recipe as pp_catalogd_smoke.
+$(BUILD_DIR)/generate_smoke.o: src/generate_smoke.cc include/primeparts/catalog/pp_catalogd.h include/primeparts/catalog/pp_iceberg_rest.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
 $(TEST_OBJ): tests/test_core.c include/primeparts/core.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
@@ -209,8 +215,12 @@ $(BUILD_DIR)/primeparts-bench-core: $(CORE_OBJ) $(BENCH_CORE_OBJ)
 $(BUILD_DIR)/primeparts-bench-materialize: $(CORE_OBJ) $(BENCH_MATERIALIZE_OBJ)
 	$(CC) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) -pthread -o $@
 
-$(BUILD_DIR)/primeparts-generate: $(CORE_OBJ) $(GENERATE_OBJ) $(WRITER_OBJ)
-	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(ICEBERG_LDLIBS) -lparquet -larrow -pthread -o $@
+# generate now publishes its written DataFiles through CommitFiles (in-process
+# MakeLocalCatalog or a pp-catalogd RestCatalog client), so it links the catalog
+# engine like pp-catalog: SQL_CATALOG_LDLIBS before ICEBERG_LDLIBS, liblmdb.a
+# backs pp_lmdb_store.o.
+$(BUILD_DIR)/primeparts-generate: $(CORE_OBJ) $(GENERATE_OBJ) $(WRITER_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
+	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
 
 # pp_iceberg_rest now provides MakeLocalCatalog = SqlCatalog(LmdbStore), so every
 # consumer links the SQL-catalog engine + LMDB store. SQL_CATALOG_LDLIBS must
@@ -229,6 +239,11 @@ $(BUILD_DIR)/primeparts-catalogd: $(PP_CATALOGD_MAIN_OBJ) $(PP_CATALOGD_OBJ) $(P
 # (real parquet data file) + the server object.
 $(BUILD_DIR)/primeparts-catalogd-smoke: $(BUILD_DIR)/pp_catalogd_smoke.o $(PP_CATALOGD_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(WRITER_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
+
+# generate-commit smoke links the client side only (forks server + execs the
+# generate binary). Order-only dep on primeparts-generate so it exists to exec.
+$(BUILD_DIR)/primeparts-generate-smoke: $(BUILD_DIR)/generate_smoke.o $(PP_CATALOGD_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB) | $(BUILD_DIR)/primeparts-generate
+	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $(BUILD_DIR)/generate_smoke.o $(PP_CATALOGD_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB) $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
 
 # libiceberg_sql_catalog.a must precede the iceberg core archives so its
 # references resolve in static link order; liblmdb.a backs pp_lmdb_store.o.
@@ -292,10 +307,12 @@ test: $(BUILD_DIR)/test_core \
 # scripts/lua/queries.lua.
 smoke: $(BUILD_DIR)/primeparts-lmdb-smoke \
        $(BUILD_DIR)/primeparts-catalogd-smoke \
+       $(BUILD_DIR)/primeparts-generate-smoke \
        $(BUILD_DIR)/primeparts-lua-presets-smoke \
        $(BUILD_DIR)/primeparts-lua-query-smoke
 	$(BUILD_DIR)/primeparts-lmdb-smoke
 	$(BUILD_DIR)/primeparts-catalogd-smoke
+	$(BUILD_DIR)/primeparts-generate-smoke
 	cd .. && native/$(BUILD_DIR)/primeparts-lua-presets-smoke
 	cd .. && native/$(BUILD_DIR)/primeparts-lua-query-smoke
 

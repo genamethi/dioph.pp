@@ -37,6 +37,10 @@ typedef struct {
   int temp;
   const char* warehouse;
   const char* manifest;
+  /* Catalog target for the end-of-run commit. Non-NULL/non-empty => commit
+   * through a pp-catalogd RestCatalog client at this URI; NULL/empty =>
+   * commit in-process via MakeLocalCatalog. */
+  const char* rest_uri;
 } pp_gen_options;
 
 typedef struct {
