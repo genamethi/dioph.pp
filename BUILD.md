@@ -69,6 +69,14 @@ Useful flags: `--prefix DIR` (default `$HOME/.local`), `--jobs N`, `--force`
 overridable via env (e.g. `FLINT_VERSION=…`, `ARROW_REF=…`); minimums are the
 policy (Arrow ≥25, iceberg-cpp ≥0.3.x, Lua ≥5.5,<5.6, the rest recent-minor).
 
+**System prefixes & sudo.** The default `$HOME/.local` needs no root. If you
+point `--prefix` at a location you can't write (e.g. `/usr/local`), `configure`
+detects this, **builds everything as your user**, and runs only the *install*
+step under `sudo` — prompting once up front and keeping the credential warm
+through the build. Compilation never runs as root. (Already root, or a writable
+prefix → no sudo at all.) Scratch build trees always live in
+`${XDG_CACHE_HOME:-$HOME/.cache}/primeparts-native`, never under the prefix.
+
 Drop `--with-arrow` if you only need the number-theory binaries
 (`primeparts-bench-core`, `test_core`, …) — they don't touch Arrow and build
 in seconds.

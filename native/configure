@@ -4,11 +4,17 @@
 # C/C++ dependencies, materializes the on-demand Arrow + iceberg-cpp submodules,
 # and writes native/config.mk for the Makefile to include.
 #
-# No sudo, no required system package manager. Targets Arch and Debian with gcc.
+# Default prefix ($HOME/.local) needs no sudo. If --prefix points somewhere not
+# user-writable (e.g. /usr/local), configure builds as the user but runs the
+# *install* step under sudo, prompting once up front. No required system package
+# manager. Targets Arch and Debian with gcc.
 # Version policy: minimums, prefer latest, almost no caps (see native/vendor/README.md).
 #
 #   ./native/configure [--prefix DIR] [--with-arrow] [--build-missing]
 #                      [--jobs N] [--force] [--help]
+#
+#   --prefix DIR   install dependencies here (default $HOME/.local). A non-
+#                  writable DIR triggers sudo for installs (build stays user).
 #
 # Stage A (always): toolchain probe + prerequisite detection (gmp, flint, pari,
 #   primesieve, primecount, notcurses, lua>=5.5<5.6, libcurl/openssl/sqlite3).
@@ -71,8 +77,33 @@ while [ $# -gt 0 ]; do
 done
 case "$PREFIX" in /*) ;; *) PREFIX=$(CDPATH= cd -- "$(dirname -- "$PREFIX")" 2>/dev/null && pwd -P)/$(basename -- "$PREFIX") || PREFIX="$PWD/$PREFIX";; esac
 
-WORK="${WORK:-$PREFIX/src/primeparts}"   # scratch source/build trees (outside the repo)
-mkdir -p "$PREFIX/lib/pkgconfig" "$PREFIX/include" "$PREFIX/bin" "$WORK"
+# Scratch builds always live in a user-writable cache (never under a root-owned
+# prefix, and never in the repo) so compilation runs as the unprivileged user.
+WORK="${WORK:-${XDG_CACHE_HOME:-$HOME/.cache}/primeparts-native}"
+mkdir -p "$WORK"
+
+# --------------------------------------------------------------------------
+# Privilege: build as the user; only elevate the *install* step into a prefix
+# that isn't user-writable (e.g. --prefix /usr/local). SUDO prefixes the
+# install/mkdir-into-prefix commands; it's empty for a writable prefix.
+# --------------------------------------------------------------------------
+SUDO=""
+need_root_for() {  # true if $1 (or its nearest existing ancestor) is not writable
+  d=$1; while [ ! -e "$d" ]; do d=$(dirname -- "$d"); done; [ ! -w "$d" ]
+}
+if need_root_for "$PREFIX" && [ "$(id -u)" -ne 0 ]; then
+  command -v sudo >/dev/null 2>&1 || die "prefix '$PREFIX' needs root to install into, but sudo is not available (pick a writable --prefix, e.g. \$HOME/.local)"
+  SUDO="sudo"
+  warn "prefix '$PREFIX' is not user-writable — the install step will use sudo (builds still run as $(id -un))"
+  say "Authenticating sudo for installs into $PREFIX"
+  sudo -v || die "sudo authentication failed"
+  # Keep the sudo timestamp warm across the long build so installs don't re-prompt.
+  ( while true; do sleep 50; sudo -n true 2>/dev/null || exit; kill -0 "$$" 2>/dev/null || exit; done ) &
+  SUDO_KEEPALIVE_PID=$!
+  trap 'kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true' EXIT INT TERM
+fi
+
+$SUDO mkdir -p "$PREFIX/lib/pkgconfig" "$PREFIX/include" "$PREFIX/bin"
 PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PREFIX/lib64/pkgconfig:${PKG_CONFIG_PATH:-/usr/lib/pkgconfig:/usr/lib64/pkgconfig:/usr/share/pkgconfig}"
 export PKG_CONFIG_PATH
 PKG_CONFIG="${PKG_CONFIG:-pkg-config}"
@@ -126,13 +157,18 @@ fetch() { # fetch <url> <outfile>
   if command -v curl >/dev/null 2>&1; then curl -fsSL --retry 3 -o "$2.part" "$1"; else wget -qO "$2.part" "$1"; fi
   mv "$2.part" "$2"
 }
+# Write stdin to a file under PREFIX, elevating only if needed (handles $SUDO).
+prefix_write() { # prefix_write <dest-path-under-prefix>
+  tmp="$WORK/.pcgen.$$"; cat > "$tmp"
+  $SUDO mkdir -p "$(dirname -- "$1")"; $SUDO cp "$tmp" "$1"; rm -f "$tmp"
+}
 cmake_build() { # cmake_build <srcdir> [extra cmake args...]
   src=$1; shift
   cmake -S "$src" -B "$src/_bld" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX" \
         -DCMAKE_PREFIX_PATH="$PREFIX" -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" \
         -DBUILD_SHARED_LIBS=ON "$@" >/dev/null
-  cmake --build "$src/_bld" -j "$JOBS" >/dev/null
-  cmake --install "$src/_bld" >/dev/null
+  cmake --build "$src/_bld" -j "$JOBS" >/dev/null   # build as the user
+  $SUDO cmake --install "$src/_bld" >/dev/null       # elevate only the install
 }
 # Autotools recipes find PREFIX-built deps first, then fall back to system.
 ac_env() { CPPFLAGS="-I$PREFIX/include ${CPPFLAGS:-}"; LDFLAGS="-L$PREFIX/lib ${LDFLAGS:-}"; export CPPFLAGS LDFLAGS; }
@@ -172,7 +208,7 @@ ensure_gmp_pc() {
   have_pc gmp && return 0
   if [ -f /usr/include/gmp.h ] || [ -f "$PREFIX/include/gmp.h" ]; then
     v=$(awk -F'[ "]+' '/define __GNU_MP_VERSION /{a=$3} /define __GNU_MP_VERSION_MINOR /{b=$3} /define __GNU_MP_VERSION_PATCHLEVEL /{c=$3} END{print a"."b"."c}' /usr/include/gmp.h 2>/dev/null || echo "6.0.0")
-    cat > "$PREFIX/lib/pkgconfig/gmp.pc" <<EOF
+    prefix_write "$PREFIX/lib/pkgconfig/gmp.pc" <<EOF
 prefix=/usr
 Name: gmp
 Description: GNU Multiple Precision arithmetic library (synthesized by native/configure)
@@ -185,15 +221,15 @@ EOF
 
 # --- source build recipes (rootless, into PREFIX) ---
 b_gmp() { fetch "https://gmplib.org/download/gmp/gmp-$GMP_VERSION.tar.xz" "$WORK/gmp.tar.xz"; tar -C "$WORK" -xf "$WORK/gmp.tar.xz"
-  ( cd "$WORK/gmp-$GMP_VERSION" && ./configure --prefix="$PREFIX" --enable-cxx >/dev/null && make -j"$JOBS" >/dev/null && make install >/dev/null ); ensure_gmp_pc; }
+  ( cd "$WORK/gmp-$GMP_VERSION" && ./configure --prefix="$PREFIX" --enable-cxx >/dev/null && make -j"$JOBS" >/dev/null && $SUDO make install >/dev/null ); ensure_gmp_pc; }
 b_mpfr() { fetch "https://ftp.gnu.org/gnu/mpfr/mpfr-$MPFR_VERSION.tar.xz" "$WORK/mpfr.tar.xz"; tar -C "$WORK" -xf "$WORK/mpfr.tar.xz"
-  ( cd "$WORK/mpfr-$MPFR_VERSION" && ac_env && ./configure --prefix="$PREFIX" >/dev/null && make -j"$JOBS" >/dev/null && make install >/dev/null ); }
+  ( cd "$WORK/mpfr-$MPFR_VERSION" && ac_env && ./configure --prefix="$PREFIX" >/dev/null && make -j"$JOBS" >/dev/null && $SUDO make install >/dev/null ); }
 b_flint() { fetch "https://github.com/flintlib/flint/releases/download/v$FLINT_VERSION/flint-$FLINT_VERSION.tar.gz" "$WORK/flint.tar.gz"; tar -C "$WORK" -xf "$WORK/flint.tar.gz"
   # FLINT's CMake build is Windows-only; Linux uses the (bootstrapped) autotools
   # path. gmp/mpfr are found via CPPFLAGS/LDFLAGS (PREFIX first, then system).
-  ( cd "$WORK/flint-$FLINT_VERSION" && ac_env && ./configure --prefix="$PREFIX" CC="$CC" >/dev/null && make -j"$JOBS" >/dev/null && make install >/dev/null ); }
+  ( cd "$WORK/flint-$FLINT_VERSION" && ac_env && ./configure --prefix="$PREFIX" CC="$CC" >/dev/null && make -j"$JOBS" >/dev/null && $SUDO make install >/dev/null ); }
 b_pari() { fetch "https://pari.math.u-bordeaux.fr/pub/pari/unix/pari-$PARI_VERSION.tar.gz" "$WORK/pari.tar.gz"; tar -C "$WORK" -xf "$WORK/pari.tar.gz"
-  ( cd "$WORK/pari-$PARI_VERSION" && ac_env && ./Configure --prefix="$PREFIX" >/dev/null && make -j"$JOBS" gp >/dev/null && make install >/dev/null ); }
+  ( cd "$WORK/pari-$PARI_VERSION" && ac_env && ./Configure --prefix="$PREFIX" >/dev/null && make -j"$JOBS" gp >/dev/null && $SUDO make install >/dev/null ); }
 b_primesieve() { fetch "https://github.com/kimwalisch/primesieve/archive/refs/tags/v$PRIMESIEVE_VERSION.tar.gz" "$WORK/primesieve.tar.gz"; tar -C "$WORK" -xf "$WORK/primesieve.tar.gz"
   cmake_build "$WORK/primesieve-$PRIMESIEVE_VERSION"; }
 b_primecount() { fetch "https://github.com/kimwalisch/primecount/archive/refs/tags/v$PRIMECOUNT_VERSION.tar.gz" "$WORK/primecount.tar.gz"; tar -C "$WORK" -xf "$WORK/primecount.tar.gz"
@@ -201,12 +237,12 @@ b_primecount() { fetch "https://github.com/kimwalisch/primecount/archive/refs/ta
 b_notcurses() { fetch "https://github.com/dankamongmen/notcurses/archive/refs/tags/v$NOTCURSES_VERSION.tar.gz" "$WORK/notcurses.tar.gz"; tar -C "$WORK" -xf "$WORK/notcurses.tar.gz"
   cmake_build "$WORK/notcurses-$NOTCURSES_VERSION" -DUSE_MULTIMEDIA=none -DUSE_DOCTEST=off \
     -DBUILD_TESTING=off -DUSE_PANDOC=off -DUSE_DEFLATE=off; }
-b_nlohmann() { mkdir -p "$PREFIX/include/nlohmann"
-  fetch "https://github.com/nlohmann/json/releases/download/v$NLOHMANN_VERSION/json.hpp" "$PREFIX/include/nlohmann/json.hpp"; }
+b_nlohmann() { fetch "https://github.com/nlohmann/json/releases/download/v$NLOHMANN_VERSION/json.hpp" "$WORK/json.hpp"
+  $SUDO mkdir -p "$PREFIX/include/nlohmann"; $SUDO cp "$WORK/json.hpp" "$PREFIX/include/nlohmann/json.hpp"; }
 b_lua() { fetch "https://www.lua.org/ftp/lua-$LUA_VERSION.tar.gz" "$WORK/lua.tar.gz"; tar -C "$WORK" -xf "$WORK/lua.tar.gz"
-  ( cd "$WORK/lua-$LUA_VERSION" && make CC="$CC" MYCFLAGS=-fPIC -j"$JOBS" >/dev/null && make INSTALL_TOP="$PREFIX" install >/dev/null )
+  ( cd "$WORK/lua-$LUA_VERSION" && make CC="$CC" MYCFLAGS=-fPIC -j"$JOBS" >/dev/null && $SUDO make INSTALL_TOP="$PREFIX" install >/dev/null )
   mm=$(echo "$LUA_VERSION" | cut -d. -f1,2)
-  cat > "$PREFIX/lib/pkgconfig/lua.pc" <<EOF
+  prefix_write "$PREFIX/lib/pkgconfig/lua.pc" <<EOF
 prefix=$PREFIX
 Name: Lua
 Description: Lua language engine (built by native/configure)
@@ -214,7 +250,7 @@ Version: $LUA_VERSION
 Libs: -L$PREFIX/lib -llua -lm -ldl
 Cflags: -I$PREFIX/include
 EOF
-  cp -f "$PREFIX/lib/pkgconfig/lua.pc" "$PREFIX/lib/pkgconfig/lua$mm.pc" 2>/dev/null || true
+  $SUDO cp -f "$PREFIX/lib/pkgconfig/lua.pc" "$PREFIX/lib/pkgconfig/lua$mm.pc" 2>/dev/null || true
 }
 
 say "Prerequisites (Stage A)"
@@ -253,7 +289,7 @@ build_arrow() {
     -DARROW_FILESYSTEM=ON -DARROW_COMPUTE=ON -DARROW_JSON=ON \
     -DARROW_BUILD_TESTS=OFF -DARROW_DEPENDENCY_SOURCE=BUNDLED >/dev/null
   cmake --build "$REPO_ROOT/native/vendor/arrow/cpp/_bld" -j "$JOBS"
-  cmake --install "$REPO_ROOT/native/vendor/arrow/cpp/_bld" >/dev/null
+  $SUDO cmake --install "$REPO_ROOT/native/vendor/arrow/cpp/_bld" >/dev/null
 }
 
 build_iceberg() {
@@ -271,7 +307,7 @@ build_iceberg() {
     -DICEBERG_BUILD_STATIC=ON -DICEBERG_BUILD_SHARED=OFF -DICEBERG_BUILD_BUNDLE=ON \
     -DICEBERG_BUILD_REST=ON -DICEBERG_BUILD_SQL_CATALOG=ON -DICEBERG_BUILD_TESTS=OFF >/dev/null
   cmake --build "$REPO_ROOT/native/vendor/iceberg-cpp/_bld" -j "$JOBS"
-  cmake --install "$REPO_ROOT/native/vendor/iceberg-cpp/_bld" >/dev/null
+  $SUDO cmake --install "$REPO_ROOT/native/vendor/iceberg-cpp/_bld" >/dev/null
 }
 
 if [ "$WITH_ARROW" = 1 ]; then
