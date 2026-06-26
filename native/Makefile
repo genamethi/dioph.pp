@@ -183,6 +183,11 @@ $(PP_CATALOGD_OBJ): src/catalog/pp_catalogd.cc include/primeparts/catalog/pp_cat
 $(PP_CATALOGD_MAIN_OBJ): src/catalog/pp_catalogd_main.cc include/primeparts/catalog/pp_catalogd.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
+# The acceptance smoke is a pure client (RestCatalog) + writer; it forks the
+# server (PP_CATALOGD_OBJ) in-process, so no -Ivendor/iceberg-cpp/src here.
+$(BUILD_DIR)/pp_catalogd_smoke.o: src/catalog/pp_catalogd_smoke.cc include/primeparts/catalog/pp_catalogd.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/writer.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
 $(TEST_OBJ): tests/test_core.c include/primeparts/core.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
@@ -218,6 +223,12 @@ $(BUILD_DIR)/pp-catalog: $(PP_CATALOG_MAIN_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_SIEV
 # store); cpp-httplib is header-only (needs only -pthread).
 $(BUILD_DIR)/primeparts-catalogd: $(PP_CATALOGD_MAIN_OBJ) $(PP_CATALOGD_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
+
+# Client round-trip acceptance smoke: forks the server, drives it with the
+# RestCatalog client (createTable + FastAppend commit + scan). Links the writer
+# (real parquet data file) + the server object.
+$(BUILD_DIR)/primeparts-catalogd-smoke: $(BUILD_DIR)/pp_catalogd_smoke.o $(PP_CATALOGD_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(WRITER_OBJ) $(LMDB_LIB)
+	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
 
 # libiceberg_sql_catalog.a must precede the iceberg core archives so its
 # references resolve in static link order; liblmdb.a backs pp_lmdb_store.o.
@@ -280,9 +291,11 @@ test: $(BUILD_DIR)/test_core \
 # warehouse; lua-presets-smoke runs from the repo root so it finds
 # scripts/lua/queries.lua.
 smoke: $(BUILD_DIR)/primeparts-lmdb-smoke \
+       $(BUILD_DIR)/primeparts-catalogd-smoke \
        $(BUILD_DIR)/primeparts-lua-presets-smoke \
        $(BUILD_DIR)/primeparts-lua-query-smoke
 	$(BUILD_DIR)/primeparts-lmdb-smoke
+	$(BUILD_DIR)/primeparts-catalogd-smoke
 	cd .. && native/$(BUILD_DIR)/primeparts-lua-presets-smoke
 	cd .. && native/$(BUILD_DIR)/primeparts-lua-query-smoke
 

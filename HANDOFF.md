@@ -555,15 +555,20 @@ flowchart TD
      forward-compatible** — DV/Puffin specifics ride inside `add-snapshot`
      updates, which the element serde + engine handle with no change to this
      layer (the DV work itself is writer-side; see Phase 4 note below).
-   - **Verified:** `make all` green; live round-trip through the LMDB engine for
-     `GET /v1/config`, namespace create/list/exists/properties, and table 404 +
-     the IRC `{"error":{message,type,code}}` envelope.
-   - **Remaining (next iteration):** a client-side acceptance smoke — point the
-     iceberg-cpp `RestCatalog` client (`MakeCatalog`, `rest_uri=localhost:PORT`)
-     at `pp-catalogd` and run `PublishTable` e2e (createTable + FastAppend commit
-     + LoadTable); the create/commit serde paths are wired but not yet exercised
-     end-to-end. Then re-target the sieve `--clone-sieve` / RowDelta commits and
-     `generate` onto `pp-catalogd`.
+   - **Verified end-to-end** by `primeparts-catalogd-smoke`
+     (`native/src/catalog/pp_catalogd_smoke.cc`, now in `make smoke`): it forks
+     the server over a temp warehouse and drives it with the **unchanged
+     iceberg-cpp RestCatalog client** — `GET /v1/config` → createNamespace →
+     createTable → write a real parquet file → **FastAppend commit** (routes
+     through `updateTable`'s `{requirements, updates}`) → reload + scan (asserts
+     1 file / 3 records) → dropTable. This exercises the create + commit-contract
+     serde paths the server wires. (Two wire-shape gotchas it pinned down: the
+     client appends `/v1/...` to the base URI, so `rest_uri` must have **no**
+     context-path suffix; and `format-version` is a **reserved** property the
+     engine rejects in the user properties map.)
+   - **Remaining (next iteration):** re-target the sieve `--clone-sieve` /
+     RowDelta commits and `generate` onto `pp-catalogd` (they previously ran
+     against the HMS servlet); fold in the `CommitFiles` helper.
 3. **Phase 3 — consolidate + de-Hive** (the source reorg; detail in §11).
    **DONE as of 2026-06-25.** The source-tree reorg is complete, `make all` is
    green, `make smoke` passes, and the raw-`sqlite3_open` readers were
