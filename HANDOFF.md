@@ -1,6 +1,6 @@
 # Project Handoff: Prime Power Partition Obstruction Analysis
 
-**Branch:** `tui-query` (was `pure-local`) · **Date:** 2026-06-08, build/provisioning sections refreshed 2026-06-25
+**Branch:** `tui-query` (was `pure-local`) · **Date:** 2026-06-08; build/provisioning + Phase 2/3 sections refreshed 2026-06-25 (de-Hive cleanup landed; `pp-catalogd` IRC server built + verified)
 **Big shift:** Hive / MR3 / Kubernetes and the Python layer are
 being **removed**. The query/MV engine moves to native C++ + **igraph**; the
 catalog of record moves to a **native local Iceberg REST Catalog (IRC) backed by
@@ -137,7 +137,7 @@ flowchart TD
     end
     tools -->|"iceberg-cpp RestCatalog client<br/>(pp_iceberg_rest — existing)"| wire
     wire["HTTP — IRC /v1 routes"] --> server
-    subgraph server["pp-catalogd — native IRC server (Phase 2, NOT built yet)"]
+    subgraph server["pp-catalogd — native IRC server (Phase 2, BUILT + VERIFIED 2026-06-25)"]
       router["cpp-httplib router<br/>~12 routes from rest-catalog-open-api.yaml"]
       engine["iceberg::sql::SqlCatalog<br/>(upstream engine — store-agnostic)"]
       router --> engine
@@ -321,10 +321,12 @@ Run it: `cd native && make smoke`.
 ## 7. Position-delete / RowDelta primitive — GREEN
 
 The covering-sieve persists progress as **merge-on-read (MOR) position deletes**,
-so this primitive underpins it. Verified end-to-end 2026-05-31 (`pp-catalog
---delete-spike`): native `PositionDeleteWriter` → `RowDelta` IRC commit →
-delete-aware read-back (5 → delete 2 → 3). `_pos` projection correct,
-~38 ms/commit.
+so this primitive underpins it. Verified end-to-end 2026-05-31: native
+`PositionDeleteWriter` → `RowDelta` IRC commit → delete-aware read-back
+(5 → delete 2 → 3). `_pos` projection correct, ~38 ms/commit. (The throwaway
+`pp-catalog --delete-spike` / `--mor-verify` beeline harnesses that first proved
+this were **removed** in the 2026-06-25 de-Hive cleanup — see §11.4; `pp_row_delta`
+itself stays, and the commit path is now re-exercised by `primeparts-catalogd-smoke`.)
 
 - **`RowDelta` lives in-tree:** `native/src/catalog/pp_row_delta.{h,cc}` — a
   committable position-delete `SnapshotUpdate` subclass; commits via the generic
@@ -587,10 +589,15 @@ flowchart TD
    **igraph** implicit-graph read paths for fast number-theoretic reads (the MV
    replacement). Sketch only so far.
 
-**Open question to resolve during Phase 2/3 (not yet decided):** the sieve's
-position-delete MOR commits and `--clone-sieve` ran against the HMS REST servlet;
-they must re-target the local LMDB catalog. Confirm the local IRC server honors
-native CreateTable + FastAppend + RowDelta the same way the HMS servlet did.
+**Re-target (Phase 2 follow-up, partly answered):** the sieve's position-delete
+MOR commits and `--clone-sieve` ran against the HMS REST servlet; they must
+re-target the local catalog. The core question — *does the local IRC server honor
+native CreateTable + FastAppend the same way?* — is **answered YES** by
+`primeparts-catalogd-smoke` (createTable + FastAppend commit + reload-scan all
+pass against `pp-catalogd`). RowDelta routes through the same `updateTable`
+endpoint as FastAppend, so it should follow; the remaining work is wiring
+`--clone-sieve`/the sieve/`generate` to point at `pp-catalogd` (or in-process
+`MakeLocalCatalog`) instead of the dead `192.168.1.202:9090`.
 
 ---
 
@@ -611,7 +618,8 @@ native/src/
   core.c  generate.cc  writer.cc  source_scan.cc
   mersenne_sidecar.cc  bench.c  materialize_bench.c              # root
   catalog/     pp_lmdb_store  pp_lmdb_smoke  pp_iceberg_rest  pp_row_delta
-               pp_sieve_clone  pp_catalog_main  README.md
+               pp_sieve_clone  pp_catalog_main  pp_catalogd  pp_catalogd_main
+               pp_catalogd_smoke  README.md
   coverings/   covering_sieve_main  primitive_factors  primitive_factors_main  sieve_triage_main
   query/       query_service  query_smoke  query_service_smoke  lua_query_module  lua_query_smoke
   tui/         tui_main  lua_presets  lua_presets_smoke
@@ -627,7 +635,7 @@ include/primeparts/
   writer.h  source_scan.h       # cross-module I/O infra
   common/    arrow_init.h (EnsureArrowRegistration) · thread_pool.h
              (SetupArrowThreadPools) · uri.h (StripFileScheme)   # header-only dedup
-  catalog/   pp_iceberg_rest · pp_lmdb_store · pp_row_delta · pp_sieve_clone
+  catalog/   pp_iceberg_rest · pp_lmdb_store · pp_row_delta · pp_sieve_clone · pp_catalogd
   coverings/ primitive_factors.h
   query/     query_service · query_preset · lua_query_module
   tui/       lua_presets
@@ -649,7 +657,8 @@ All Hive carry-overs are gone (`pp_hive_sync`, `pp_delete_spike`,
 
 `make all` builds every target in `all:` (`libprimeparts_core.so`, bench-core,
 bench-materialize, generate, primitive-factors, covering-sieve, sieve-triage,
-pp-catalog, mersenne-sidecar) plus `make smoke` / `make test`. The two code
+pp-catalog, **primeparts-catalogd**, mersenne-sidecar, primeparts-tui) plus
+`make smoke` (now incl. `primeparts-catalogd-smoke`) / `make test`. The two code
 migrations the original note flagged are both gone:
 
 - **Task #6 (`RowDelta` `SnapshotUpdate` ABI)** — **no-op at iceberg-cpp v0.3.0.**
@@ -741,6 +750,10 @@ primitive_factors_main.cc have genuinely divergent designs — deferred); fold
   - `pp_row_delta.{h,cc}` (**§7**): committable position-delete `SnapshotUpdate`.
   - `pp_sieve_clone.{h,cc}`: `--clone-sieve` shallow clone.
   - `pp_catalog_main.cc` → `pp-catalog` (`--register`, `--clone-sieve`).
+  - `pp_catalogd.{h,cc}` + `pp_catalogd_main.cc` → `primeparts-catalogd` (**§10
+    Phase 2**): the IRC HTTP server (cpp-httplib over `MakeLocalCatalog`, reusing
+    iceberg-cpp internal serde). `pp_catalogd_smoke.cc` → `primeparts-catalogd-smoke`
+    is the RestCatalog-client round-trip acceptance test (`make smoke`).
 
 ### Where state lives (agent memory + docs)
 - Design doc: `markdown/data_eng/irc_catalog_design.md` (the catalog system).

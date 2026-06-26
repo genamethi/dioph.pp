@@ -1,9 +1,10 @@
 # Native IRC Catalog (LMDB-backed) — Design
 
-**Status:** Phase 0/1 **DONE + VERIFIED** (2026-06-08) — build wiring + LMDB
-`CatalogStore` + in-process `SqlCatalog` round-trip both green (`make smoke`).
-Phase 2 (`pp-catalogd` IRC server) is next. Living doc; updated as we go.
-**Date:** 2026-06-08
+**Status:** Phase 0/1 **DONE + VERIFIED** (2026-06-08) and Phase 2 (`pp-catalogd`
+IRC server) **BUILT + VERIFIED** (2026-06-25) — LMDB `CatalogStore` +
+in-process `SqlCatalog` round-trip and the full RestCatalog-client round-trip
+against `pp-catalogd` are all green (`make smoke`). Living doc; updated as we go.
+**Date:** 2026-06-08, Phase 2 + build/provisioning refreshed 2026-06-25
 
 ## Context
 
@@ -43,7 +44,7 @@ flowchart TD
     end
     tools -->|"iceberg-cpp RestCatalog client<br/>(pp_iceberg_rest — existing)"| wire
     wire["HTTP — IRC /v1 routes"] --> server
-    subgraph server["pp-catalogd — native IRC server (NEW)"]
+    subgraph server["pp-catalogd — native IRC server (built + verified 2026-06-25)"]
       router["cpp-httplib router<br/>~12 routes from rest-catalog-open-api.yaml"]
       engine["iceberg::sql::SqlCatalog<br/>(upstream engine — store-agnostic)"]
       router --> engine
@@ -122,31 +123,47 @@ open an LMDB file). We keep IRC interop (via the server) and standard on-disk
 keeps SQLite available later (config swap) if interop is ever wanted — no need to
 build both now.
 
-### IRC server — `pp-catalogd`
+### IRC server — `pp-catalogd` (BUILT + VERIFIED 2026-06-25)
 
-cpp-httplib router (header-only, system `/usr/include/httplib.h`) implementing the
-routes the iceberg-cpp `RestCatalog` client exercises (from
+`native/src/catalog/pp_catalogd.{h,cc}` + `pp_catalogd_main.cc` →
+`primeparts-catalogd`. A cpp-httplib router (header-only; `httplib.h` fetched into
+`$PREFIX/include` by `native/configure`) implementing the routes the iceberg-cpp
+`RestCatalog` client exercises (from
 `native/vendor/iceberg-refs/rest-catalog-open-api.yaml`): `GET /v1/config`;
 namespaces list/load/head/create/drop/properties; tables
 list/load/head/create/**commit**/drop/register/rename; metrics (204). Each route
-delegates to a process-wide `SqlCatalog(LmdbStore)`.
+delegates to a process-wide `SqlCatalog(LmdbStore)` (`MakeLocalCatalog`).
 
-The substance is server-side JSON: parse `CreateTableRequest`,
-`CommitTableRequest` (`requirements` + `updates`), `RegisterTableRequest`;
-serialize `LoadTableResult` (`metadata-location` + full `TableMetadata`). Reuse
-iceberg-cpp serde where the direction exists; hand-write the inverse with vendored
-`nlohmann_json` where it does not. The **commit** handler is mandatory even though
-no tool calls `catalog->UpdateTable` directly — `FastAppend`/`RowDelta` commits
-route through the IRC `updateTable` endpoint.
+The substance is server-side JSON, and it turned out **thin**: iceberg-cpp's own
+*internal* serde (`json_serde_internal.h`, `catalog/rest/json_serde_internal.h`)
+is exported in the static archives, so the server reuses `FromJson`/`ToJson` for
+**both** directions (`CreateTableRequest`, `CommitTableRequest`
+{`requirements`+`updates`}, `RegisterTableRequest`, `LoadTableResult`,
+`TableMetadata`) — no hand-written serializers. The object compiles with
+`-Ivendor/iceberg-cpp/src` for the internal headers only (public headers still
+resolve from `$PREFIX`); `nlohmann_json` must match the archives' ABI (3.11.3,
+pinned by configure, with `json_fwd.hpp` now also fetched). The **commit** handler
+parses `requirements[]`/`updates[]` via `TableRequirementFromJson`/
+`TableUpdateFromJson` (→ `unique_ptr`) and calls `Catalog::UpdateTable`;
+`FastAppend`/`RowDelta` commits route through it. It is **deletion-vector
+forward-compatible** — DV/Puffin specifics ride inside `add-snapshot` updates the
+element serde + engine handle, no server change needed (the DV work is
+writer-side). HEAD exists-checks are served by the GET handlers (cpp-httplib
+dispatches HEAD→GET).
 
 > Note: snapshot-advancing native→IRC commits need the distinct `ref`
 > requirement field for `assert-ref-snapshot-id`. This is **upstream as of
 > iceberg-cpp v0.3.0** — the former local patch is retired (HANDOFF §9 is the
 > source of truth).
 
-**Acceptance:** point the unchanged RestCatalog client (`MakeCatalog` with
-`rest_uri=http://localhost:PORT`) at `pp-catalogd` and run `PublishTable`
-end-to-end (createTable + FastAppend commit + LoadTable).
+**Acceptance (PASSING):** `primeparts-catalogd-smoke`
+(`native/src/catalog/pp_catalogd_smoke.cc`, in `make smoke`) forks the server
+over a temp warehouse and drives it with the unchanged RestCatalog client —
+`GET /v1/config` → createNamespace → createTable → write a real parquet file →
+FastAppend commit (through `updateTable`) → reload + scan (1 file / 3 records) →
+dropTable. Two wire-shape gotchas it pinned down: `rest_uri` must carry **no**
+context-path suffix (the client appends `/v1/...`); and `format-version` is a
+**reserved** property the engine rejects in the user properties map.
 
 ### Client — unchanged
 
@@ -291,31 +308,38 @@ Fold `sieve_triage` into `covering_sieve`.
     then CreateNamespace → CreateTable (writes `metadata.json`, commits pointer to
     LMDB) → LoadTable → RenameTable → DropTable → DropNamespace, all green. (The
     arrow local FileIO does not mkdir parents — pre-create `<loc>/metadata/`.)
-- **Phase 2 — `pp-catalogd`.** cpp-httplib IRC routes over `SqlCatalog(LmdbStore)`;
-  server-side JSON shapes; acceptance = RestCatalog client `PublishTable` e2e.
-- **Phase 3 — consolidate + de-Hive.** Excise Hive; `iceberg_util.h` + re-point the
-  three raw-SQLite readers; hoist shared-header boilerplate; fold `sieve_triage`.
+- **Phase 2 — `pp-catalogd`. DONE (2026-06-25).** cpp-httplib IRC routes over
+  `SqlCatalog(LmdbStore)`, reusing iceberg-cpp serde; RestCatalog-client
+  acceptance smoke passing. Remaining: re-target the sieve `--clone-sieve` /
+  RowDelta commits and `generate` onto `pp-catalogd`; extract the `CommitFiles`
+  helper while there.
+- **Phase 3 — consolidate + de-Hive. DONE (2026-06-25).** Hive excised
+  (`pp_hive_sync`, `pp_delete_spike`, the `--hive-*`/`--smoke-test` subcommands);
+  raw-SQLite readers re-pointed onto the catalog; a `common/` shared-header layer
+  added (`arrow_init`/`thread_pool`/`uri`). Remaining: fold `sieve_triage`.
 - **Phase 4 — derivative data (separate track).** LMDB-backed derived indexes +
   igraph read paths. Sketch only.
 
 ## Build / provisioning facts
 
-- `native/vendor` is **gitignored**; vendored deps are provision-by-clone and keep
-  their `.git`. LMDB vendored at `native/vendor/lmdb` (mirror `lmdb/lmdb`,
-  `mdb.master3`); sources `libraries/liblmdb/{mdb.c,midl.c,lmdb.h,midl.h}`.
-- Installed iceberg libs at `/usr/local/lib` are **static `.a`**; rebuild static to
-  match (mixing static/shared/prebuilt → double-free at exit).
-- Rebuild recipe baseline: `delete_primitive_spike.md` "Vendored rebuild recipe"
-  (static, `BUNDLE=ON`, `REST=ON`); add `-DICEBERG_BUILD_SQL_CATALOG=ON`. Install
-  is `sudo cmake --install build-patch` (root-owned `/usr/local/lib`).
-- cmake 4.3.3 (≥3.28). `liblmdb.so.0` runtime present; we build from vendored source.
+**Canonical build doc is `BUILD.md` + HANDOFF §6.3** (this section is a pointer).
+As of 2026-06-25 provisioning is `native/configure` + **git submodules** under
+`native/vendor/`, built rootless into **`$HOME/.local`** (not `/usr/local`):
+- Vendored submodules: `lmdb` (`mdb.master3`; `liblmdb.a` from
+  `libraries/liblmdb/{mdb.c,midl.c}`), `iceberg-cpp` (pinned **`v0.3.0`**, built
+  `BUNDLE=ON REST=ON SQL_CATALOG=ON`, static), `arrow` (`main`, static).
+- Header-only deps fetched into `$PREFIX/include` by configure: `nlohmann/json.hpp`
+  + `json_fwd.hpp`, and **`httplib.h`** (cpp-httplib, for `pp-catalogd`).
+- All-static Arrow/iceberg cluster; `-liceberg_sql_catalog` links **before** the
+  iceberg core archives (static order). See HANDOFF §6.3 for link gotchas.
 
 ## Risks / open threads
 
-1. **Server JSON shape-matching** (Phase 2) — the real work; prove createTable +
-   commit round-trip against the iceberg-cpp client early.
-2. **Raw-SQLite reader migration** (Phase 3) — must land with the catalog cutover or
-   scan/TUI tools break.
+1. **Server JSON shape-matching** (Phase 2) — **RESOLVED.** Reusing iceberg-cpp's
+   exported internal serde made both directions exact; the createTable + commit
+   round-trip is proven by `primeparts-catalogd-smoke`.
+2. **Raw-SQLite reader migration** (Phase 3) — **RESOLVED**; readers route through
+   the local catalog (`grep sqlite3_open` finds nothing).
 3. **Two-table atomicity** — `generate` commits `primes` + `partitions`; resume
    reads the `primes` frontier. Use `commitTransaction` or commit `partitions`
    before `primes` so a crash never leaves a resumable hole (see Write & commit
@@ -326,6 +350,8 @@ Fold `sieve_triage` into `covering_sieve`.
 
 - Phase 1: standalone test binary — `SqlCatalog(LmdbStore)` round-trip; inspect
   `catalog.lmdb` with `mdb_stat`/`mdb_dump`.
-- Phase 2: run `pp-catalogd`; `curl GET /v1/config`; then the RestCatalog client
-  `PublishTable` e2e; confirm `metadata.json` written + `LoadTable` returns it.
+- Phase 2 (**done**): `primeparts-catalogd-smoke` runs the server + RestCatalog
+  client createTable + FastAppend commit + reload-scan end to end (`make smoke`).
+  Manual: `primeparts-catalogd --warehouse DIR --port N` then `curl GET
+  /v1/config`.
 - Cross-check: open the same warehouse tables via existing native scan tools.
