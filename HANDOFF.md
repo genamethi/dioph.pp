@@ -2,7 +2,7 @@
 
 **Branch:** `tui-query` (was `pure-local`) · **Date:** 2026-06-08; build/provisioning + Phase 2/3 sections refreshed 2026-06-25 (de-Hive cleanup landed; `pp-catalogd` IRC server built + verified); `generate` commit re-targeted onto `pp-catalogd` via the new `CommitFiles` seam 2026-06-26
 **Big shift:** Hive / MR3 / Kubernetes and the Python layer are
-being **removed**. The query/MV engine moves to native C++ + **igraph**; the
+being **removed**. The query/MV engine moves to native C++; the
 catalog of record moves to a **native local Iceberg REST Catalog (IRC) backed by
 LMDB**. This document is comprehensive and self-contained — it intentionally
 duplicates material from `markdown/data_eng/irc_catalog_design.md`, the
@@ -109,14 +109,13 @@ primes.
 
 ---
 
-## 5. The Pivot — Hive → igraph + native local LMDB IRC catalog
+## 5. The Pivot — Hive → native local LMDB IRC catalog
 
 Hive (and its HMS-backed REST servlet at `192.168.1.202:9090`) was doing double
 duty: the **catalog of record** *and* the **query/MV engine**. Both jobs are
 being re-homed:
 
-- **Query / MV / fast reads → native C++ + igraph** (implicit graphs for
-  number-theoretic reads; purely local, research-oriented).
+- **Query / MV / fast reads → native C++** (purely local, research-oriented).
 - **Catalog of record → native local IRC backed by LMDB** (this document's
   primary new system).
 
@@ -142,7 +141,7 @@ flowchart TD
       engine["iceberg::sql::SqlCatalog<br/>(upstream engine — store-agnostic)"]
       router --> engine
     end
-    engine -->|"CatalogStore seam"| lmdb[("LMDB (vendored)<br/>catalog txns + derivative data")]
+    engine -->|"CatalogStore seam"| lmdb[("LMDB (vendored)<br/>catalog txns")]
     engine -->|"FileIO"| fs[("filesystem warehouse<br/>metadata.json + Parquet — base tables")]
 ```
 
@@ -155,10 +154,10 @@ optimistic-concurrency commit) lives in `SqlCatalog`, not the HTTP layer — so 
 server is a thin JSON↔Catalog adapter.
 
 **LMDB scope:** LMDB holds **only** the IRC catalog transactions
-(`CatalogStore` rows + optimistic CAS) and **derivative data** (MV-like read
-indexes — a separate igraph track). Base Iceberg tables (`primes`, `partitions`,
-`primes_k0`, …) stay as Parquet + `metadata.json` on the filesystem, read/written
-through iceberg-cpp FileIO. **No base data is copied into LMDB.**
+(`CatalogStore` rows + optimistic CAS). Base Iceberg tables (`primes`,
+`partitions`, `primes_k0`, …) stay as Parquet + `metadata.json` on the
+filesystem, read/written through iceberg-cpp FileIO. **No base data is copied
+into LMDB.**
 
 nginx/Lua were considered for the edge and **bracketed**: there is no Iceberg
 metadata library outside C++ here, so the engine must stay in iceberg-cpp; a
@@ -509,8 +508,8 @@ flowchart TD
   t6["#6 SnapshotUpdate migration ✅<br/>(no-op at iceberg-cpp v0.3.0)<br/>pp_row_delta / pp_delete_spike"]
   p2["Phase 2: pp-catalogd IRC server<br/>(cpp-httplib /v1 routes)"]
   p3["Phase 3: consolidate + de-Hive"]
-  p4["Phase 4: derivative data (LMDB-KV + igraph)"]
-  sieve["covering-sieve re-target<br/>to local catalog"]
+  p4["Phase 4: derived read indexes (deferred, approach TBD)"]
+  sieve["covering-sieve + triage re-target<br/>to local catalog"]
   p01 --> t6 --> p2 --> p3 --> p4
   t6 -. "gates rebuild of" .-> sieve
   p2 -. "new commit target" .-> sieve
@@ -605,9 +604,10 @@ flowchart TD
    `sieve_triage` into the covering-sieve stepper (deferred with the triage
    integration); the `CommitFiles` seam refactor is folded into the Phase-2
    `pp-catalogd` build.
-4. **Phase 4 — derivative data (separate track).** LMDB-backed derived indexes +
-   **igraph** implicit-graph read paths for fast number-theoretic reads (the MV
-   replacement). Sketch only so far.
+4. **Phase 4 — derived read indexes (deferred).** Precomputed/derived read
+   indexes to replace the old materialized views for fast number-theoretic
+   reads. **Approach deliberately left open** — not started; revisit after the
+   query/TUI layer and the covering-triage re-target are settled.
 
 **Re-target (Phase 2 follow-up):** the sieve's position-delete MOR commits and
 `--clone-sieve` ran against the HMS REST servlet; they must re-target the local
@@ -787,46 +787,6 @@ primitive_factors_main.cc have genuinely divergent designs — deferred); fold
   `project_icebergcpp_hive_uri_patch`.
 
 ---
-
-## Appendix A — Superseded (Hive era), condensed
-
-Kept for recoverability; **all of this is being removed.** The query/MV engine and
-catalog-of-record both moved native (§5).
-
-- **MV inventory (as of 2026-05-27).** Hive materialized views on the
-  funbuns/primeparts warehouses, served via HS2 + MR3, sized as precomputed
-  indexes for native consumers. Built: `primes_k0` (3.87 B; now a base table the
-  sieve consumes), `q_k_freq_lo`, `q_k_freq_mid`, `q_k_histogram` (39-row
-  magnitude index). Planned/never-finished: `partitions_n_ge_2`,
-  `partitions_low_q`. Rejected: `q_k_freq_hi`/`q_k_freq_top` (full-cardinality
-  form doesn't fit a 16 GiB single node → collapsed into `q_k_histogram`). Full
-  table: `markdown/data_eng/MV_list.md`. **MV stub-zombie gotcha:** a failed
-  `CREATE MATERIALIZED VIEW` leaves a registered stub — always prepend
-  `DROP IF EXISTS` when retrying.
-- **HMS sync (verified, now moot).** A native IRC / on-disk commit did **not** by
-  itself make a snapshot-advancing change visible to the Hive engine; an HMS-side
-  op had to set the table's `metadata_location`. Mechanism:
-  `scripts/hive_register.sh sync` = `ALTER TABLE … SET
-  TBLPROPERTIES('metadata_location'=…)` over remote beeline (routes through the
-  same `HiveIcebergStorageHandler` the engine reads with — so the handler
-  **re-commits** the target snapshot as a new `metadata.json`, it is **not** a raw
-  pointer swap). Required **Java 21** (host default Java 25 breaks bundled jline
-  FFM), `-Dorg.jline.terminal.provider=dumb`, and **HTTP transport on :10001**.
-  Verified on throwaway `primeparts.zz_synctest` (3 → sync to empty → 0 → sync
-  back → 3). The raw-Thrift `sync_hms.py` path was already dead.
-- **Cluster (MR3/Kubernetes).** HS2 + MR3 + HMS-IRC in `mr3/kubernetes/`; config
-  files (`hive-site.xml`, `mr3-site.xml`, `tez-site.xml`, the `{hive,metastore}`
-  YAMLs, `env.sh`) were tuned 2026-05-27 to a one-worker × 8 GiB envelope. Local
-  native/IRC runs scaled MR3 compute to 0 to reclaim ~10 GB (keeping only the
-  metastore that hosts IRC :9090 + its mysql). Per-task memory floor: shrink
-  `tez sort.mb` when shrinking `task.memory.mb`. A busybox init-container GC
-  recurred (`hive_mr3_stack.md` §"Known gotchas" #9).
-- **Cutover sweep.** `primeparts.primes_k0` was relocated to `/ib-staging/`
-  (DROP + recreate, ~290 s, verified 3,874,747,523 rows); the old funbuns-path
-  dir was left for the user to `rm -rf`. The discarded Pass-1 string-label
-  artifact `obstruction_catalog` (comma-string `covering_system` labels like
-  `3,5,7`) at `ib-staging` is **superseded, not re-swept** — that string-label
-  partitioning *was* the naming bug the sieve rewrite fixed.
 
 ## Appendix B — Terminology
 

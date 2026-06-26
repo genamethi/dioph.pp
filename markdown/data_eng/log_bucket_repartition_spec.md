@@ -12,7 +12,7 @@ Rebuild into a range-local layout that:
   trailing files (file count per bucket is dynamic; see §Planner Sizing).
 - Uses a partition transform Iceberg readers can interpret without custom code.
 - Aligns *bucket boundaries* (p-cuts) between the primes table and the
-  partitions table so HS2/MR3 and polars prune both tables identically.
+  partitions table so iceberg-cpp and polars prune both tables identically.
   File-level alignment within a bucket is not required.
 - Carries `prime_rank` so generation, resume, and bucket-cut snapping all
   work in dense integer space without recomputing `pi(p)`.
@@ -47,9 +47,9 @@ Audit on 2026-05-07: every referenced file exists; no unreferenced parquets
 on disk in either tree. Live row counts (manifest-aggregated): 21,699,850,257
 primes / 40,842,554,340 decompositions.
 
-Catalog: `SqlCatalog` (sqlite) at `…/iceberg/catalog.db`, mirrored to HMS via
-`scripts/sync_hms.py` for HS2/MR3. The previous metadata locations still point
-at the pre-normalization `truncate[10000000000](p)` specs.
+Catalog: the native local LMDB-backed `SqlCatalog` (`MakeLocalCatalog` /
+`pp-catalogd`); see `irc_catalog_design.md`. (This spec predates that catalog;
+it describes the bucket layout, not the catalog.)
 
 ## Partition Spec
 
@@ -90,9 +90,10 @@ it.
 
 ### Partition path encoding
 
-Iceberg paths are Hive-style `<field>=<value>/`, derived from
+Iceberg partition paths are `<field>=<value>/`, derived from
 `Transform::to_human_string`. The `=` is spec-mandated and shared by every
-reader (PyIceberg, iceberg-rust, HS2/MR3). Removing it would fork the spec.
+Iceberg reader (iceberg-cpp, polars, iceberg-rust). Removing it would fork the
+spec.
 Shell-side friction is mitigated by quoting paths or escaping `=` at the
 shell layer, not at the warehouse layer.
 
@@ -104,7 +105,7 @@ shell layer, not at the warehouse layer.
 `p ASC` satisfies the order of `identity(p_bucket)` (the partition coordinate
 is monotone in `p`), so within a partition files are p-sorted and Parquet
 row-group statistics prune range scans. Sort order is declared on the table
-but not enforced by PyIceberg on append; the writer enforces it.
+but not enforced on append; the writer enforces it.
 
 ## File Sizing
 
@@ -344,7 +345,6 @@ separate backfill. Three things make this efficient:
    v
 3. Schema evolution  [DONE -- 2026-05-07]
    +-- prime_rank: long, nullable, field_id 4 in primes, 6 in decompositions
-   +-- HMS synced
    +-- old files read NULL for the new column (no in-place backfill;
        see §prime_rank Materialization)
    |
@@ -387,8 +387,7 @@ separate backfill. Three things make this efficient:
    |
    v
 9. Cutover
-   +-- SqlCatalog: register new tables, retire old
-   +-- HMS: scripts/sync_hms.py for HS2/MR3 visibility
+   +-- catalog: register new tables, retire old
    +-- archive old layout in place (tarball + delete)
 ```
 
@@ -438,8 +437,8 @@ For direct lookup:
 ## Iceberg Compatibility
 
 The design uses only stock transforms (`Identity`) over materialized columns,
-which keeps the layout portable across PyIceberg, iceberg-rust readers, HMS-
-backed engines, and any future tooling. Spec evolution is supported: adding
+which keeps the layout portable across any Iceberg reader (iceberg-cpp, polars,
+iceberg-rust) and any future tooling. Spec evolution is supported: adding
 buckets under a new `p_bucket_version` does not invalidate old manifests; old
 files keep their `partition_spec_id`, new files use the current one,
 `Transform::project` translates predicates per spec.

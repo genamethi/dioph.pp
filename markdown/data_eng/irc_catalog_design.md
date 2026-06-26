@@ -11,7 +11,7 @@ against `pp-catalogd` are all green (`make smoke`). Living doc; updated as we go
 Hive (and its HMS-backed REST servlet at `192.168.1.202:9090`) is being removed
 from this branch, along with the MR3/Kubernetes stack and the Python layer. That
 servlet was doing double duty: the **catalog of record** and the **query/MV
-engine**. The query/MV side moves to native code + igraph. The catalog side is
+engine**. The query/MV side moves to native code. The catalog side is
 the gap this design fills.
 
 The earlier catalog of record was a **pyiceberg `SqlCatalog`** (SQLite,
@@ -28,10 +28,10 @@ pyiceberg/Spark/Trino — can also point at it) while the implementation stays
 native and in our control.
 
 **LMDB scope:** LMDB holds **only** the IRC catalog transactions (the
-`CatalogStore` rows + optimistic-CAS) and **derivative data** (MV-like read
-indexes — a separate track). Base Iceberg tables (`primes`, `partitions`,
-`primes_k0`, …) stay as Parquet + `metadata.json` on the filesystem, read/written
-through iceberg-cpp FileIO. No base data is copied into LMDB.
+`CatalogStore` rows + optimistic-CAS). Base Iceberg tables (`primes`,
+`partitions`, `primes_k0`, …) stay as Parquet + `metadata.json` on the
+filesystem, read/written through iceberg-cpp FileIO. No base data is copied into
+LMDB.
 
 ## Runtime architecture
 
@@ -49,7 +49,7 @@ flowchart TD
       engine["iceberg::sql::SqlCatalog<br/>(upstream engine — store-agnostic)"]
       router --> engine
     end
-    engine -->|"CatalogStore seam"| lmdb[("LMDB (vendored)<br/>catalog txns + derivative data")]
+    engine -->|"CatalogStore seam"| lmdb[("LMDB (vendored)<br/>catalog txns")]
     engine -->|"FileIO"| fs[("filesystem warehouse<br/>metadata.json + Parquet — base tables")]
 ```
 
@@ -310,15 +310,17 @@ Fold `sieve_triage` into `covering_sieve`.
     arrow local FileIO does not mkdir parents — pre-create `<loc>/metadata/`.)
 - **Phase 2 — `pp-catalogd`. DONE (2026-06-25).** cpp-httplib IRC routes over
   `SqlCatalog(LmdbStore)`, reusing iceberg-cpp serde; RestCatalog-client
-  acceptance smoke passing. Remaining: re-target the sieve `--clone-sieve` /
-  RowDelta commits and `generate` onto `pp-catalogd`; extract the `CommitFiles`
-  helper while there.
+  acceptance smoke passing. `generate` re-targeted onto `pp-catalogd` via the new
+  **`CommitFiles`** seam (2026-06-26; `primeparts-generate-smoke`). Remaining:
+  re-target the **sieve** `--clone-sieve` / RowDelta commits (and its triage)
+  onto `pp-catalogd` the same way.
 - **Phase 3 — consolidate + de-Hive. DONE (2026-06-25).** Hive excised
   (`pp_hive_sync`, `pp_delete_spike`, the `--hive-*`/`--smoke-test` subcommands);
   raw-SQLite readers re-pointed onto the catalog; a `common/` shared-header layer
-  added (`arrow_init`/`thread_pool`/`uri`). Remaining: fold `sieve_triage`.
-- **Phase 4 — derivative data (separate track).** LMDB-backed derived indexes +
-  igraph read paths. Sketch only.
+  added (`arrow_init`/`thread_pool`/`uri`). Remaining: fold `sieve_triage` into
+  the covering-sieve stepper.
+- **Phase 4 — derived read indexes (deferred).** Precomputed/derived read
+  indexes to replace the old materialized views. Approach left open; not started.
 
 ## Build / provisioning facts
 
@@ -341,10 +343,10 @@ As of 2026-06-25 provisioning is `native/configure` + **git submodules** under
 2. **Raw-SQLite reader migration** (Phase 3) — **RESOLVED**; readers route through
    the local catalog (`grep sqlite3_open` finds nothing).
 3. **Two-table atomicity** — `generate` commits `primes` + `partitions`; resume
-   reads the `primes` frontier. Use `commitTransaction` or commit `partitions`
-   before `primes` so a crash never leaves a resumable hole (see Write & commit
-   model).
-4. **Derivative-data access pattern** — server endpoints vs. shared read env — TBD.
+   reads the `primes` frontier. **Handled:** `generate` commits `partitions`
+   before `primes` (via `CommitFiles`), so a crash never leaves a resumable hole.
+   A multi-table `transactions/commit` route is only needed if true atomic
+   two-table commit is later wanted over this ordering.
 
 ## Verification
 

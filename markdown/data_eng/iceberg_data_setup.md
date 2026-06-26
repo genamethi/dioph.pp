@@ -1,21 +1,17 @@
 # Iceberg data setup
 
 Canonical layout of the `primeparts` Iceberg warehouse: the bucket-
-partitioned staging tables produced by `primeparts-rewrite` and the
-`prime_rank` backfill that lands on top. This doc describes the
-**post-cutover** state — the legacy `funbuns.{primes,decompositions}`
-warehouse with `commit_seq` partitioning and the pyiceberg-driven write
-path have been retired.
+partitioned staging tables produced by `primeparts-generate` and the
+`prime_rank` it materializes in stream. This is the schema / warehouse-layout
+reference; for the **catalog of record** (native local LMDB-backed
+`SqlCatalog`, fronted by the `pp-catalogd` IRC server) see
+`markdown/data_eng/irc_catalog_design.md` and `HANDOFF.md` §5–6.
 
 For surrounding context see:
 
 - `markdown/data_eng/log_bucket_repartition_spec.md` — design rationale
   for the bucket layout, BPR calibration, `prime_rank` materialization,
   the `boundaries` table.
-- `markdown/data_eng/hive_mr3_stack.md` — Hive 4 + MR3 + HMS + k3s
-  control plane; HMS serves the Iceberg REST Catalog at
-  `http://192.168.1.202:9090/iceberg/v1/...` (the same OpenAPI surface
-  iceberg-rest-fixture exposes, backed by HMS + MySQL).
 
 ---
 
@@ -26,14 +22,14 @@ For surrounding context see:
 └── primeparts/
     ├── boundaries/{data,metadata}/
     ├── primes/{data,metadata}/
-    ├── partitions/{data,metadata}/
-    └── obstruction_catalog/{data,metadata}/    # covering-system passes
+    └── partitions/{data,metadata}/
 ```
 
-There is no SQLite catalog at this warehouse. The on-disk
-`metadata/*.metadata.json` is the only persistent state; the catalog of
-record is HMS at `metastore-rest:9090` (the IRC servlet), which holds
-each table's current `metadata_location` pointer.
+The catalog of record is a native local LMDB-backed `SqlCatalog`
+(`<warehouse>/catalog.lmdb`), reached in-process via `MakeLocalCatalog` or over
+HTTP through `pp-catalogd`; it holds each table's current `metadata_location`
+pointer. Base table data stays as Parquet + `metadata/*.metadata.json` on the
+filesystem.
 
 ### Measured dataset basics (2026-05-27)
 
@@ -43,7 +39,7 @@ each table's current `metadata_location` pointer.
 | `COUNT(*)` of `primes` | `21_698_850_257` ≈ 21.7 B | Consistent with π(5.6×10¹¹) ≈ 2.07×10¹⁰. |
 | `MIN(p)` | 3 | p=2 intentionally absent (see prime_rank semantics). |
 | `partitions` rows | ~40 B | ~99.9 % are n=1 edges. |
-| q_k magnitude distribution | bit-widths 36-38 hold ~84 % of partition edges | See `q_k_histogram` MV (`MV_list.md`). |
+| q_k magnitude distribution | bit-widths 36-38 hold ~84 % of partition edges | Measured over the partition edges. |
 
 Older docs referred to a "20 B-prime dataset" — that's the row *count*,
 not the maximum p. Both numbers are linked by π(x) ≈ x/log(x); the
@@ -55,15 +51,15 @@ rather than relying on these numbers as gospel.
 
 ## Tables
 
-Three first-class tables under namespace `primeparts`, plus the
-covering-systems derivative.
+Three first-class tables under namespace `primeparts`. (`primes_k0`, the
+`k=0` subset, is a derived base table the covering sieve consumes — see
+HANDOFF §8.)
 
 | Table                          | Rows         | Partition spec                              |
 |--------------------------------|--------------|---------------------------------------------|
 | `primeparts.primes`            | ~21.70 B     | `identity(p_bucket_version, p_bucket)`      |
 | `primeparts.partitions`        | ~40.84 B     | `identity(p_bucket_version, p_bucket)`      |
 | `primeparts.boundaries`        | small        | unpartitioned                               |
-| `primeparts.obstruction_catalog` | (being replaced) | `identity(covering_system)` string label — **the naming bug**; superseded by the covering-sieve rewrite (position-delete MOR over a `primes_k0` copy, no string-label partition). See `HANDOFF.md`. |
 
 Every prime `p` appears in `primes` exactly once. Obstructed primes
 (`k=0`, no decomposition) are present with `k=0` and have **no** rows
@@ -118,13 +114,12 @@ dropped.
 ### Physical vs. iceberg schema (post-2026-05-26 cutover)
 
 The iceberg schemas above are the *catalog* contract. As of the
-2026-05-26 cutover (see `native/src/drop_bucket_cols_main.cc`), the
-identity-partition source fields **`p_bucket_version`** and
-**`p_bucket`** are **omitted from the physical parquet schema** in
-both `primes` and `partitions`. Their values live exclusively in each
-DataFile's manifest partition tuple; iceberg readers (iceberg-cpp, the
-iceberg-handler in Hive 4, polars `scan_iceberg`) synthesize the
-columns at read time from the partition values.
+2026-05-26 cutover, the identity-partition source fields
+**`p_bucket_version`** and **`p_bucket`** are **omitted from the physical
+parquet schema** in both `primes` and `partitions`. Their values live
+exclusively in each DataFile's manifest partition tuple; iceberg readers
+(iceberg-cpp, polars `scan_iceberg`) synthesize the columns at read time from
+the partition values.
 
 This is per Iceberg spec — identity-partition source columns may be
 resolved from the manifest rather than the data file. The on-disk
@@ -137,12 +132,6 @@ Writer behavior is centralized in
 `IcebergToArrowSchemaWithFieldIds(..., partition_spec)` in
 `native/src/writer.cc`: identity-transform partition source IDs are
 stripped from the arrow schema before parquet file creation.
-
-A read regression caused by this change broke Hive's vectorized
-reader; the upstream fix lives in
-`~/fluid/byo/repos/hive-mr3` branch `master4.2.0` commit `b5bc76328e`
-and is baked into the local image `mr3-hive-4.2.0-local/hive:4.2.0`.
-See `markdown/data_eng/hive_mr3_stack.md`.
 
 ### prime_rank semantics
 
@@ -177,8 +166,8 @@ Pinned in `native/src/writer.cc::ParquetWriterProperties`:
 
 `commit_seq`, the legacy `funbuns.*` parquet KV footer, and all
 `q_k == 0` sentinel rows are gone. Any analytics that used to consume
-the KV block (`k_histogram`, `n_primes`, etc.) move to Hive 4 + MR3
-materialized views — see `hive_mr3_stack.md`.
+the KV block (`k_histogram`, `n_primes`, etc.) become derived read indexes —
+deferred (HANDOFF §10 Phase 4).
 
 ---
 
@@ -211,139 +200,54 @@ bound is the next row's `p_min`, with the final bucket open-ended.
 ## Writing (native, iceberg-cpp + IRC)
 
 All writes to `primeparts.*` are native C++ tools using iceberg-cpp's
-`SourceTableReader` + `BucketParquetWriter` + `RestCatalog` chain.
-There is no Python in the commit path.
+`SourceTableReader` + `BucketParquetWriter` chain, committing through the local
+catalog (`MakeLocalCatalog` or `pp-catalogd`). There is no Python in the commit
+path.
 
-The canonical pattern (see `native/src/drop_bucket_cols_main.cc` for
-the current reference):
+The canonical pattern:
 
 1. Read source files via `SourceTableReader::OpenMetadata`
    (iceberg-cpp manifest walk; no fs globbing).
-2. Stream batches; transform columns as needed; write new parquet files
-   via `.tmp` + atomic rename (resumable, never leaves corrupt files).
-3. Build `iceberg::DataFile` records with the right partition tuple
-   (identity-partition source columns supplied here, not in the parquet).
-4. Commit via either:
-   - `RestCatalog::RegisterTable(ident, metadata_location)` — when an
-     on-disk `metadata.json` already exists; preserves snapshot
-     history. Drops the catalog row first if it exists at a stale
-     location, then registers the on-disk pointer.
-   - `Catalog::CreateTable(...) + Transaction::NewFastAppend()` —
-     fresh-publish; writes new metadata.json and registers it.
+2. Stream batches; transform/generate columns as needed; write new parquet
+   files via the writer (identity-partition source columns supplied to the
+   `iceberg::DataFile`, not in the parquet physical schema).
+3. Commit the written `DataFile`s through `CommitFiles(catalog, warehouse,
+   table, schema, spec, files)` — ensures the namespace, **load-or-creates** the
+   table, then FastAppends in one snapshot. Resume-safe.
 
-Three binaries currently in tree exemplify this pattern:
+`generate` is the live producer: it writes the bucketed parquet for
+`primes` + `partitions` and commits them via `CommitFiles` (partitions before
+primes, so resume sees a hole-free primes frontier). `--rest-uri` routes the
+commit through `pp-catalogd`; default is in-process `MakeLocalCatalog`.
+(The earlier one-shot rewrite/backfill/drop-bucket binaries that exercised this
+pattern were removed; the `MakeDataFile` partition-value convention survives in
+git history if a future re-bucketing tool needs it.)
 
-- **`primeparts-drop-bucket-cols`** (2026-05-26) — current reference.
-  Strips the physical `p_bucket_version`/`p_bucket` columns from all
-  files in `primes` and `partitions`, re-registers the result via IRC.
-  Ran across the full warehouse in ~26 min total wall clock at
-  Config A (see `hive_mr3_stack.md`). Idempotent: files whose physical
-  schema already excludes the bucket cols are skipped.
-- **`primeparts-backfill-rank`** — populates `prime_rank` in-place
-  after the initial bucketed rewrite, then re-publishes via IRC. Same
-  resume/atomic-rename discipline.
-- **`primeparts-rewrite`** — design reference only; the legacy funbuns
-  warehouse it consumed has been deleted. Retained because the bucket
-  job split pattern is reusable. Any future re-bucketing should reuse
-  the source-scan / partition-spec / writer chain.
+### Row-level deletes (covering sieve)
 
-The pyiceberg-driven `IcebergWriter.flush` write path of the legacy
-warehouse is **retired** for `primeparts.*`. New ingest, refreshes,
-and rewrites go native through IRC. `scripts/sync_hms.py` remains in
-tree only for the residual funbuns-era tables; don't extend it (its
-HMS-mutation *mechanism* is referenced for the open HMS-sync work — see
-`hive_mr3_stack.md` — but the script itself targets the retired sqlite
-catalog).
-
-### Row-level deletes (covering sieve — provisional)
-
-The covering-sieve rewrite wants merge-on-read **position deletes** over
-a `primes_k0` copy so the live rows are the current uncovered set.
-
-> **OPEN / unverified — do not rely on yet:**
-> - iceberg-cpp has no first-class row-level-delete update class. The
->   path is a `SnapshotUpdate` subclass calling the protected
->   `WriteDeleteManifests` (mirroring `fast_append.cc`). Architecturally
->   it lines up (`ctx_`/`base()` protected in `pending_update.h`;
->   `ApplyUpdateSnapshot` accepts any `SnapshotUpdate` via `checked_cast`
->   in `transaction.cc`), but it is **untested end-to-end** and
->   `snapshot_update.cc:212` carries a FIXME on per-file
->   `data_sequence_number`. The parent-manifest carry-forward uses an
->   internal `SnapshotCache` helper, so the subclass likely lives inside
->   the vendored lib + a rebuild.
-> - The Puffin **writer** now exists (iceberg-cpp #624), but emitting a
->   `deletion-vector` blob wired to a delete manifest is unverified;
->   position-delete *files* (MOR v2) are the safe on-ramp.
-> - Hive's MOR read of these deletes is unverified and ties to the HMS
->   sync question above.
->
-> Prove write→commit→reopen→read on a throwaway table first; fallback is
-> an append-only covered-set model (FastAppend only).
+The covering-sieve persists progress as merge-on-read **position deletes** over
+a `primes_k0` shallow clone, so the live rows are the current uncovered set.
+**Verified GREEN (2026-05-31):** native `PositionDeleteWriter` → `RowDelta`
+commit → delete-aware read-back works end to end (`pp_row_delta.{h,cc}`). Full
+writeup: `markdown/data_eng/delete_primitive_spike.md`, `HANDOFF.md` §7.
 
 ---
 
-## Cataloging — HMS as Iceberg REST Catalog
+## Cataloging — native local LMDB IRC
 
-The HMS pod ships the Hive 4.2 IRC servlet at port 9090 on the host
-(LoadBalancer Service `metastore-rest`). It serves the full Iceberg
-REST OpenAPI surface: config, namespaces, tables, views, register,
-rename, transactions/commit, metrics. Endpoint base:
-
-```
-http://192.168.1.202:9090/iceberg/v1/
-```
-
-This is the catalog of record for tables visible to HS2 / MR3 / Tez
-and to any IRC client (iceberg-cpp, iceberg-rust, pyiceberg-with-REST,
-DuckDB).
+The catalog of record is a native local `iceberg::sql::SqlCatalog` backed by an
+LMDB `CatalogStore` (`<warehouse>/catalog.lmdb`), reached in-process via
+`MakeLocalCatalog` or over HTTP through the `pp-catalogd` IRC server. It serves
+the IRC `/v1` surface (config, namespaces, tables, register, rename, commit,
+metrics) from `rest-catalog-open-api.yaml`. Full design + write/commit model:
+`markdown/data_eng/irc_catalog_design.md`, `HANDOFF.md` §5–6.
 
 ### Registering a table from on-disk metadata
 
-After `primeparts-backfill-rank` writes a fresh metadata.json, register
-it via:
-
-```bash
-curl -s -X POST \
-    "http://192.168.1.202:9090/iceberg/v1/namespaces/primeparts/register" \
-    -H 'Content-Type: application/json' \
-    -d '{"name":"primes",
-         "metadata-location":"/media/extssd/.../primeparts/primes/metadata/00001-....metadata.json"}'
-```
-
-Or, equivalently, pass `--rest-uri http://192.168.1.202:9090/iceberg`
-to `primeparts-backfill-rank` and the binary will register through
-iceberg-cpp's `RestCatalog`.
-
-Per-namespace property `prefix` is unused at this deployment; namespaces
-are addressed directly (`/iceberg/v1/namespaces/primeparts`, not
-`/iceberg/v1/{prefix}/namespaces/primeparts`).
-
-### Hive-catalog database location (separate from IRC)
-
-IRC `RegisterTable` writes the iceberg-table row in HMS. It does **not**
-update the namespace/database's `location_uri`, which Hive uses as the
-default parent path for any tables Hive itself creates (materialized
-views especially). If the database in HMS still points at an obsolete
-warehouse path, Hive-created MVs will land at the old location even
-though the source iceberg tables sit at the new one.
-
-For `primeparts` this cutover step (run 2026-05-27) is:
-
-```sql
-ALTER DATABASE primeparts SET LOCATION
-    'file:/media/extssd/research/dioph.pp/data/ib-staging/primeparts.db';
-```
-
-Run via `pixi run python scripts/hive_sql.py -e '...'`. Verify with
-`DESCRIBE DATABASE primeparts`. Existing tables keep their absolute
-paths (iceberg metadata is location-authoritative); only future
-Hive-created tables inherit the new default.
-
-### Stack lifecycle
-
-Stack control is `pixi run kube-{up,down}`. If `kube-up` fails on
-`127.0.0.1:6443`, k3s itself is down — `sudo systemctl start k3s`,
-then retry. Full details in `hive_mr3_stack.md`.
+`pp-catalog --register` registers an existing on-disk `metadata.json` into the
+local catalog (`RegisterTable` through `MakeLocalCatalog`). Tools that produce
+fresh data (e.g. `generate`) commit through `CommitFiles` instead, which
+ensures the namespace and load-or-creates the table before a FastAppend.
 
 ---
 
@@ -360,35 +264,9 @@ an Arrow RecordBatch stream. **Do not** `fs::recursive_directory_iterator`
 the data dir: file order, file presence, and even file paths are
 manifest-derived and can shift on a future rewrite or compaction.
 
-For graph-traversal workloads (covering sieve, modular filter — see
-`markdown/math/modular_filter_more_ideas.md`), the native path is
-the only path. Hive's role is to feed sorted batches via MV-style
-indexes; native code does the bitmask / primality-test / hash-table
-work.
-
-### SQL (Hive 4 + MR3 over HS2 NodePort 31140) — for transactional / MV refresh / multi-table joins
-
-Any IRC client works. The thin JDBC wrapper `scripts/hive_sql.py` is
-convenient for one-off DDL or counts:
-
-```bash
-pixi run python scripts/hive_sql.py -e \
-    "SELECT k, COUNT(*) FROM primeparts.primes GROUP BY k"
-```
-
-HS2 reads through HMS.
-
-> **OPEN / corrected:** an earlier claim here — "anything registered via
-> IRC is visible to SQL with no extra step" — is **verified false** for
-> snapshot-advancing commits. A separate HMS sync (set `metadata_location`)
-> is required for Hive to see a new snapshot. See `hive_mr3_stack.md`
-> "HMS sync for native-committed snapshots (open)".
-
-Use SQL when the query genuinely needs
-transactional semantics (MV creation, ATOMIC swap-in commits) or when
-the planner's bucket-aligned join shapes are wanted. Don't reach for
-SQL for ad hoc filter/range scans — polars or native iceberg-cpp
-beats it on latency.
+The covering sieve and modular filter are native-path-only workloads: native
+code does the bitmask / primality-test / hash-table work over the manifest-
+planned RecordBatch stream.
 
 ### Polars (ad hoc, read-only)
 
@@ -412,66 +290,19 @@ lf = pl.scan_iceberg(
 Manifest stats prune by `p_bucket`/`p_min`/`p_max` automatically. Do
 not reach for `sink_parquet` to produce derived tables at this scale —
 polars streaming OOMs on partitioned writes against the 21 B-row
-inputs. For derived tables: native + IRC if it's a compute-heavy
-transform, Hive MV if it's a SQL-shaped aggregate (see `MV_list.md`).
+inputs. Produce derived tables natively (source-scan → writer →
+`CommitFiles`).
 
 ---
 
-## Derived data — Hive materialized views
+## Derived data
 
-Filtered / aggregated / index-shaped derivatives of `primes` and
-`partitions` are built as Hive 4 + MR3 + Iceberg materialized views.
-Each MV is itself an Iceberg table registered in HMS, queryable by
-any IRC client. **They exist primarily as precomputed indexes for
-native consumers** — the modular-filter and covering-sieve pipelines
-read them via iceberg-cpp; SQL queries against them are secondary.
-
-See [`MV_list.md`](MV_list.md) for the running inventory: what's
-built, what's planned, what was rejected and why, plus session-level
-settings that worked.
-
-Quick examples:
-
-```sql
--- Filter: 17.85 % of primes (k=0 obstructed); native sieve input.
-CREATE MATERIALIZED VIEW primeparts.primes_k0
-    STORED BY ICEBERG STORED AS PARQUET
-    AS SELECT p, prime_rank FROM primeparts.primes WHERE k = 0;
-
--- Aggregate: magnitude histogram for q_k (one row per bit-width).
--- Replaces the full-cardinality q_k_freq which doesn't fit on this
--- cluster (~10⁸+ distinct q values).
-CREATE MATERIALIZED VIEW primeparts.q_k_histogram
-    STORED BY ICEBERG STORED AS PARQUET
-    AS SELECT
-        CAST(FLOOR(LOG2(q_k)) AS INT) AS qk_bits,
-        COUNT(*)                       AS n_edges,
-        MIN(q_k)                       AS qk_min,
-        MAX(q_k)                       AS qk_max
-       FROM primeparts.partitions
-       GROUP BY CAST(FLOOR(LOG2(q_k)) AS INT);
-```
-
-When iterating on MV builds, always prepend `DROP MATERIALIZED VIEW
-IF EXISTS ...` — a failed CREATE leaves a registered stub that the
-next CREATE will refuse to overwrite.
-
-**`REBUILD` semantics vs. native-committed sources:** Hive's
-incremental MV refresh expects a transactional source. We commit
-`primeparts.*` natively via IRC, which writes new metadata.json
-snapshots Hive doesn't see as transactional. Whether `ALTER
-MATERIALIZED VIEW ... REBUILD` picks up these snapshots is **untested**;
-treat all current MVs as one-shot snapshot views until this is
-validated.
-
-`obstruction_catalog` (per-prime covering-system labels) was produced
-by `primeparts-covering-sieve` as comma-string `covering_system`
-partitions. That artifact and partition scheme are **being discarded**
-in the covering-sieve rewrite: the uncovered set becomes the live
-(post-delete) view of a `primes_k0` copy under merge-on-read position
-deletes, not a string-labelled table. Each sieve pass remains a C++
-worker pipeline with bitmask logic, not a SQL transform. See `HANDOFF.md`
-"Covering-sieve rewrite".
+`primeparts.primes_k0` (the 17.85 % of primes with `k=0`) is a **base table**
+the covering sieve consumes; the sieve operates on a shallow MOR clone of it
+(`primes_k0_sieve`). Broader precomputed/derived read indexes (the old
+materialized-view role) are **deferred** — approach left open (HANDOFF §10
+Phase 4). The discarded `obstruction_catalog` comma-string-label artifact is
+superseded by the position-delete sieve model and is not maintained.
 
 ---
 
@@ -491,9 +322,9 @@ For changes to the staging schemas:
    the constraint). Add as nullable, backfill, then promote to required
    in a second commit.
 
-`prime_rank` itself went through this pattern: written nullable by
-`primeparts-rewrite`, populated by `primeparts-backfill-rank`, promoted
-to required when the post-backfill snapshot was published.
+`prime_rank` itself went through this pattern historically (written nullable,
+backfilled, then promoted to required). `generate` now materializes it in
+stream, so fresh writes carry it required from the start.
 
 ---
 

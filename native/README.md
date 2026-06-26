@@ -1,8 +1,8 @@
 # Primeparts Native Port
 
-This directory is the C-first migration path for the Sage-dependent ingest
-hot path. The first target is parity with `src/primeparts/core.py` for Int64
-prime batches:
+This directory is the native C/C++ implementation of the ingest hot path
+(the earlier Sage/Python path has been removed). The number-theory core for
+Int64 prime batches:
 
 - `primecount` replaces Sage `prime_pi`.
 - `primecount_nth_prime` replaces Sage `nth_prime`.
@@ -20,26 +20,19 @@ prime batches:
 
 | Binary | Purpose |
 |---|---|
-| `primeparts-generate` | Stage 1 — generate primes + materialize columns + write zstd Parquet via iceberg-cpp + emit `native_files.jsonl`. Threaded. |
+| `primeparts-generate` | Generate primes + materialize columns + write zstd Parquet via iceberg-cpp, then **commit** `primes`+`partitions` through the local catalog (`CommitFiles`; `--rest-uri` routes through `pp-catalogd`). Threaded. |
+| `primeparts-covering-sieve` | Covering-system FILTER / interactive stepper over `primes_k0` (MOR position deletes). |
+| `primeparts-sieve-triage` | Bitmask-distribution triage (folding into the covering-sieve stepper). |
+| `primeparts-catalogd` | Native IRC HTTP server over `SqlCatalog(LmdbStore)` (cpp-httplib). |
+| `pp-catalog` | Catalog admin: `--register` (on-disk metadata → local catalog), `--clone-sieve`. |
 | `primeparts-bench-core` | Hot-loop count-only benchmark (no row materialization). |
 | `primeparts-bench-materialize` | Columnar materialization benchmark (no Parquet write). |
-| `primeparts-tui` | Native notcurses workbench shell (status/snapshots/ops-query views) backed by `ui_iceberg`. |
+| `primeparts-tui` | Native notcurses workbench (status/snapshots/ops-query views) on `QueryService`. |
 
-The Stage 2 catalog/metadata commit is Python — `primeparts-commit` (a.k.a.
-`python -m primeparts.native_iceberg`). It reads the manifest, validates
-Parquet footers, and registers files via PyIceberg `add_files`.
-
-Production writes require the warehouse to be in good standing before the
-native writer touches it: snapshot summary properties, manifest metrics, and
-local data files must agree. Check that state with:
-
-```sh
-PYTHONPATH=src python -m primeparts.native_iceberg --check-warehouse
-```
-
-If this reports orphaned local files, register them explicitly from their
-`native_files_*.jsonl` manifest or remove them only after verifying they are
-not needed. The generation path will refuse to skip past or overwrite them.
+The catalog of record is a native local `iceberg::sql::SqlCatalog` backed by an
+LMDB `CatalogStore` (`MakeLocalCatalog`), optionally fronted by `pp-catalogd`.
+**There is no Python in the write/commit path.** Full design:
+`../markdown/data_eng/irc_catalog_design.md`, `../HANDOFF.md` §5–6.
 
 ## Provisioning the native dependencies (rootless, no sudo)
 
@@ -89,7 +82,7 @@ warehouse_root=/media/extssd/research/dioph.pp/data/iceberg
 
 `primeparts-tui` controls:
 
-- Arrow keys (or `h/j/k/l`): switch selected table (`primes` / `decompositions`)
+- Arrow keys (or `h/j/k/l`): switch selected table (`primes` / `partitions`)
 - `1`: status view (`max_p`, row count, snapshot count)
 - `2`: snapshot view (current snapshot id + recent snapshot rows)
 - `3`: ops/query view (cross-table checks + operational command hints)
@@ -98,50 +91,28 @@ warehouse_root=/media/extssd/research/dioph.pp/data/iceberg
 
 ## Production pipeline
 
-`primeparts -n N` orchestrates Stage 1 + Stage 2 in process. The native
-pipeline is the default; pass `--sage` to fall back to the legacy
-multiprocessing path.
+`primeparts-generate` is self-contained: it generates primes via the C core,
+writes the bucketed `primes`/`partitions` Parquet via iceberg-cpp, and at
+end-of-run commits both tables through the local catalog (`CommitFiles`,
+partitions-before-primes for hole-free resume). `--rest-uri URL` routes the
+commit through a running `pp-catalogd`; omit it to commit in-process via
+`MakeLocalCatalog`. `--temp` is the ephemeral mode (files only, no commit).
 
 ```text
-primeparts -n N
-    └── primeparts-generate         # C core + iceberg-cpp Parquet
-        └── /media/extssd/research/dioph.pp/data/.../funbuns/{primes,decompositions}/data/<partition>/*.parquet
-        └── native_files.jsonl
-    └── commit_native_manifest      # PyIceberg add_files
+primeparts-generate --start-idx S --count N --warehouse WH [--rest-uri URL]
+    └── C core → iceberg-cpp Parquet under WH/primeparts/{primes,partitions}/data/...
+    └── CommitFiles → FastAppend snapshot per table (resume reads the primes frontier)
 ```
 
-All generation/commit paths share the same project data root:
-`/media/extssd/research/dioph.pp/data`. Temp runs, manifests, and intermediate
-files should live under that tree (for example `.../data/tmp/...`), not inside
-the repository checkout.
+Generation/commit paths share the project data root
+`/media/extssd/research/dioph.pp/data`; keep temp runs and intermediate files
+under that tree (e.g. `.../data/tmp/...`), not inside the repo checkout.
 
-As of the May 2026 compaction, production table partition directories are
-`p_trunc=...`. Older examples and the native generator's pre-compaction append
-layout used `commit_seq=...`; do not infer resume state from directory names.
-
-Production native runs are checkpointed by the Python coordinator. Each
-checkpoint starts a fresh `primeparts-generate` process, writes a bounded
-manifest, commits it with PyIceberg, then advances resume state. This bounds
-RSS growth in Arrow / iceberg-cpp writer code and means a killed process only
-leaves at most one checkpoint worth of files to recover. The default checkpoint
-size is `250,000,000` primes; override it with:
-
-```sh
-PRIMEPARTS_NATIVE_CHECKPOINT_PRIMES=100000000 primeparts -n 1000000000
-```
-
-The production generator derives resume state from validated Iceberg snapshot
-summary + manifest metrics. Direct `primeparts-generate` writes to an existing
-warehouse are intentionally refused unless the coordinator supplies internal
-state.
-
-Interactive native runs also support a graceful stop request. Press `q` or `c`
-while `primeparts-generate` is running to finish the current native file group,
-flush its manifest, exit the native process with `stop_requested=true`, and let
-the Python coordinator commit that completed checkpoint. The coordinator then
-stops launching new segments and prints a resume command for the remaining
-prime count. This is intentionally not a mid-batch cancel: the stop is honored
-only after a complete primes/decompositions file pair is durable.
+Interactive runs support a graceful stop: press `q` or `c` while
+`primeparts-generate` is running to finish the current file group, then commit
+the completed work and exit with `stop_requested=true`. This is not a mid-batch
+cancel — the stop is honored only after a complete primes/partitions file pair
+is durable, so resume stays hole-free.
 
 ## Threading and file-group width
 
@@ -200,19 +171,19 @@ Or, after `pixi shell`, source the checked-in helper:
 source scripts/primeparts-completion.zsh
 ```
 
-For a manual run against a temp warehouse:
+For a manual committing run against a warehouse (commit happens at end-of-run
+via `CommitFiles`; drop `--rest-uri` to commit in-process):
 
 ```sh
 native/build/primeparts-generate \
   --start-idx 10219850259 \
   --count 10000000 \
-  --temp \
+  --warehouse /media/extssd/research/dioph.pp/data/tmp/wh \
   --chunk-primes 500000 \
   --threads 24
+  # --rest-uri http://127.0.0.1:8181   # to commit through a running pp-catalogd
 
-PYTHONPATH=src python -m primeparts.native_iceberg \
-  --manifest /media/extssd/research/dioph.pp/data/tmp/iceberg_temp_native_YYYYMMDD_HHMMSS/native_files.jsonl \
-  --temp
+# Or --temp instead of --warehouse for an ephemeral, files-only run (no commit).
 ```
 
 On this machine, a temp run with `--chunk-primes 500000 --threads 24` produced
@@ -220,66 +191,18 @@ about `109MB` of Parquet and ran around `2.24M primes/s`.
 
 ## Recovery and warehouse health
 
-The normal health check is:
-
-```sh
-PYTHONPATH=src python -m primeparts.native_iceberg --check-warehouse
-```
-
-If a native process is killed after writing Parquet but before committing the
-manifest, the warehouse will contain local files not referenced by Iceberg. A
-complete gap-free prefix can be reconstructed from Parquet footer metadata:
-
-```sh
-PYTHONPATH=src python scripts/recover_native_orphan_prefix.py
-PYTHONPATH=src python scripts/recover_native_orphan_prefix.py --apply
-```
-
-Use `scripts/repair_native_commit_seq.py` only for the historical April 2026
-`commit_seq` collision repair; it is not part of normal operation.
+A native process killed after writing Parquet but before committing leaves
+local files not referenced by any Iceberg snapshot. The commit is end-of-run,
+so an interrupted run simply re-runs from the last committed `primes` frontier
+(the uncommitted files are inert and overwritten/ignored on the next run). The
+catalog snapshot — not directory names — is the source of truth for resume
+state.
 
 When stderr is a TTY, `primeparts-generate` prints a single-line progress
 bar (`groups N/M | rate | ETA`); when piped or redirected it stays silent so
 JSON summaries on stdout remain clean.
 
-The commit step uses PyIceberg because upstream `iceberg-cpp` currently
-ships memory and REST catalogs only, not the SQLite SqlCatalog this
-warehouse uses. The interim catalog path is:
-
-```text
-native C/C++ -> iceberg-cpp Parquet files -> native_files.jsonl -> PyIceberg add_files
-```
-
-That bridge has been verified on a temp 10M-prime write with Polars reading
-back `10,000,000` prime rows and `18,613,680` decomposition rows from the
-registered Iceberg tables.
-
-Rust `primeparts-commit` note: the current production partitioning
-`truncate[10000000000](p)` is not itself the Rust-commit blocker. The main
-catalog compatibility issue was SQLite schema drift (`iceberg_tables.iceberg_type`);
-the Rust path now includes a schema-evolution step to add/backfill that column
-before opening SqlCatalog.
-
-## Iceberg Writer Direction
-
-The previous production writer in `src/primeparts/iceberg_schema.py` used Polars only as a frame-shaping bridge and
-PyArrow/PyIceberg for durable writes:
-
-```text
-shaped rows -> Arrow table -> zstd Parquet -> PyIceberg add_files
-```
-
-Apache `iceberg-cpp` now has an Arrow-native Parquet writer, so the native
-writer uses it directly instead of hand-writing Parquet or treating
-PyIceberg as the long-term catalog layer:
-
-1. Keep batch generation in C.
-2. Use a narrow C++ boundary for `iceberg-cpp` and Arrow C Data Interface.
-3. Use `iceberg::parquet::ParquetWriter` for data files.
-4. Use the Iceberg C++ table/catalog APIs for append commits once SqlCatalog or
-   an equivalent local catalog path is validated against the existing layout.
-5. Keep PyIceberg only as the catalog-commit layer while the C++ writer is
-   being validated.
-
-The performance bar for this path is a temp ingest of the first `100M` prime
-ranks with observed generation throughput above `1M primes/s`.
+The whole write path is native C++ + iceberg-cpp: batch generation in C, a
+narrow C++ boundary to iceberg-cpp/Arrow, `iceberg::parquet::ParquetWriter` for
+data files, and the iceberg-cpp table/catalog APIs (via `CommitFiles`) for the
+FastAppend commit against the local `SqlCatalog`/`pp-catalogd`.
