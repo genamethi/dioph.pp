@@ -30,6 +30,7 @@
 #include "iceberg/table_scan.h"
 
 #include "primeparts/catalog/pp_iceberg_rest.h"
+#include "primeparts/query/materialize.h"
 #include "primeparts/source_scan.h"
 
 namespace primeparts::query {
@@ -40,6 +41,7 @@ const iceberg::Namespace kNs{{"primeparts"}};
 
 struct QueryService::Impl {
   std::shared_ptr<iceberg::Catalog> catalog;
+  fs::path warehouse;  // root, for materialize (CommitFiles needs it)
   std::vector<std::string> schema_fields;  // cached union of base-table fields
   bool schema_loaded = false;
 
@@ -63,6 +65,7 @@ std::unique_ptr<QueryService> QueryService::Open(const fs::path& warehouse,
   auto impl = std::make_unique<Impl>();
   impl->catalog = catalog::MakeLocalCatalog(warehouse, error);
   if (!impl->catalog) return nullptr;
+  impl->warehouse = warehouse;
   return std::unique_ptr<QueryService>(new QueryService(std::move(impl)));
 }
 
@@ -362,6 +365,80 @@ std::vector<GroupCountRow> QueryService::GroupCount(
     for (const auto& [v, c] : part) merged[v] += c;
   out.reserve(merged.size());
   for (const auto& [v, c] : merged) out.push_back(GroupCountRow{.value = v, .count = c});
+  return out;
+}
+
+bool QueryService::Materialize(const std::string& name,
+                               const std::vector<std::string>& col_names,
+                               const std::vector<std::vector<int64_t>>& columns,
+                               std::string* metadata_location,
+                               std::string* error) {
+  return MaterializeIntColumns(impl_->catalog, impl_->warehouse, name, col_names,
+                               columns, metadata_location, error);
+}
+
+TableRows QueryService::ReadTable(const std::string& table,
+                                  const std::vector<std::string>& cols_in,
+                                  int64_t limit, std::string* error) {
+  TableRows out;
+  auto t = impl_->catalog->LoadTable(
+      iceberg::TableIdentifier{.ns = kNs, .name = table});
+  if (!t.has_value()) {
+    if (error) *error = "LoadTable(" + table + "): " + t.error().message;
+    return out;
+  }
+  std::vector<std::string> cols = cols_in;
+  if (cols.empty()) {
+    if (auto sch = t.value()->schema(); sch.has_value())
+      for (const auto& f : sch.value()->fields()) cols.emplace_back(f.name());
+  }
+  if (cols.empty()) { if (error) *error = "no columns to read"; return out; }
+
+  fs::path meta = impl_->ResolveMeta(table, error);
+  if (meta.empty()) return out;
+  std::string e;
+  auto reader =
+      primeparts::SourceTableReader::OpenMetadata(meta, cols, nullptr, &e);
+  if (!reader) { if (error) *error = "open " + table + ": " + e; return out; }
+  out.cols = cols;
+
+  std::shared_ptr<arrow::RecordBatch> batch;
+  while (true) {
+    if (!reader->Next(&batch, &e)) {
+      if (error) *error = "scan " + table + ": " + e;
+      out.rows.clear();
+      return out;
+    }
+    if (!batch) break;  // EOF
+    const int64_t n = batch->num_rows();
+    std::vector<std::shared_ptr<arrow::Array>> arrs;
+    for (const auto& c : cols) {
+      auto a = batch->GetColumnByName(c);
+      if (!a) {
+        if (error) *error = "column not found: " + c;
+        out.rows.clear();
+        return out;
+      }
+      arrs.push_back(std::move(a));
+    }
+    for (int64_t i = 0; i < n; ++i) {
+      if (limit > 0 && static_cast<int64_t>(out.rows.size()) >= limit) return out;
+      std::vector<int64_t> row;
+      row.reserve(cols.size());
+      for (const auto& a : arrs) {
+        if (a->type_id() == arrow::Type::INT32) {
+          row.push_back(std::static_pointer_cast<arrow::Int32Array>(a)->Value(i));
+        } else if (a->type_id() == arrow::Type::INT64) {
+          row.push_back(std::static_pointer_cast<arrow::Int64Array>(a)->Value(i));
+        } else {
+          if (error) *error = "non-integer column in read: " + table;
+          out.rows.clear();
+          return out;
+        }
+      }
+      out.rows.push_back(std::move(row));
+    }
+  }
   return out;
 }
 

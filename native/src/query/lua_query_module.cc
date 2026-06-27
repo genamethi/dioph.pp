@@ -176,6 +176,90 @@ int q_hist(lua_State* L) {
   return 1;
 }
 
+// Read a Lua array-of-strings field (key) into `out`. Returns count.
+int read_str_array(lua_State* L, const char* key, std::vector<std::string>* out) {
+  lua_getfield(L, 1, key);
+  if (lua_istable(L, -1)) {
+    int n = static_cast<int>(lua_rawlen(L, -1));
+    for (int i = 1; i <= n; ++i) {
+      lua_geti(L, -1, i);
+      if (lua_isstring(L, -1)) out->push_back(lua_tostring(L, -1));
+      lua_pop(L, 1);
+    }
+  }
+  lua_pop(L, 1);
+  return static_cast<int>(out->size());
+}
+
+// query.materialize{ name=, cols={...}, rows={ {col=val,...}, ... } } -> meta loc
+// Caches an in-memory result (e.g. a query.hist output) as the MV
+// primeparts.<name>. `cols` lists the integer fields to pull from each row.
+int q_materialize(lua_State* L) {
+  QueryService* qs = qs_upvalue(L);
+  luaL_checktype(L, 1, LUA_TTABLE);
+  bool hn;
+  std::string name = opt_str(L, "name", "", &hn);
+  if (!hn || name.empty()) return luaL_error(L, "query.materialize requires name");
+  std::vector<std::string> cols;
+  if (read_str_array(L, "cols", &cols) == 0)
+    return luaL_error(L, "query.materialize requires cols={...}");
+
+  lua_getfield(L, 1, "rows");
+  if (!lua_istable(L, -1)) return luaL_error(L, "query.materialize requires rows={...}");
+  const int nrows = static_cast<int>(lua_rawlen(L, -1));
+  std::vector<std::vector<int64_t>> columns(cols.size());
+  for (auto& c : columns) c.reserve(nrows);
+  for (int r = 1; r <= nrows; ++r) {
+    lua_geti(L, -1, r);
+    if (!lua_istable(L, -1)) { lua_pop(L, 1); return luaL_error(L, "row %d not a table", r); }
+    for (size_t j = 0; j < cols.size(); ++j) {
+      lua_getfield(L, -1, cols[j].c_str());
+      columns[j].push_back(lua_isinteger(L, -1) ? (int64_t)lua_tointeger(L, -1)
+                                                : (int64_t)lua_tonumber(L, -1));
+      lua_pop(L, 1);
+    }
+    lua_pop(L, 1);
+  }
+  lua_pop(L, 1);  // rows
+
+  if (qs == nullptr) return luaL_error(L, "query.materialize needs a catalog");
+  std::string meta, e;
+  if (!qs->Materialize(name, cols, columns, &meta, &e))
+    return luaL_error(L, "query.materialize: %s", e.c_str());
+  lua_pushstring(L, meta.c_str());
+  return 1;
+}
+
+// query.read{ table=, [cols={...}], [limit=] } -> { {col=val,...}, ... }
+// Reads a (small) integer MV/table back. Empty cols = all int columns.
+int q_read(lua_State* L) {
+  QueryService* qs = qs_upvalue(L);
+  luaL_checktype(L, 1, LUA_TTABLE);
+  bool ht;
+  std::string table = opt_str(L, "table", "", &ht);
+  if (!ht || table.empty()) return luaL_error(L, "query.read requires table");
+  std::vector<std::string> cols;
+  read_str_array(L, "cols", &cols);
+  bool d;
+  int64_t limit = opt_int(L, "limit", 0, &d);
+
+  lua_newtable(L);  // result (empty if no qs)
+  if (qs == nullptr) return 1;
+  std::string e;
+  auto res = qs->ReadTable(table, cols, limit, &e);
+  if (!e.empty()) return luaL_error(L, "query.read: %s", e.c_str());
+  int idx = 1;
+  for (const auto& row : res.rows) {
+    lua_newtable(L);
+    for (size_t j = 0; j < res.cols.size(); ++j) {
+      lua_pushinteger(L, row[j]);
+      lua_setfield(L, -2, res.cols[j].c_str());
+    }
+    lua_seti(L, -2, idx++);
+  }
+  return 1;
+}
+
 }  // namespace
 
 void RegisterQueryModule(lua_State* L, QueryService* qs) {
@@ -197,6 +281,8 @@ void RegisterQueryModule(lua_State* L, QueryService* qs) {
   reg("pget", q_pget);
   reg("kget", q_kget);
   reg("hist", q_hist);
+  reg("materialize", q_materialize);
+  reg("read", q_read);
   lua_setglobal(L, "query");
 }
 

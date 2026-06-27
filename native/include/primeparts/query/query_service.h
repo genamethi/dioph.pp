@@ -53,6 +53,13 @@ struct GroupCountRow {
   int64_t count = 0;
 };
 
+/// Result of ReadTable: the column names and row-major int64 values (one int64
+/// per column per row; int32 columns are widened).
+struct TableRows {
+  std::vector<std::string> cols;
+  std::vector<std::vector<int64_t>> rows;
+};
+
 /// Warehouse-status facts for one table, read from the catalog metadata and the
 /// current snapshot summary (rows / files / size — zero scan). `max_p` is the
 /// max of the "p" column's manifest upper bounds (a manifest aggregate, only
@@ -121,6 +128,22 @@ class QueryService {
                                         int64_t p_lo, int64_t p_hi, int threads,
                                         std::string* error,
                                         const ScanControl& ctl = {});
+
+  /// Cache a small in-memory integer result as the unpartitioned MV
+  /// primeparts.<name> (replace semantics). `columns` is column-major,
+  /// `col_names[j]` names `columns[j]`; all int64. Sets *metadata_location.
+  /// The complement of ReadTable — together they are the MV cache lifecycle.
+  bool Materialize(const std::string& name,
+                   const std::vector<std::string>& col_names,
+                   const std::vector<std::vector<int64_t>>& columns,
+                   std::string* metadata_location, std::string* error);
+
+  /// Read up to `limit` rows (<= 0 = all) of integer columns from
+  /// primeparts.<table>. Empty `cols` = every int32/int64 schema column (int32
+  /// widened to int64). Empty result + *error on failure.
+  TableRows ReadTable(const std::string& table,
+                      const std::vector<std::string>& cols, int64_t limit,
+                      std::string* error);
 
   /// Distinct schema field names across the base tables (primes + partitions),
   /// read from the catalog schema and cached. The authority for preset
