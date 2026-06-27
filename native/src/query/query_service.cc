@@ -231,12 +231,19 @@ std::vector<GroupCountRow> QueryService::GroupCount(
     threads = hw == 0 ? 4 : std::max(1, std::min(8, static_cast<int>(hw)));
   }
 
+  // iceberg prunes whole files by the predicate but does NOT enforce a
+  // row-level residual, so when a p-window is set we must read `p` too and
+  // bound each row in C++ (mirrors ScanByK). No window -> count every row.
+  const bool windowed = (p_lo > 0 || p_hi > 0);
+  std::vector<std::string> cols{column};
+  if (windowed && column != "p") cols.push_back("p");
+
   // Total (for progress) via a cheap manifest read on a probe reader.
   int64_t total = 0;
   {
     std::string pe;
-    auto probe = primeparts::SourceTableReader::OpenMetadata(meta, {column},
-                                                             filter, &pe);
+    auto probe =
+        primeparts::SourceTableReader::OpenMetadata(meta, cols, filter, &pe);
     if (probe) total = probe->total_records();
   }
 
@@ -255,7 +262,7 @@ std::vector<GroupCountRow> QueryService::GroupCount(
   auto worker = [&](int t) {
     std::string e;
     auto reader = primeparts::SourceTableReader::OpenMetadata(
-        meta, {column}, filter, &e, /*shard_index=*/t, /*shard_count=*/threads);
+        meta, cols, filter, &e, /*shard_index=*/t, /*shard_count=*/threads);
     if (!reader) { fail("open " + table + ": " + e); return; }
     auto& acc = partials[static_cast<size_t>(t)];
     std::shared_ptr<arrow::RecordBatch> batch;
@@ -266,15 +273,32 @@ std::vector<GroupCountRow> QueryService::GroupCount(
       auto arr = batch->GetColumnByName(column);
       if (!arr) { fail("column not found: " + column); return; }
       const int64_t n = batch->num_rows();
+
+      std::shared_ptr<arrow::Int64Array> parr;
+      if (windowed) {
+        parr = std::static_pointer_cast<arrow::Int64Array>(
+            batch->GetColumnByName("p"));
+        if (!parr) { fail("p column not found for window on " + table); return; }
+      }
+      auto in_window = [&](int64_t i) {
+        if (!windowed) return true;
+        const int64_t pv = parr->Value(i);
+        if (p_lo > 0 && pv < p_lo) return false;
+        if (p_hi > 0 && pv > p_hi) return false;
+        return true;
+      };
+
       switch (arr->type_id()) {
         case arrow::Type::INT32: {
           auto a = std::static_pointer_cast<arrow::Int32Array>(arr);
-          for (int64_t i = 0; i < n; ++i) acc[a->Value(i)]++;
+          for (int64_t i = 0; i < n; ++i)
+            if (in_window(i)) acc[a->Value(i)]++;
           break;
         }
         case arrow::Type::INT64: {
           auto a = std::static_pointer_cast<arrow::Int64Array>(arr);
-          for (int64_t i = 0; i < n; ++i) acc[a->Value(i)]++;
+          for (int64_t i = 0; i < n; ++i)
+            if (in_window(i)) acc[a->Value(i)]++;
           break;
         }
         default:
