@@ -159,6 +159,29 @@ local h = query.hist{ col = "k", init = 3, hi = 1e6 }   -- row-accurate window
 > Same `end`/`hi` keyword caveat as `kget`. The value field is named after `col`
 > (e.g. `r.k` when `col="k"`), alongside `r.count`.
 
+#### `query.materialize{ name=, cols={...}, rows={...} }` → metadata location
+
+Cache an in-memory integer result (e.g. a `query.hist` output) as the
+unpartitioned Iceberg MV `primeparts.<name>` (**replace** semantics — refreshes
+on re-run). `cols` lists the integer fields to pull from each row of `rows`. →
+`QueryService::Materialize`.
+
+#### `query.read{ table=, [cols={...}], [limit=] }` → array of rows
+
+Read a (small) integer table/MV back. Empty `cols` = every int column.
+→ `QueryService::ReadTable`. Together with `materialize` this is the MV cache
+lifecycle.
+
+```lua
+-- cache the per-k distribution, then read it back with no rescan:
+query.materialize{ name = "k_freq", cols = {"k","count"}, rows = query.hist{col="k"} }
+for _, r in ipairs(query.read{ table = "k_freq" }) do print(r.k, r.count) end
+```
+
+> **Cached MVs** (warehouse `primeparts.*`): `k_freq` (k,count) and `r_freq`
+> (r,count) hold the full-census k- and r=⌊log₂p⌋−k distributions — read them
+> instead of rescanning 21.7 B rows.
+
 ---
 
 ## 3. Record shapes
@@ -182,7 +205,7 @@ For a `k=0` prime, `partitions = {}`.
 Sketched in [`../arch/lua_query_api.md`](../arch/lua_query_api.md) but **not
 built**: `query.parts`, `query.extent`, `query.reload`, and the `on_progress` /
 cooperative-cancellation hooks. `query.count` is subsumed by the more general
-`query.hist` (above). `is_obstructed(p)` is not a distinct function — use
+`query.hist` (above); `query.materialize`/`query.read` cover the MV cache. `is_obstructed(p)` is not a distinct function — use
 `query.pget{p=p}.k == 0` (or `kget{k=0,...}`).
 
 ## Running Lua against the warehouse — the `pp` shell
