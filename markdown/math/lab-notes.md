@@ -307,3 +307,91 @@ VERIFICATION STATISTICS:
 
 FILES: scripts/subgroup_exclusion.py, scripts/proof_structure.py
 
+
+2026-06-27  k-distribution: full census, distributional fit, magnitude-stationarity
+-----------------------------------------------------------------------------------
+
+DATA. Full census of `primeparts.primes` (native warehouse, ib-staging):
+N = 21,698,850,257 primes, min p = 3, max p = 564,575,405,239 (~2^39.04).
+This is the COMPLETE set up to the frontier, not a sample.
+
+APPROACH. Computed natively through the catalog/query layer — no Python, no
+bespoke binary. New reusable primitive `QueryService::GroupCount(table, column,
+p_lo, p_hi, threads)` (sharded parallel scan over SourceTableReader), exposed as
+Lua `query.hist{col=...}` and run via the `pp` Lua shell. Derived ("virtual")
+group keys: `bits` = floor(log2 p) (= max_m), `r` = bits - k (per-prime count of
+m where p-2^m is NOT a prime power = "misses"; r >= 0 since k <= max_m). Full
+scan ~32 s (8 shards). Distribution fits done in Lua on the 17 aggregated counts.
+
+1. THE k-DISTRIBUTION (the obstruction / connectivity spectrum)
+
+   k :        count          pct
+   0 : 3,874,747,523     17.857%   (matches the ~17.3-17.6% obstruction rate)
+   1 : 6,176,825,098     28.466%   (mode)
+   2 : 5,291,635,631     24.387%
+   3 : 3,332,361,926     15.357%
+   4 : 1,743,044,997      8.033%
+   5 :   796,237,699      3.670%
+   6 :   321,601,493      1.482%
+   7 :   114,422,288      0.527%
+   8 :    35,591,015      0.164%
+   9 :     9,612,963      0.044%
+   10:     2,236,822      0.010%
+   11:       445,727      0.0021%
+   12:        75,054      0.00035%
+   13:        10,744 / 14: 1,156 / 15: 108 / 16: 13
+   mean = 1.88216, var = 2.24859, dispersion var/mean = 1.1947 (OVERDISPERSED).
+   Cross-checks: sum k*count = 40,840,689,931 ~= the ~40 B `partitions` rows
+   (HANDOFF s4); k=0 count = 3.87 B = `primes_k0`.
+
+2. DISTRIBUTIONAL FIT (G-test, lower = better; G huge for all at this N, so read
+   relative G + closeness, not p-values)
+   - Poisson(lambda=1):     G = 1.37e10  — REJECTED. Forces P(0)=P(1)=0.368, but
+     P(0)=0.179 < P(1)=0.285; the mode at k=1 with a depressed zero forces
+     lambda>1.
+   - Poisson(lambda=1.882): G = 3.60e8   — nails the center but UNDER-disperses:
+     under-predicts P(0) (0.152 vs 0.179) and the whole tail (k=6: 0.0094 vs
+     0.0148).
+   - Negative binomial (MoM r=9.667, p=0.163): G = 4.65e6  — ~80x better than
+     Poisson, ~3000x better than Poisson(1). Tracks body AND tail (k=0:0.1791,
+     k=2:0.2453, k=6:0.0142, k=8:0.00176). WINNER.
+     NegBin = Gamma-mixture of Poissons => a Poisson whose rate varies across
+     primes; mechanistically this is the covering-class heterogeneity. The
+     diagnostic (k+1)p[k+1]/p[k] is NOT flat (would be for pure Poisson) but
+     LINEAR-rising ~ 0.163*k + 1.58 (= NegBin's p*k + p*r) through k~7.
+   - Zeta / Zipf: REJECTED two ways. (a) not monotone (pmf rises 0->1, interior
+     mode); (b) the tail is super-exponential, not power-law: log-log slope
+     d ln p / d ln k STEEPENS (-1.1, -2.3, -3.5, ... -34) instead of staying
+     constant. The "zeta vibe" is only the peaked-then-decaying silhouette.
+   - Far tail (k>=9) is slightly LIGHTER than even NegBin (the (k+1) ratio turns
+     over after k~7), consistent with the hard k <= floor(log2 p) ceiling.
+
+3. MAGNITUDE-STATIONARITY (per bit-band [2^a, 2^(a+1)))
+       band        N            mean_k  disp_k   mean_r
+       2^30-2^31   50,697,537   1.8772  1.142    28.123
+       2^32-2^33   190,335,585  1.8786  1.159    30.121
+       2^34-2^35   717,267,168  1.8798  1.175    32.120
+       2^36-2^37   2,712,103,833 1.8808 1.185    34.119
+       2^38-2^39   10,285,641,778 1.8818 1.202   36.118
+   - mean_k is ~CONSTANT ~1.88 across 8 doublings (+0.0046 total, ~6e-4/bit).
+     The HIT count saturates; it does not grow with the number of candidate
+     positions.
+   - mean_r rises ~1 per bit, but ONLY because mean_r = bits - mean_k and bits
+     grows. r carries no structure beyond bits and k separately (affine
+     recoding). So the stationary object is k, NOT r (this corrected the initial
+     guess). Each added bit is almost always a new MISS.
+   - The one real drift: dispersion creeps up 1.142 -> 1.202, so overdispersion
+     (the NegBin signal) slowly fattens with magnitude; the pooled NegBin params
+     are effectively the frontier-band values (most mass is near max_p).
+
+4. SAMPLING ERROR / STOP CRITERION
+   - Bulk is DRIFT-limited, not sample-limited: every k<=12 bin has >=75k events
+     (rel err <=0.4%), k<=8 has millions (<=0.02%). The residual motion is the
+     ~6e-4/bit drift in mean_k -> pushing the frontier barely moves the bulk.
+   - Resolution floor: p ~ 4.6e-9 measurable @10% rel err (count 100); p ~ 4.6e-7
+     @1% (count 1e4). A 1e-7 probability currently sits at ~2% err (~2170 events).
+   - The high-k tail (k>=13: 10744/1156/108/13) is sample-limited and, by the
+     k<=floor(log2 p) ceiling, only grows at much larger p. => switch the bulk to
+     the implicit/dynamic approach now; reserve brute generation (or a dynamic
+     method) for the rare high-k tail, where it is the only lever.
+
