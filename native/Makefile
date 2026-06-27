@@ -59,6 +59,7 @@ PRIMITIVE_FACTORS_OBJ := $(BUILD_DIR)/primitive_factors.o
 PRIMITIVE_FACTORS_MAIN_OBJ := $(BUILD_DIR)/primitive_factors_main.o
 COVERING_SIEVE_MAIN_OBJ := $(BUILD_DIR)/covering_sieve_main.o
 SIEVE_TRIAGE_MAIN_OBJ := $(BUILD_DIR)/sieve_triage_main.o
+MDIFF_MAIN_OBJ := $(BUILD_DIR)/mdiff_main.o
 PP_ICEBERG_REST_OBJ := $(BUILD_DIR)/pp_iceberg_rest.o
 PP_ROW_DELTA_OBJ := $(BUILD_DIR)/pp_row_delta.o
 PP_SIEVE_CLONE_OBJ := $(BUILD_DIR)/pp_sieve_clone.o
@@ -87,6 +88,7 @@ all: $(BUILD_DIR)/libprimeparts_core.so \
      $(BUILD_DIR)/primeparts-primitive-factors \
      $(BUILD_DIR)/primeparts-covering-sieve \
      $(BUILD_DIR)/primeparts-sieve-triage \
+     $(BUILD_DIR)/primeparts-mdiff \
      $(BUILD_DIR)/pp-catalog \
      $(BUILD_DIR)/pp \
      $(BUILD_DIR)/primeparts-catalogd \
@@ -121,6 +123,9 @@ $(PRIMITIVE_FACTORS_MAIN_OBJ): src/coverings/primitive_factors_main.cc include/p
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(COVERING_SIEVE_MAIN_OBJ): src/coverings/covering_sieve_main.cc include/primeparts/coverings/primitive_factors.h include/primeparts/source_scan.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/catalog/pp_row_delta.h include/primeparts/common/thread_pool.h include/primeparts/common/uri.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(MDIFF_MAIN_OBJ): src/coverings/mdiff_main.cc include/primeparts/writer.h include/primeparts/source_scan.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/coverings/primitive_factors.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(SIEVE_TRIAGE_MAIN_OBJ): src/coverings/sieve_triage_main.cc include/primeparts/source_scan.h include/primeparts/common/thread_pool.h | $(BUILD_DIR)
@@ -265,6 +270,11 @@ $(BUILD_DIR)/primeparts-covering-sieve: $(COVERING_SIEVE_MAIN_OBJ) $(PRIMITIVE_F
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
 
 $(BUILD_DIR)/primeparts-sieve-triage: $(SIEVE_TRIAGE_MAIN_OBJ) $(SOURCE_SCAN_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
+	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lparquet -larrow -lsqlite3 -pthread -o $@
+
+# mdiff: writer (BucketParquetWriter/MdiffSchema) + source_scan (partitions
+# enumeration) + catalog seam (CommitFiles) + primitive_factors (Mersenne helper).
+$(BUILD_DIR)/primeparts-mdiff: $(MDIFF_MAIN_OBJ) $(WRITER_OBJ) $(SOURCE_SCAN_OBJ) $(PRIMITIVE_FACTORS_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lparquet -larrow -lsqlite3 -pthread -o $@
 
 $(BUILD_DIR)/query-smoke: $(BUILD_DIR)/query_smoke.o $(SOURCE_SCAN_OBJ)

@@ -187,6 +187,31 @@ std::shared_ptr<iceberg::Schema> PartitionsSchema() {
       0);
 }
 
+std::shared_ptr<iceberg::Schema> MdiffSchema(int k, std::string* error) {
+  if (k < 2) {
+    if (error) *error = "MdiffSchema: k must be >= 2";
+    return nullptr;
+  }
+  const int c = k * (k - 1) / 2;
+  std::vector<iceberg::SchemaField> fields;
+  fields.reserve(static_cast<size_t>(4 + k + c));
+  int32_t id = 1;
+  fields.push_back(iceberg::SchemaField::MakeRequired(id++, "p", iceberg::int64()));
+  fields.push_back(
+      iceberg::SchemaField::MakeRequired(id++, "prime_rank", iceberg::int64()));
+  for (int i = 1; i <= k; ++i)
+    fields.push_back(iceberg::SchemaField::MakeRequired(
+        id++, "m_" + std::to_string(i), iceberg::int32()));
+  for (int i = 1; i <= c; ++i)
+    fields.push_back(iceberg::SchemaField::MakeRequired(
+        id++, "d_" + std::to_string(i), iceberg::int32()));
+  fields.push_back(iceberg::SchemaField::MakeRequired(id++, "p_bucket_version",
+                                                      iceberg::int32()));
+  fields.push_back(
+      iceberg::SchemaField::MakeRequired(id++, "p_bucket", iceberg::int32()));
+  return std::make_shared<iceberg::Schema>(std::move(fields), 0);
+}
+
 std::shared_ptr<iceberg::Schema> BoundariesSchema() {
   return std::make_shared<iceberg::Schema>(
       std::vector<iceberg::SchemaField>{

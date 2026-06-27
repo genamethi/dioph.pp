@@ -375,3 +375,84 @@ scan ~32 s (8 shards). Distribution fits done in Lua on the 17 aggregated counts
    - The high-k tail (k>=13: 10,744 / 1,156 / 108 / 13) is sample-limited, and
      by the k <= floor(log2 p) ceiling only appears at much larger p.
 
+
+2026-06-27  The r-distribution, and two bucketing schemes (bit-band vs m_k)
+--------------------------------------------------------------------------
+
+DATA. Full census of primeparts.primes: N = 21,698,850,257, max p ~ 2^39.04.
+r := floor(log2 p) - k = number of MISSES per prime (m in [1, floor(log2 p)]
+where p - 2^m is NOT a prime power). Stats: mean_r = 35.1115, var = 4.4787,
+dispersion var/mean = 0.1276 (UNDER-dispersed -- the converse of k, which is
+overdispersed at 1.19).
+
+THE r-DISTRIBUTION IS TWO REGIMES.
+
+  Right hump (r >~ 25): the prime BIT-LENGTH CENSUS, nothing more. Consecutive
+  count ratio is flat at ~1.94, which is exactly 2*(1 - 1/m) at m ~ 37 -- the
+  prime-band doubling (pi(2^{m+1}) - pi(2^m)) / (pi(2^m) - pi(2^{m-1})). The mode
+  at r=36 and mean_r=35.11 are just mean_m - mean_k (definitional). The rolloff
+  at r=37,38,39 is the data frontier (max p ~ 2^39.04), not structure. This side
+  carries no information beyond pi(x); read it on a log axis or not at all.
+
+    r :   count        r :   count          r :   count
+    0 :       3        14:     8594         28:    91438791
+    1 :       5        15:    16769         29:   176172128
+    2 :       7        16:    32171         30:   334412765
+    3 :       9        17:    61484         31:   618248874
+    4 :      19        18:   119362         32:  1097910342
+    5 :      22        19:   231476         33:  1840633318
+    6 :      66        20:   448061         34:  2846827500
+    7 :      81        21:   868015         35:  3928716708
+    8 :     190        22:  1687652         36:  4568757238  (mode, 21.06%)
+    9 :     371        23:  3273843         37:  4000818753
+    10:     685        24:  6373726         38:  2001834319
+    11:    1225        25: 12419385         39:    96209205
+    12:    2323        26: 24212734
+    13:    4553        27: 47107485
+
+  Left tail (small r): MAXIMALLY-CONNECTED primes, structurally confined to
+  small p. r = m - k with observed k <= 16, so r=0 forces k=m<=16, i.e. p < 2^17;
+  small r lives only at the bottom of the range. The counts sit ABOVE the
+  geometric census extrapolation (extrapolating the right hump predicts ~0.2 at
+  r=0; observed 3) -- a genuine excess of connectivity at small p, where
+  prime powers are dense. r=0 means H(p) = {1,...,m}: a prime that hits every
+  available position.
+
+WHY mean_k SATURATES (the magnitude-stationarity, derived). For one prime,
+  E[k] = sum_{m'=1}^{m} P(p - 2^{m'} is a prime power) ~ sum 1/ln(p - 2^{m'})
+       ~ m * 1/(m ln 2) = 1/ln 2 ~ 1.443  (+ proper prime powers -> ~1.88).
+The m available positions and the ~1/m per-position density CANCEL, so the
+expected hit count is band-invariant. Confirmed empirically: mean_k = 1.877 ->
+1.882 across bands 2^30..2^39, essentially flat.
+
+TWO BUCKETING SCHEMES (both useful; not yet ranked).
+
+  (A) Bit-band bucketing -- bucket primes by m = floor(log2 p). Within a band,
+      k ~ Binomial(m, p_m) with per-position success p_m ~ 1.88/m (falls as 1/m),
+      which limits to Poisson(1.88). The GLOBAL k-distribution is the mixture over
+      bands plus per-prime rate heterogeneity = a Gamma-mixed Poisson = the
+      observed negative-binomial overdispersion. Banding is thus the decomposition
+      that explains the overdispersion: it is a family of Poissons, not one.
+
+  (B) m_k bucketing (on the partitions table) -- for each representation exponent
+      m_k in [1, floor(log2 max_p)], bucket partitions by m_k. Within a bucket,
+      q^n = p - 2^{m_k} = 2^{m_k}(2^{j} - 1), where j := log2(p) - m_k indexes the
+      size of q^n relative to its 2^{m_k} anchor on a log2 scale. For the top
+      position (m_k = floor(log2 p)) j is the mantissa in [0,1); for lower
+      positions j > 1. So j is the log-coordinate of q^n, and binning by j with a
+      prime-power-density weight 1/ln(q^n) gives a principled, non-uniform
+      per-position hit probability (replacing the uniform 1.88/m). Directly
+      checkable against the stored (q, n).
+
+HOW THIS FEEDS THE ANALYSIS. The covering / Mersenne structure lives not in the
+scalar r but in the per-prime INDEX-DIFFERENCE structure. For a prime with two
+representations (m1 > m2):
+    2^{m1} + q1^{n1} = 2^{m2} + q2^{n2}
+    => 2^{m2} * M_d = q2^{n2} - q1^{n1},   d = m1 - m2,  M_d = 2^d - 1.
+Every primitive factor ell of M_d (those with ord_ell(2) = d) is odd and divides
+the right side, giving q2^{n2} ≡ q1^{n1} (mod ell). This is the S-unit relation,
+per-prime, keyed on the index difference d. The graduated programme: k=2 gives one
+such constraint, k=3 gives three pairwise constraints that must be jointly
+consistent, and so on. The j-binning of (B) supplies the null/base measure to test
+whether the observed d's are biased toward small ord_ell(2).
+

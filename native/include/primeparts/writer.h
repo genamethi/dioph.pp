@@ -132,6 +132,19 @@ std::shared_ptr<arrow::Schema> IcebergToArrowSchemaWithFieldIds(
 std::shared_ptr<iceberg::Schema> PrimesSchema();
 std::shared_ptr<iceberg::Schema> PartitionsSchema();
 std::shared_ptr<iceberg::Schema> BoundariesSchema();
+
+// Fixed-width per-k index-difference schema for primeparts.mdiff_k{K}: one
+// row per prime with exactly k(p)==K representations. Field ids contiguous:
+//   p=1, prime_rank=2,
+//   m_1..m_K        = 3 .. 2+K            (sorted ascending hit positions)
+//   d_1..d_C        = 3+K .. 2+K+C        (C=K(K-1)/2 pairwise differences,
+//                                          canonical order; each d is a
+//                                          Mersenne index M_d = 2^d - 1)
+//   p_bucket_version, p_bucket = trailing identity-partition columns
+// Canonical d order, m sorted ascending (m[0]<...<m[K-1]):
+//   for a = K-1 .. 1, for b = a-1 .. 0: emit m[a]-m[b].
+// Requires K >= 2. Returns nullptr + *error otherwise.
+std::shared_ptr<iceberg::Schema> MdiffSchema(int k, std::string* error);
 std::shared_ptr<iceberg::PartitionSpec> BucketPartitionSpec(
     const iceberg::Schema& schema, std::string* error);
 
