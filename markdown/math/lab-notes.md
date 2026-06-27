@@ -456,3 +456,42 @@ such constraint, k=3 gives three pairwise constraints that must be jointly
 consistent, and so on. The j-binning of (B) supplies the null/base measure to test
 whether the observed d's are biased toward small ord_ell(2).
 
+
+2026-06-27  mdiff_k2/k3 built (full census): index differences are parity-locked
+--------------------------------------------------------------------------------
+
+Built primeparts.mdiff_k{2,3} over the full census (5,291,635,631 and
+3,332,361,926 rows = exact k_freq counts) + primeparts.mersenne_factors (full
+factorization of 2^d-1, d<=40). Per-k fixed-width: m_1..m_K sorted, d_i the
+canonical pairwise differences. Histogramming d confirms, at full scale, the
+parity result already seen in the covering-system triage:
+
+  ALL index differences are EVEN. Odd d has single-digit counts across billions
+  of primes (mdiff_k2.d_1: d=2 -> 2.4e8, d=4 -> 6.5e8, ..., d=12 -> 8.2e8 (mode,
+  15.5%); but d=3 -> 7, d=5 -> 8, d=7 -> 4, d=9 -> 5). Same for all three k=3
+  differences. Equivalently: within one prime every hit position m shares a
+  common parity, fixed by p mod 3 -- ord_2(3)=2, so 3 | p-2^m on one parity
+  class of m, killing it unless p-2^m is a literal power of 3. The handful of
+  odd-d rows are exactly those power-of-3 exceptions. This holds across the
+  whole range (not a small-p artifact); it is the mod-3 backbone imposing the
+  sieve, the same {3,...} backbone the triage uses.
+
+  The even-d mass tracks M_d small-factor richness: the mode d=12 is
+  M_12 = 2^12-1 = 3^2.5.7.13 (the small primes with ord_2 in {2,3,4,12}, all
+  dividing it); secondary peaks d=4 (3.5), 8 (3.5.17), 24. So d weights are
+  biased toward small ord_ell(2), as conjectured -- the S-unit/covering signal.
+
+CONSEQUENCE FOR REPRESENTATION. Single-parity hit sets => store the hit set as
+one int64 bitmask (bit m set; m_max ~ 39 < 64, so this is k-agnostic, not just
+low k), drop the d-vector entirely (a deterministic bit-op on the mask) and
+prime_rank (= pi(p)). The mask factors as (anchor m_min, translation-invariant
+even-gap shape); the shape is low-cardinality (the d-distribution above), so
+dictionary+RLE on shape and delta on the anchor compress hard, and group-by-shape
+is itself the covering-pattern census.
+
+  IMPLEMENTED. mdiff_k{K} now stores exactly (p, hit_mask int64); the m-vector
+  and d-multiset are decoded on demand (HitMaskDiffs). The Mersenne-factor cache
+  moved to its own builder (primeparts-mersenne -> mersenne_factors with ord2 +
+  is_primitive, is_primitive = ord2==d). Replace is catalog-pure: a drop-purge
+  through the catalog seam (no warehouse fs writes from the analysis tools).
+

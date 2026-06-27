@@ -117,6 +117,35 @@ bool EnsureNamespace(const std::shared_ptr<iceberg::Catalog>& catalog,
   return true;
 }
 
+bool DropTable(const std::shared_ptr<iceberg::Catalog>& catalog,
+               const std::string& table, bool purge, std::string* error) {
+  iceberg::TableIdentifier ident{
+      .ns = iceberg::Namespace{{"primeparts"}}, .name = table};
+
+  // Resolve the table's base location through the catalog before dropping, so a
+  // purge removes exactly the directory tree the catalog says this table owns.
+  auto loaded = catalog->LoadTable(ident);
+  if (!loaded.has_value()) {
+    return true;  // not registered -> already dropped (idempotent)
+  }
+  fs::path base(common::StripFileScheme(std::string(loaded.value()->location())));
+
+  auto del = catalog->DropTable(ident, purge);
+  if (!del.has_value()) {
+    if (error) *error = "DropTable(primeparts." + table + "): " + del.error().message;
+    return false;
+  }
+
+  // Complete the purgeRequested contract: the vendored SqlCatalog FileIO does
+  // not delete physical files, so the catalog-adapter layer does it here. This
+  // is the single sanctioned point of warehouse file removal.
+  if (purge && !base.empty()) {
+    std::error_code ec;
+    fs::remove_all(base, ec);
+  }
+  return true;
+}
+
 bool PublishTable(const std::shared_ptr<iceberg::Catalog>& catalog,
                   const fs::path& warehouse, const std::string& table_name,
                   const std::shared_ptr<iceberg::Schema>& schema,

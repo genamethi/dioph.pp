@@ -167,4 +167,23 @@ std::vector<PrimitiveFactor> PrimitiveFactorsForTerm(uint64_t p, int32_t m,
   return out;
 }
 
+std::vector<int32_t> HitMaskDiffs(uint64_t mask) {
+  // Set bit positions, ascending (lowest position first).
+  std::vector<int32_t> m;
+  m.reserve(8);
+  while (mask != 0) {
+    const int b = __builtin_ctzll(mask);
+    m.push_back(b);
+    mask &= mask - 1;  // clear lowest set bit
+  }
+  std::vector<int32_t> out;
+  const int k = static_cast<int>(m.size());
+  if (k < 2) return out;
+  out.reserve(static_cast<size_t>(k) * (k - 1) / 2);
+  for (int a = k - 1; a >= 1; --a)
+    for (int b = a - 1; b >= 0; --b)
+      out.push_back(m[static_cast<size_t>(a)] - m[static_cast<size_t>(b)]);
+  return out;
+}
+
 }  // namespace primeparts

@@ -74,6 +74,18 @@ fs::path TableMetadataPath(const std::shared_ptr<iceberg::Catalog>& catalog,
 bool EnsureNamespace(const std::shared_ptr<iceberg::Catalog>& catalog,
                      const iceberg::Namespace& ns, std::string* error);
 
+/// Drop table `primeparts.<table>` through the catalog. When `purge` is true,
+/// implements the REST `dropTable?purgeRequested=true` contract: the table's
+/// physical data + metadata are deleted. The base location is resolved through
+/// the catalog (LoadTable -> location()) *before* the drop, so we delete exactly
+/// what the catalog says the table owns. This function is the ONLY place in the
+/// codebase that removes warehouse files — purge is a catalog operation, never
+/// something application/analysis code does directly. (The deletion lives here
+/// because the vendored v0.3.0 SqlCatalog FileIO does not purge on its own.)
+/// Idempotent: a table the catalog does not know is treated as already dropped.
+bool DropTable(const std::shared_ptr<iceberg::Catalog>& catalog,
+               const std::string& table, bool purge, std::string* error);
+
 /// Publish a table to the catalog under namespace `primeparts`.
 ///
 /// Two paths, matching the existing tools:

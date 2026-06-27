@@ -8,6 +8,7 @@
 #include "primeparts/catalog/pp_iceberg_rest.h"
 #include "primeparts/core.h"
 #include "primeparts/generate.h"
+#include "primeparts/schemas.h"
 #include "primeparts/writer.h"
 
 #include <arrow/api.h>

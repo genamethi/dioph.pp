@@ -28,6 +28,15 @@ struct MersenneHelper {
 
 MersenneHelper BuildMersenneHelper(int32_t max_d);
 
+// Decode a hit-position bitmask (bit m set iff m is a hit position) into the
+// multiset of pairwise positive index differences d = m_a - m_b (m_a > m_b),
+// each a Mersenne index M_d = 2^d - 1. Emitted in the canonical order used by
+// mdiff: positions sorted ascending m[0] < ... < m[K-1], then
+//   for a = K-1 .. 1, for b = a-1 .. 0: emit m[a] - m[b].
+// For K = popcount(mask) positions this yields C = K(K-1)/2 differences (empty
+// for K < 2). The inverse of the mask packing in mdiff_main.
+std::vector<int32_t> HitMaskDiffs(uint64_t mask);
+
 // Returns a bitmask where the i-th bit is set if (p - 2^i) mod s == 0
 // for any s in the backbone {3, 5, 7, 11, 13, 17}.
 uint64_t GetBackboneMask(uint64_t p, int32_t max_m);

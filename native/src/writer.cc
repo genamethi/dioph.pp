@@ -1,4 +1,5 @@
 #include "primeparts/writer.h"
+#include "primeparts/schemas.h"
 
 #include <arrow/api.h>
 #include <arrow/io/file.h>
@@ -10,14 +11,16 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <unordered_set>
 
 #include "iceberg/expression/literal.h"
 #include "iceberg/manifest/manifest_entry.h"
-#include "iceberg/partition_field.h"
 #include "iceberg/partition_spec.h"
 #include "iceberg/row/partition_values.h"
 #include "iceberg/schema.h"
@@ -31,17 +34,31 @@ namespace {
 
 constexpr std::string_view kTmpDotPrefix = ".";
 
+// A per-file random token. Iceberg writers give every data file a unique name
+// so a fresh CreateTable+append after a DropTable never collides with an
+// orphaned file (and parallel writers never race on a path). Placed BEFORE the
+// trailing seq field so NextFileSeq, which reads the last '_'-delimited number,
+// still recovers the sequence for resume.
+uint32_t FileToken() {
+  static thread_local std::mt19937 rng(
+      std::random_device{}() ^
+      static_cast<uint32_t>(
+          std::hash<std::thread::id>{}(std::this_thread::get_id())));
+  return rng();
+}
+
 fs::path FilePathFor(const fs::path& dir, std::string_view prefix,
                      int32_t bucket_version, int32_t bucket, int32_t seq,
                      bool simple) {
-  char name[160];
+  char name[176];
+  const uint32_t tok = FileToken();
   if (simple) {
-    std::snprintf(name, sizeof(name), "%.*s_%04d.parquet",
-                  static_cast<int>(prefix.size()), prefix.data(), seq);
+    std::snprintf(name, sizeof(name), "%.*s_%08x_%04d.parquet",
+                  static_cast<int>(prefix.size()), prefix.data(), tok, seq);
   } else {
-    std::snprintf(name, sizeof(name), "%.*s_v%04d_b%06d_%04d.parquet",
+    std::snprintf(name, sizeof(name), "%.*s_v%04d_b%06d_%08x_%04d.parquet",
                   static_cast<int>(prefix.size()), prefix.data(),
-                  bucket_version, bucket, seq);
+                  bucket_version, bucket, tok, seq);
   }
   return dir / name;
 }
@@ -51,29 +68,6 @@ int32_t FieldIdByName(const iceberg::Schema& schema, std::string_view name) {
     if (field.name() == name) return field.field_id();
   }
   return -1;
-}
-
-std::shared_ptr<iceberg::PartitionSpec> MakeBucketPartitionSpec(
-    const iceberg::Schema& schema, std::string* error) {
-  const int32_t bucket_version_id = FieldIdByName(schema, "p_bucket_version");
-  const int32_t bucket_id = FieldIdByName(schema, "p_bucket");
-  if (bucket_version_id < 0 || bucket_id < 0) {
-    if (error) *error = "schema is missing p_bucket_version or p_bucket";
-    return nullptr;
-  }
-
-  auto spec_result = iceberg::PartitionSpec::Make(
-      schema, iceberg::PartitionSpec::kInitialSpecId,
-      {iceberg::PartitionField(bucket_version_id, 1000, "p_bucket_version",
-                               iceberg::Transform::Identity()),
-       iceberg::PartitionField(bucket_id, 1001, "p_bucket",
-                               iceberg::Transform::Identity())},
-      /*allow_missing_fields=*/false);
-  if (!spec_result.has_value()) {
-    if (error) *error = spec_result.error().message;
-    return nullptr;
-  }
-  return std::shared_ptr<iceberg::PartitionSpec>(std::move(spec_result.value()));
 }
 
 std::shared_ptr<parquet::WriterProperties> ParquetWriterProperties(
@@ -153,80 +147,6 @@ bool BuildDataFile(const WriterConfig& config,
 }
 
 }  // namespace
-
-// All fields required. The staging warehouse is the post-backfill
-// target — prime_rank is materialized either inline by the rewriter or
-// by a separate backfill pass before metadata publish, and downstream
-// readers can rely on it being non-null. Field ids are contiguous; the
-// earlier scheme that skipped 3 / 5 / 8 to retire commit_seq turned out
-// to be incidental rather than load-bearing, and renumbering created
-// drift with what was actually on disk.
-std::shared_ptr<iceberg::Schema> PrimesSchema() {
-  return std::make_shared<iceberg::Schema>(
-      std::vector<iceberg::SchemaField>{
-          iceberg::SchemaField::MakeRequired(1, "p",                iceberg::int64()),
-          iceberg::SchemaField::MakeRequired(2, "k",                iceberg::int32()),
-          iceberg::SchemaField::MakeRequired(3, "prime_rank",       iceberg::int64()),
-          iceberg::SchemaField::MakeRequired(4, "p_bucket_version", iceberg::int32()),
-          iceberg::SchemaField::MakeRequired(5, "p_bucket",         iceberg::int32()),
-      },
-      0);
-}
-
-std::shared_ptr<iceberg::Schema> PartitionsSchema() {
-  return std::make_shared<iceberg::Schema>(
-      std::vector<iceberg::SchemaField>{
-          iceberg::SchemaField::MakeRequired(1, "p",                iceberg::int64()),
-          iceberg::SchemaField::MakeRequired(2, "m_k",              iceberg::int32()),
-          iceberg::SchemaField::MakeRequired(3, "n_k",              iceberg::int32()),
-          iceberg::SchemaField::MakeRequired(4, "q_k",              iceberg::int64()),
-          iceberg::SchemaField::MakeRequired(5, "prime_rank",       iceberg::int64()),
-          iceberg::SchemaField::MakeRequired(6, "p_bucket_version", iceberg::int32()),
-          iceberg::SchemaField::MakeRequired(7, "p_bucket",         iceberg::int32()),
-      },
-      0);
-}
-
-std::shared_ptr<iceberg::Schema> MdiffSchema(int k, std::string* error) {
-  if (k < 2) {
-    if (error) *error = "MdiffSchema: k must be >= 2";
-    return nullptr;
-  }
-  const int c = k * (k - 1) / 2;
-  std::vector<iceberg::SchemaField> fields;
-  fields.reserve(static_cast<size_t>(4 + k + c));
-  int32_t id = 1;
-  fields.push_back(iceberg::SchemaField::MakeRequired(id++, "p", iceberg::int64()));
-  fields.push_back(
-      iceberg::SchemaField::MakeRequired(id++, "prime_rank", iceberg::int64()));
-  for (int i = 1; i <= k; ++i)
-    fields.push_back(iceberg::SchemaField::MakeRequired(
-        id++, "m_" + std::to_string(i), iceberg::int32()));
-  for (int i = 1; i <= c; ++i)
-    fields.push_back(iceberg::SchemaField::MakeRequired(
-        id++, "d_" + std::to_string(i), iceberg::int32()));
-  fields.push_back(iceberg::SchemaField::MakeRequired(id++, "p_bucket_version",
-                                                      iceberg::int32()));
-  fields.push_back(
-      iceberg::SchemaField::MakeRequired(id++, "p_bucket", iceberg::int32()));
-  return std::make_shared<iceberg::Schema>(std::move(fields), 0);
-}
-
-std::shared_ptr<iceberg::Schema> BoundariesSchema() {
-  return std::make_shared<iceberg::Schema>(
-      std::vector<iceberg::SchemaField>{
-          iceberg::SchemaField::MakeRequired(1, "p_bucket_version", iceberg::int32()),
-          iceberg::SchemaField::MakeRequired(2, "p_bucket",         iceberg::int32()),
-          iceberg::SchemaField::MakeRequired(3, "p_min",            iceberg::int64()),
-          iceberg::SchemaField::MakeRequired(4, "rank_min",         iceberg::int64()),
-      },
-      0);
-}
-
-std::shared_ptr<iceberg::PartitionSpec> BucketPartitionSpec(
-    const iceberg::Schema& schema, std::string* error) {
-  return MakeBucketPartitionSpec(schema, error);
-}
 
 std::shared_ptr<arrow::Schema> IcebergToArrowSchemaWithFieldIds(
     const iceberg::Schema& schema, std::string* error,
@@ -406,7 +326,7 @@ std::unique_ptr<BucketParquetWriter> BucketParquetWriter::Make(
   if (config.partition_spec) {
       impl->partition_spec = config.partition_spec;
   } else {
-      impl->partition_spec = MakeBucketPartitionSpec(*config.schema, error);
+      impl->partition_spec = BucketPartitionSpec(*config.schema, error);
       if (!impl->partition_spec) return nullptr;
   }
   // Identity-partition source fields live in the manifest's partition tuple

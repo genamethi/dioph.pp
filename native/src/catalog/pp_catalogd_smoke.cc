@@ -25,6 +25,7 @@
 
 #include "primeparts/catalog/pp_catalogd.h"
 #include "primeparts/catalog/pp_iceberg_rest.h"
+#include "primeparts/schemas.h"
 #include "primeparts/writer.h"
 
 #include "iceberg/catalog.h"

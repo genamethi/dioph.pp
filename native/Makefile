@@ -54,12 +54,14 @@ BENCH_CORE_OBJ := $(BUILD_DIR)/bench_core.o
 BENCH_MATERIALIZE_OBJ := $(BUILD_DIR)/bench_materialize.o
 GENERATE_OBJ := $(BUILD_DIR)/generate.o
 WRITER_OBJ := $(BUILD_DIR)/writer.o
+SCHEMAS_OBJ := $(BUILD_DIR)/schemas.o
 SOURCE_SCAN_OBJ := $(BUILD_DIR)/source_scan.o
 PRIMITIVE_FACTORS_OBJ := $(BUILD_DIR)/primitive_factors.o
 PRIMITIVE_FACTORS_MAIN_OBJ := $(BUILD_DIR)/primitive_factors_main.o
 COVERING_SIEVE_MAIN_OBJ := $(BUILD_DIR)/covering_sieve_main.o
 SIEVE_TRIAGE_MAIN_OBJ := $(BUILD_DIR)/sieve_triage_main.o
 MDIFF_MAIN_OBJ := $(BUILD_DIR)/mdiff_main.o
+MERSENNE_MAIN_OBJ := $(BUILD_DIR)/mersenne_main.o
 PP_ICEBERG_REST_OBJ := $(BUILD_DIR)/pp_iceberg_rest.o
 PP_ROW_DELTA_OBJ := $(BUILD_DIR)/pp_row_delta.o
 PP_SIEVE_CLONE_OBJ := $(BUILD_DIR)/pp_sieve_clone.o
@@ -89,6 +91,7 @@ all: $(BUILD_DIR)/libprimeparts_core.so \
      $(BUILD_DIR)/primeparts-covering-sieve \
      $(BUILD_DIR)/primeparts-sieve-triage \
      $(BUILD_DIR)/primeparts-mdiff \
+     $(BUILD_DIR)/primeparts-mersenne \
      $(BUILD_DIR)/pp-catalog \
      $(BUILD_DIR)/pp \
      $(BUILD_DIR)/primeparts-catalogd \
@@ -110,7 +113,10 @@ $(BENCH_MATERIALIZE_OBJ): src/materialize_bench.c include/primeparts/core.h | $(
 $(GENERATE_OBJ): src/generate.cc include/primeparts/core.h include/primeparts/writer.h include/primeparts/generate.h include/primeparts/catalog/pp_iceberg_rest.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(WRITER_OBJ): src/writer.cc include/primeparts/writer.h | $(BUILD_DIR)
+$(WRITER_OBJ): src/writer.cc include/primeparts/writer.h include/primeparts/schemas.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(SCHEMAS_OBJ): src/schemas.cc include/primeparts/schemas.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(SOURCE_SCAN_OBJ): src/source_scan.cc include/primeparts/source_scan.h include/primeparts/common/arrow_init.h include/primeparts/common/uri.h | $(BUILD_DIR)
@@ -125,7 +131,10 @@ $(PRIMITIVE_FACTORS_MAIN_OBJ): src/coverings/primitive_factors_main.cc include/p
 $(COVERING_SIEVE_MAIN_OBJ): src/coverings/covering_sieve_main.cc include/primeparts/coverings/primitive_factors.h include/primeparts/source_scan.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/catalog/pp_row_delta.h include/primeparts/common/thread_pool.h include/primeparts/common/uri.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(MDIFF_MAIN_OBJ): src/coverings/mdiff_main.cc include/primeparts/writer.h include/primeparts/source_scan.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/coverings/primitive_factors.h | $(BUILD_DIR)
+$(MDIFF_MAIN_OBJ): src/coverings/mdiff_main.cc include/primeparts/writer.h include/primeparts/schemas.h include/primeparts/source_scan.h include/primeparts/catalog/pp_iceberg_rest.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(MERSENNE_MAIN_OBJ): src/coverings/mersenne_main.cc include/primeparts/writer.h include/primeparts/schemas.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/coverings/primitive_factors.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(SIEVE_TRIAGE_MAIN_OBJ): src/coverings/sieve_triage_main.cc include/primeparts/source_scan.h include/primeparts/common/thread_pool.h | $(BUILD_DIR)
@@ -231,7 +240,7 @@ $(BUILD_DIR)/primeparts-bench-materialize: $(CORE_OBJ) $(BENCH_MATERIALIZE_OBJ)
 # MakeLocalCatalog or a pp-catalogd RestCatalog client), so it links the catalog
 # engine like pp-catalog: SQL_CATALOG_LDLIBS before ICEBERG_LDLIBS, liblmdb.a
 # backs pp_lmdb_store.o.
-$(BUILD_DIR)/primeparts-generate: $(CORE_OBJ) $(GENERATE_OBJ) $(WRITER_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
+$(BUILD_DIR)/primeparts-generate: $(CORE_OBJ) $(GENERATE_OBJ) $(WRITER_OBJ) $(SCHEMAS_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
 
 # pp_iceberg_rest now provides MakeLocalCatalog = SqlCatalog(LmdbStore), so every
@@ -249,7 +258,7 @@ $(BUILD_DIR)/primeparts-catalogd: $(PP_CATALOGD_MAIN_OBJ) $(PP_CATALOGD_OBJ) $(P
 # Client round-trip acceptance smoke: forks the server, drives it with the
 # RestCatalog client (createTable + FastAppend commit + scan). Links the writer
 # (real parquet data file) + the server object.
-$(BUILD_DIR)/primeparts-catalogd-smoke: $(BUILD_DIR)/pp_catalogd_smoke.o $(PP_CATALOGD_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(WRITER_OBJ) $(LMDB_LIB)
+$(BUILD_DIR)/primeparts-catalogd-smoke: $(BUILD_DIR)/pp_catalogd_smoke.o $(PP_CATALOGD_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(WRITER_OBJ) $(SCHEMAS_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
 
 # generate-commit smoke links the client side only (forks server + execs the
@@ -272,11 +281,17 @@ $(BUILD_DIR)/primeparts-covering-sieve: $(COVERING_SIEVE_MAIN_OBJ) $(PRIMITIVE_F
 $(BUILD_DIR)/primeparts-sieve-triage: $(SIEVE_TRIAGE_MAIN_OBJ) $(SOURCE_SCAN_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lparquet -larrow -lsqlite3 -pthread -o $@
 
-# mdiff: writer (BucketParquetWriter/MdiffSchema) + source_scan (partitions
-# enumeration) + catalog seam (CommitFiles) + primitive_factors (Mersenne helper).
+# mdiff: writer (BucketParquetWriter) + schemas (MdiffSchema/BucketPartitionSpec)
+# + source_scan (partitions enumeration) + catalog seam (CommitFiles/DropTable).
 # arrow/parquet come from the static ICEBERG_LDLIBS (libarrow.a/libparquet.a); no
 # trailing -lparquet/-larrow, so the binary carries no libarrow.so runtime dep.
-$(BUILD_DIR)/primeparts-mdiff: $(MDIFF_MAIN_OBJ) $(WRITER_OBJ) $(SOURCE_SCAN_OBJ) $(PRIMITIVE_FACTORS_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
+$(BUILD_DIR)/primeparts-mdiff: $(MDIFF_MAIN_OBJ) $(WRITER_OBJ) $(SCHEMAS_OBJ) $(SOURCE_SCAN_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
+	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
+
+# mersenne: one-time builder of primeparts.mersenne_factors. writer + schemas +
+# primitive_factors (BuildMersenneHelper) + catalog seam. Same static-link
+# template as mdiff (no trailing -lparquet/-larrow).
+$(BUILD_DIR)/primeparts-mersenne: $(MERSENNE_MAIN_OBJ) $(WRITER_OBJ) $(SCHEMAS_OBJ) $(PRIMITIVE_FACTORS_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
 
 $(BUILD_DIR)/query-smoke: $(BUILD_DIR)/query_smoke.o $(SOURCE_SCAN_OBJ)
@@ -287,7 +302,7 @@ $(BUILD_DIR)/query-smoke: $(BUILD_DIR)/query_smoke.o $(SOURCE_SCAN_OBJ)
 $(BUILD_DIR)/query-service-smoke: $(BUILD_DIR)/query_service_smoke.o $(BUILD_DIR)/query_service.o $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(SOURCE_SCAN_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
 
-$(BUILD_DIR)/primeparts-test-iceberg-writer: $(TEST_ICEBERG_WRITER_OBJ) $(WRITER_OBJ)
+$(BUILD_DIR)/primeparts-test-iceberg-writer: $(TEST_ICEBERG_WRITER_OBJ) $(WRITER_OBJ) $(SCHEMAS_OBJ)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(ICEBERG_LDLIBS) -lparquet -larrow -pthread -o $@
 
 $(BUILD_DIR)/primeparts-test-primitive-factors: $(TEST_PRIMITIVE_FACTORS_OBJ) $(PRIMITIVE_FACTORS_OBJ)
@@ -295,7 +310,7 @@ $(BUILD_DIR)/primeparts-test-primitive-factors: $(TEST_PRIMITIVE_FACTORS_OBJ) $(
 
 # New TUI (src/tui/, C++ on QueryService + the LMDB catalog seam). Replaces the
 # scrapped tui_frontend.c. SQL_CATALOG_LDLIBS before ICEBERG_LDLIBS; notcurses-core.
-$(BUILD_DIR)/primeparts-tui: $(BUILD_DIR)/tui_main.o $(BUILD_DIR)/query_service.o $(BUILD_DIR)/lua_presets.o $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(SOURCE_SCAN_OBJ) $(LMDB_LIB)
+$(BUILD_DIR)/primeparts-tui: $(BUILD_DIR)/tui_main.o $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(BUILD_DIR)/lua_presets.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(SOURCE_SCAN_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $(NOTCURSES_RPATH) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(NOTCURSES_LDLIBS) $(LUA_LDLIBS) -lsqlite3 -pthread -o $@
 
 $(BUILD_DIR)/primeparts-lua-presets-smoke: $(BUILD_DIR)/lua_presets_smoke.o $(BUILD_DIR)/lua_presets.o $(BUILD_DIR)/query_service.o $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(SOURCE_SCAN_OBJ) $(LMDB_LIB)
@@ -303,12 +318,12 @@ $(BUILD_DIR)/primeparts-lua-presets-smoke: $(BUILD_DIR)/lua_presets_smoke.o $(BU
 
 # The reader `query` Lua module + smoke. Links core.o for the number-theory
 # bindings (primecount/primesieve/FLINT via $(LDLIBS)).
-$(BUILD_DIR)/primeparts-lua-query-smoke: $(BUILD_DIR)/lua_query_smoke.o $(BUILD_DIR)/lua_query_module.o $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(WRITER_OBJ) $(CORE_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(SOURCE_SCAN_OBJ) $(LMDB_LIB)
+$(BUILD_DIR)/primeparts-lua-query-smoke: $(BUILD_DIR)/lua_query_smoke.o $(BUILD_DIR)/lua_query_module.o $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(CORE_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(SOURCE_SCAN_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(LUA_LDLIBS) -lsqlite3 -pthread -o $@
 
 # pp — the Lua query shell. Same link recipe as the lua-query smoke (core.o for
 # the number-theory bindings; QueryService + catalog seam + embedded Lua).
-$(BUILD_DIR)/pp: $(BUILD_DIR)/pp_main.o $(BUILD_DIR)/lua_query_module.o $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(WRITER_OBJ) $(CORE_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(SOURCE_SCAN_OBJ) $(LMDB_LIB)
+$(BUILD_DIR)/pp: $(BUILD_DIR)/pp_main.o $(BUILD_DIR)/lua_query_module.o $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(CORE_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(SOURCE_SCAN_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(LUA_LDLIBS) -lsqlite3 -pthread -o $@
 
 # v0.3.0 arrow pulls mimalloc/brotli via libarrow_bundled_dependencies.a; the

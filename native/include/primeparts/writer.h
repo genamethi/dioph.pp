@@ -120,33 +120,9 @@ std::shared_ptr<arrow::Schema> IcebergToArrowSchemaWithFieldIds(
     const iceberg::Schema& schema, std::string* error,
     const iceberg::PartitionSpec* partition_spec = nullptr);
 
-// Staging-warehouse schemas. All fields required; field IDs contiguous:
-//   primes:     p=1, k=2, prime_rank=3, p_bucket_version=4, p_bucket=5
-//   partitions: p=1, m_k=2, n_k=3, q_k=4, prime_rank=5,
-//               p_bucket_version=6, p_bucket=7
-// prime_rank is the prime-counting function π(p) — the first row in
-// primes (smallest present prime, p=3) carries prime_rank=2 because
-// π(2)=1 and p=2 is intentionally absent from the table. The backfill
-// pass (primeparts-backfill-rank) materializes the column in place
-// before the staging metadata is published.
-std::shared_ptr<iceberg::Schema> PrimesSchema();
-std::shared_ptr<iceberg::Schema> PartitionsSchema();
-std::shared_ptr<iceberg::Schema> BoundariesSchema();
-
-// Fixed-width per-k index-difference schema for primeparts.mdiff_k{K}: one
-// row per prime with exactly k(p)==K representations. Field ids contiguous:
-//   p=1, prime_rank=2,
-//   m_1..m_K        = 3 .. 2+K            (sorted ascending hit positions)
-//   d_1..d_C        = 3+K .. 2+K+C        (C=K(K-1)/2 pairwise differences,
-//                                          canonical order; each d is a
-//                                          Mersenne index M_d = 2^d - 1)
-//   p_bucket_version, p_bucket = trailing identity-partition columns
-// Canonical d order, m sorted ascending (m[0]<...<m[K-1]):
-//   for a = K-1 .. 1, for b = a-1 .. 0: emit m[a]-m[b].
-// Requires K >= 2. Returns nullptr + *error otherwise.
-std::shared_ptr<iceberg::Schema> MdiffSchema(int k, std::string* error);
-std::shared_ptr<iceberg::PartitionSpec> BucketPartitionSpec(
-    const iceberg::Schema& schema, std::string* error);
+// Concrete primeparts schemas (PrimesSchema/PartitionsSchema/MdiffSchema/...)
+// and the p_bucket partition spec live in "primeparts/schemas.h" — the writer
+// is schema-agnostic and only consumes a schema via WriterConfig.
 
 // Default bucket-data-dir layout used by the live writer. Kept here so
 // generate.cc and rewrite.cc compute identical primeparts.* paths.
