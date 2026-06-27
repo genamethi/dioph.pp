@@ -366,32 +366,12 @@ scan ~32 s (8 shards). Distribution fits done in Lua on the 17 aggregated counts
    - Far tail (k>=9) is slightly LIGHTER than even NegBin (the (k+1) ratio turns
      over after k~7), consistent with the hard k <= floor(log2 p) ceiling.
 
-3. MAGNITUDE-STATIONARITY (per bit-band [2^a, 2^(a+1)))
-       band        N            mean_k  disp_k   mean_r
-       2^30-2^31   50,697,537   1.8772  1.142    28.123
-       2^32-2^33   190,335,585  1.8786  1.159    30.121
-       2^34-2^35   717,267,168  1.8798  1.175    32.120
-       2^36-2^37   2,712,103,833 1.8808 1.185    34.119
-       2^38-2^39   10,285,641,778 1.8818 1.202   36.118
-   - mean_k is ~CONSTANT ~1.88 across 8 doublings (+0.0046 total, ~6e-4/bit).
-     The HIT count saturates; it does not grow with the number of candidate
-     positions.
-   - mean_r rises ~1 per bit, but ONLY because mean_r = bits - mean_k and bits
-     grows. r carries no structure beyond bits and k separately (affine
-     recoding). So the stationary object is k, NOT r (this corrected the initial
-     guess). Each added bit is almost always a new MISS.
-   - The one real drift: dispersion creeps up 1.142 -> 1.202, so overdispersion
-     (the NegBin signal) slowly fattens with magnitude; the pooled NegBin params
-     are effectively the frontier-band values (most mass is near max_p).
-
-4. SAMPLING ERROR / STOP CRITERION
-   - Bulk is DRIFT-limited, not sample-limited: every k<=12 bin has >=75k events
-     (rel err <=0.4%), k<=8 has millions (<=0.02%). The residual motion is the
-     ~6e-4/bit drift in mean_k -> pushing the frontier barely moves the bulk.
-   - Resolution floor: p ~ 4.6e-9 measurable @10% rel err (count 100); p ~ 4.6e-7
-     @1% (count 1e4). A 1e-7 probability currently sits at ~2% err (~2170 events).
-   - The high-k tail (k>=13: 10744/1156/108/13) is sample-limited and, by the
-     k<=floor(log2 p) ceiling, only grows at much larger p. => switch the bulk to
-     the implicit/dynamic approach now; reserve brute generation (or a dynamic
-     method) for the rare high-k tail, where it is the only lever.
+3. SAMPLING ERROR (sample-size only)
+   - Bulk bins are sample-resolved: every k<=12 bin has >=75k events
+     (rel err <=0.4%), k<=8 has millions (<=0.02%). Resolution floor: a
+     probability p ~ 4.6e-9 is measurable @10% rel err (count 100), p ~ 4.6e-7
+     @1% (count 1e4); a 1e-7 probability currently sits at ~2% err (~2170
+     events).
+   - The high-k tail (k>=13: 10,744 / 1,156 / 108 / 13) is sample-limited, and
+     by the k <= floor(log2 p) ceiling only appears at much larger p.
 
