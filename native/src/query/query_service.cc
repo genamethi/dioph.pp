@@ -231,12 +231,29 @@ std::vector<GroupCountRow> QueryService::GroupCount(
     threads = hw == 0 ? 4 : std::max(1, std::min(8, static_cast<int>(hw)));
   }
 
+  // Grouping key. Besides a raw integer column, a small set of derived
+  // ("virtual") keys is supported, computed per row in C++ from `primes`:
+  //   "bits" = floor(log2(p))       — the candidate-position count max_m
+  //   "r"    = floor(log2(p)) - k   — the # of m where p-2^m is NOT a prime
+  //            power (the "misses"); r >= 0 since k <= max_m (one soln per m).
+  enum class Key { kColumn, kBits, kR };
+  Key key = Key::kColumn;
+  if (column == "bits") key = Key::kBits;
+  else if (column == "r") key = Key::kR;
+
   // iceberg prunes whole files by the predicate but does NOT enforce a
-  // row-level residual, so when a p-window is set we must read `p` too and
-  // bound each row in C++ (mirrors ScanByK). No window -> count every row.
+  // row-level residual, so a p-window means we read `p` too and bound each row
+  // in C++ (mirrors ScanByK). Derived keys also pull their inputs (p, k).
   const bool windowed = (p_lo > 0 || p_hi > 0);
-  std::vector<std::string> cols{column};
-  if (windowed && column != "p") cols.push_back("p");
+  const bool need_p = windowed || key == Key::kBits || key == Key::kR;
+  const bool need_k = key == Key::kR;
+  std::vector<std::string> cols;
+  auto add_col = [&](const std::string& c) {
+    if (std::find(cols.begin(), cols.end(), c) == cols.end()) cols.push_back(c);
+  };
+  if (key == Key::kColumn) add_col(column);
+  if (need_p) add_col("p");
+  if (need_k) add_col("k");
 
   // Total (for progress) via a cheap manifest read on a probe reader.
   int64_t total = 0;
@@ -265,45 +282,63 @@ std::vector<GroupCountRow> QueryService::GroupCount(
         meta, cols, filter, &e, /*shard_index=*/t, /*shard_count=*/threads);
     if (!reader) { fail("open " + table + ": " + e); return; }
     auto& acc = partials[static_cast<size_t>(t)];
+    auto bits = [](int64_t p) {
+      return static_cast<int64_t>(
+          63 - __builtin_clzll(static_cast<unsigned long long>(p)));
+    };
     std::shared_ptr<arrow::RecordBatch> batch;
     while (true) {
       if (ctl.cancel && ctl.cancel->load()) return;
       if (!reader->Next(&batch, &e)) { fail("scan " + table + ": " + e); return; }
       if (!batch) break;  // EOF
-      auto arr = batch->GetColumnByName(column);
-      if (!arr) { fail("column not found: " + column); return; }
       const int64_t n = batch->num_rows();
 
-      std::shared_ptr<arrow::Int64Array> parr;
-      if (windowed) {
-        parr = std::static_pointer_cast<arrow::Int64Array>(
+      std::shared_ptr<arrow::Int64Array> pa;
+      std::shared_ptr<arrow::Int32Array> ka;
+      if (need_p) {
+        pa = std::static_pointer_cast<arrow::Int64Array>(
             batch->GetColumnByName("p"));
-        if (!parr) { fail("p column not found for window on " + table); return; }
+        if (!pa) { fail("p column missing on " + table); return; }
+      }
+      if (need_k) {
+        ka = std::static_pointer_cast<arrow::Int32Array>(
+            batch->GetColumnByName("k"));
+        if (!ka) { fail("k column missing on " + table); return; }
       }
       auto in_window = [&](int64_t i) {
         if (!windowed) return true;
-        const int64_t pv = parr->Value(i);
+        const int64_t pv = pa->Value(i);
         if (p_lo > 0 && pv < p_lo) return false;
         if (p_hi > 0 && pv > p_hi) return false;
         return true;
       };
 
-      switch (arr->type_id()) {
-        case arrow::Type::INT32: {
-          auto a = std::static_pointer_cast<arrow::Int32Array>(arr);
-          for (int64_t i = 0; i < n; ++i)
-            if (in_window(i)) acc[a->Value(i)]++;
-          break;
+      if (key == Key::kBits) {
+        for (int64_t i = 0; i < n; ++i)
+          if (in_window(i)) acc[bits(pa->Value(i))]++;
+      } else if (key == Key::kR) {
+        for (int64_t i = 0; i < n; ++i)
+          if (in_window(i)) acc[bits(pa->Value(i)) - ka->Value(i)]++;
+      } else {
+        auto arr = batch->GetColumnByName(column);
+        if (!arr) { fail("column not found: " + column); return; }
+        switch (arr->type_id()) {
+          case arrow::Type::INT32: {
+            auto a = std::static_pointer_cast<arrow::Int32Array>(arr);
+            for (int64_t i = 0; i < n; ++i)
+              if (in_window(i)) acc[a->Value(i)]++;
+            break;
+          }
+          case arrow::Type::INT64: {
+            auto a = std::static_pointer_cast<arrow::Int64Array>(arr);
+            for (int64_t i = 0; i < n; ++i)
+              if (in_window(i)) acc[a->Value(i)]++;
+            break;
+          }
+          default:
+            fail("unsupported (non-integer) column for group: " + column);
+            return;
         }
-        case arrow::Type::INT64: {
-          auto a = std::static_pointer_cast<arrow::Int64Array>(arr);
-          for (int64_t i = 0; i < n; ++i)
-            if (in_window(i)) acc[a->Value(i)]++;
-          break;
-        }
-        default:
-          fail("unsupported (non-integer) column for group: " + column);
-          return;
       }
       const int64_t s = scanned.fetch_add(n) + n;
       // Only thread 0 reports progress, so the (possibly non-thread-safe)
