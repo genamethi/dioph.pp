@@ -139,6 +139,26 @@ local big = query.kget{ k = 16, init = 1e11, hi = 2e11, limit = 5 }
 > Unlike `pget`, `kget` records carry **no** `partitions` array — just `p`, `k`,
 > `prime_rank`. Fetch partitions per hit with `pget{p=...}` if needed.
 
+#### `query.hist{ col=, [table="primes"], [init=], [end=] | [hi=], [threads=] }` → histogram
+
+General group-by-value count: scans `table` and returns, ordered by value, one
+row `{ [col]=value, count=n }` per distinct value of the **integer** column
+`col`. The optional p-window `[init, end]` is row-accurate. `threads` (<=0 =
+auto) drives sharded parallel readers. → `QueryService::GroupCount`.
+
+Intended for **low-cardinality** columns (`k`, `m_k`, `n_k`, …); grouping by a
+high-cardinality column (`p`) would build a huge table.
+
+```lua
+-- full per-k distribution over primeparts.primes (the obstruction spectrum)
+for _, r in ipairs(query.hist{ col = "k" }) do print(r.k, r.count) end
+-- windowed:
+local h = query.hist{ col = "k", init = 3, hi = 1e6 }   -- row-accurate window
+```
+
+> Same `end`/`hi` keyword caveat as `kget`. The value field is named after `col`
+> (e.g. `r.k` when `col="k"`), alongside `r.count`.
+
 ---
 
 ## 3. Record shapes
@@ -160,9 +180,22 @@ For a `k=0` prime, `partitions = {}`.
 ## Not yet implemented
 
 Sketched in [`../arch/lua_query_api.md`](../arch/lua_query_api.md) but **not
-built**: `query.count`, `query.parts`, `query.extent`, `query.reload`, and the
-`on_progress` / cooperative-cancellation hooks. `is_obstructed(p)` is not a
-distinct function — use `query.pget{p=p}.k == 0` (or `kget{k=0,...}`).
+built**: `query.parts`, `query.extent`, `query.reload`, and the `on_progress` /
+cooperative-cancellation hooks. `query.count` is subsumed by the more general
+`query.hist` (above). `is_obstructed(p)` is not a distinct function — use
+`query.pget{p=p}.k == 0` (or `kget{k=0,...}`).
+
+## Running Lua against the warehouse — the `pp` shell
+
+`pp` (`native/build/pp`) binds this `query` module to a live warehouse and runs
+Lua — so any query is a script, not a new binary:
+
+```sh
+pp -e 'for _,r in ipairs(query.hist{col="k"}) do print(r.k, r.count) end'
+pp run hist.lua                 # run a script file
+pp                              # interactive REPL  (\q to quit)
+pp --warehouse DIR ...          # else $PRIMEPARTS_WAREHOUSE_ROOT / staging default
+```
 
 ## Building / testing the Lua path
 
