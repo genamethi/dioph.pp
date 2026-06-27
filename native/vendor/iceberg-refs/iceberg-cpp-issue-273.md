@@ -1,0 +1,227 @@
+# iceberg-cpp #273 — Implement Apache Iceberg REST Catalog Specification
+
+state: OPEN  |  url: https://github.com/apache/iceberg-cpp/issues/273  |  upstream updatedAt: 2026-01-06T09:29:57Z
+
+This issue tracks the implementation progress of the Apache Iceberg REST Catalog API specification in iceberg-cpp. The goal is to provide a comprehensive and fully compliant C++ implementation of the REST Catalog standard, enabling interaction with any Iceberg-compatible catalog service.
+
+The following checklists are generated from the official [Iceberg REST Catalog specification](https://github.com/apache/iceberg/blob/main/open-api/rest-catalog-open-api.yaml).  Once your contribution has been merged, you should update the checklist.
+
+### API Paths
+
+- [x] `GET /v1/config` - List all catalog configuration settings
+- [ ] `POST /v1/oauth/tokens` - Get a token using an OAuth2 flow (DEPRECATED for REMOVAL)
+- [x] `GET /v1/{prefix}/namespaces` - List namespaces, optionally providing a parent namespace to list underneath
+- [x] `POST /v1/{prefix}/namespaces` - Create a namespace
+- [x] `GET /v1/{prefix}/namespaces/{namespace}` - Load the metadata properties for a namespace
+- [x] `HEAD /v1/{prefix}/namespaces/{namespace}` - Check if a namespace exists
+- [x] `DELETE /v1/{prefix}/namespaces/{namespace}` - Drop a namespace from the catalog. Namespace must be empty.
+- [x] `POST /v1/{prefix}/namespaces/{namespace}/properties` - Set or remove properties on a namespace
+- [x] `GET /v1/{prefix}/namespaces/{namespace}/tables` - List all table identifiers underneath a given namespace
+- [x] `POST /v1/{prefix}/namespaces/{namespace}/tables` - Create a table in the given namespace
+- [ ] `POST /v1/{prefix}/namespaces/{namespace}/tables/{table}/plan` - Submit a scan for planning
+- [ ] `GET /v1/{prefix}/namespaces/{namespace}/tables/{table}/plan/{plan-id}` - Fetches the result of scan planning for a plan-id
+- [ ] `DELETE /v1/{prefix}/namespaces/{namespace}/tables/{table}/plan/{plan-id}` - Cancels scan planning for a plan-id
+- [ ] `POST /v1/{prefix}/namespaces/{namespace}/tables/{table}/tasks` - Fetches result tasks for a plan task
+- [x] `POST /v1/{prefix}/namespaces/{namespace}/register` - Register a table in the given namespace using given metadata file location
+- [x] `GET /v1/{prefix}/namespaces/{namespace}/tables/{table}` - Load a table from the catalog
+- [x] `POST /v1/{prefix}/namespaces/{namespace}/tables/{table}` - Commit updates to a table
+- [x] `DELETE /v1/{prefix}/namespaces/{namespace}/tables/{table}` - Drop a table from the catalog
+- [x] `HEAD /v1/{prefix}/namespaces/{namespace}/tables/{table}` - Check if a table exists
+- [ ] `GET /v1/{prefix}/namespaces/{namespace}/tables/{table}/credentials` - Load vended credentials for a table from the catalog
+- [x] `POST /v1/{prefix}/tables/rename` - Rename a table from its current name to a new name
+- [ ] `POST /v1/{prefix}/namespaces/{namespace}/tables/{table}/metrics` - Send a metrics report to this endpoint to be processed by the backend
+- [ ] `POST /v1/{prefix}/transactions/commit` - Commit updates to multiple tables in an atomic operation
+- [ ] `GET /v1/{prefix}/namespaces/{namespace}/views` - List all view identifiers underneath a given namespace
+- [ ] `POST /v1/{prefix}/namespaces/{namespace}/views` - Create a view in the given namespace
+- [ ] `GET /v1/{prefix}/namespaces/{namespace}/views/{view}` - Load a view from the catalog
+- [ ] `POST /v1/{prefix}/namespaces/{namespace}/views/{view}` - Replace a view
+- [ ] `DELETE /v1/{prefix}/namespaces/{namespace}/views/{view}` - Drop a view from the catalog
+- [ ] `HEAD /v1/{prefix}/namespaces/{namespace}/views/{view}` - Check if a view exists
+- [ ] `POST /v1/{prefix}/views/rename` - Rename a view from its current name to a new name
+
+### Application Schema Objects
+
+- [x] `ErrorModel` - JSON error payload returned in a response with further details on the error
+- [x] `CatalogConfig` - Server-provided configuration for the catalog.
+- [x] `CreateNamespaceRequest` - Request to create a namespace.
+- [x] `UpdateNamespacePropertiesRequest` - Request to set or remove properties on a namespace.
+- [x] `RenameTableRequest` - Request to rename a table or view.
+- [x] `Namespace` - Reference to one or more levels of a namespace
+- [x] `PageToken` - An opaque token that allows clients to make use of pagination for list APIs
+- [x] `TableIdentifier` - Identifies a table in a namespace.
+- [x] `PrimitiveType` - A primitive type.
+- [x] `StructField` - A struct field.
+- [x] `StructType` - A struct type.
+- [x] `ListType` - A list type.
+- [x] `MapType` - A map type.
+- [x] `Type` - A type definition.
+- [x] `Schema` - A table schema.
+- [ ] `Expression` - A boolean expression.
+- [ ] `ExpressionType` - An expression type.
+- [ ] `TrueExpression` - A boolean expression that is always true.
+- [ ] `FalseExpression` - A boolean expression that is always false.
+- [ ] `AndOrExpression` - A boolean AND or OR expression.
+- [ ] `NotExpression` - A boolean NOT expression.
+- [ ] `UnaryExpression` - A unary expression.
+- [ ] `LiteralExpression` - A literal expression.
+- [ ] `SetExpression` - A set expression.
+- [ ] `Term` - A term in an expression.
+- [ ] `Reference` - A reference to a column.
+- [ ] `TransformTerm` - A transformed term.
+- [x] `Transform` - A transform function.
+- [x] `PartitionField` - A partition field.
+- [x] `PartitionSpec` - A partition specification.
+- [x] `SortDirection` - A sort direction.
+- [x] `NullOrder` - A null order.
+- [x] `SortField` - A sort field.
+- [x] `SortOrder` - A sort order.
+- [ ] `EncryptedKey` - An encrypted key.
+- [x] `Snapshot` - A table snapshot.
+- [x] `SnapshotReference` - A reference to a snapshot.
+- [x] `SnapshotReferences` - A map of snapshot references.
+- [x] `SnapshotLog` - A log of snapshots.
+- [x] `MetadataLog` - A log of metadata files.
+- [x] `TableMetadata` - The complete metadata for a table.
+- [ ] `SQLViewRepresentation` - A SQL view representation.
+- [ ] `ViewRepresentation` - A view representation.
+- [ ] `ViewHistoryEntry` - A view history entry.
+- [ ] `ViewVersion` - A view version.
+- [ ] `ViewMetadata` - The complete metadata for a view.
+- [x] `BaseUpdate` - The base type for all table and view updates.
+- [x] `AssignUUIDUpdate` - An update to assign a UUID to a table or view.
+- [x] `UpgradeFormatVersionUpdate` - An update to upgrade the format version of a table or view.
+- [x] `AddSchemaUpdate` - An update to add a schema to a table.
+- [x] `SetCurrentSchemaUpdate` - An update to set the current schema of a table.
+- [x] `AddPartitionSpecUpdate` - An update to add a partition spec to a table.
+- [x] `SetDefaultSpecUpdate` - An update to set the default partition spec of a table.
+- [x] `AddSortOrderUpdate` - An update to add a sort order to a table.
+- [x] `SetDefaultSortOrderUpdate` - An update to set the default sort order of a table.
+- [x] `AddSnapshotUpdate` - An update to add a snapshot to a table.
+- [x] `SetSnapshotRefUpdate` - An update to set a snapshot reference.
+- [x] `RemoveSnapshotsUpdate` - An update to remove snapshots from a table.
+- [x] `RemoveSnapshotRefUpdate` - An update to remove a snapshot reference.
+- [x] `SetLocationUpdate` - An update to set the location of a table or view.
+- [x] `SetPropertiesUpdate` - An update to set properties on a table or view.
+- [x] `RemovePropertiesUpdate` - An update to remove properties from a table or view.
+- [ ] `AddViewVersionUpdate` - An update to add a view version.
+- [ ] `SetCurrentViewVersionUpdate` - An update to set the current view version.
+- [x] `SetStatisticsUpdate` - An update to set statistics for a snapshot.
+- [x] `RemoveStatisticsUpdate` - An update to remove statistics for a snapshot.
+- [x] `SetPartitionStatisticsUpdate` - An update to set partition statistics for a snapshot.
+- [x] `RemovePartitionStatisticsUpdate` - An update to remove partition statistics for a snapshot.
+- [x] `RemovePartitionSpecsUpdate` - An update to remove partition specs from a table.
+- [x] `RemoveSchemasUpdate` - An update to remove schemas from a table.
+- [ ] `AddEncryptionKeyUpdate` - An update to add an encryption key to a table.
+- [ ] `RemoveEncryptionKeyUpdate` - An update to remove an encryption key from a table.
+- [x] `TableUpdate` - A table update.
+- [ ] `ViewUpdate` - A view update.
+- [x] `TableRequirement` - A requirement for a table commit.
+- [x] `AssertCreate` - A requirement that the table does not exist.
+- [x] `AssertTableUUID` - A requirement that the table has a specific UUID.
+- [x] `AssertRefSnapshotId` - A requirement that a ref points to a specific snapshot.
+- [x] `AssertLastAssignedFieldId` - A requirement on the last assigned field ID.
+- [x] `AssertCurrentSchemaId` - A requirement on the current schema ID.
+- [x] `AssertLastAssignedPartitionId` - A requirement on the last assigned partition ID.
+- [x] `AssertDefaultSpecId` - A requirement on the default spec ID.
+- [x] `AssertDefaultSortOrderId` - A requirement on the default sort order ID.
+- [ ] `ViewRequirement` - A requirement for a view commit.
+- [ ] `AssertViewUUID` - A requirement that the view has a specific UUID.
+- [ ] `StorageCredential` - Vended credentials for a storage location.
+- [ ] `LoadCredentialsResponse` - Response for loading vended credentials.
+- [x] `LoadTableResult` - Result used when a table is successfully loaded.
+- [ ] `ScanTasks` - Scan and planning tasks for server-side scan planning.
+- [ ] `CompletedPlanningResult` - Completed server-side planning result.
+- [ ] `CompletedPlanningWithIDResult` - Completed server-side planning result with a plan-id.
+- [ ] `FailedPlanningResult` - Failed server-side planning result.
+- [ ] `AsyncPlanningResult` - Asynchronous server-side planning result.
+- [ ] `EmptyPlanningResult` - Empty server-side planning result.
+- [ ] `PlanStatus` - Status of a server-side planning operation.
+- [ ] `FetchPlanningResult` - Result of server-side scan planning for fetchPlanningResult.
+- [ ] `PlanTableScanResult` - Result of server-side scan planning for planTableScan.
+- [ ] `FetchScanTasksResult` - Response schema for fetchScanTasks.
+- [x] `CommitTableRequest` - Request to commit updates to a table.
+- [ ] `CommitViewRequest` - Request to commit updates to a view.
+- [ ] `CommitTransactionRequest` - Request to commit updates to multiple tables in a transaction.
+- [x] `CreateTableRequest` - Request to create a table.
+- [x] `RegisterTableRequest` - Request to register a table.
+- [ ] `CreateViewRequest` - Request to create a view.
+- [ ] `LoadViewResult` - Result used when a view is successfully loaded.
+- [ ] `TokenType` - Token type identifier, from RFC 8693 Section 3.
+- [ ] `OAuthClientCredentialsRequest` - OAuth2 client credentials request.
+- [ ] `OAuthTokenExchangeRequest` - OAuth2 token exchange request.
+- [ ] `OAuthTokenRequest` - OAuth2 token request.
+- [ ] `CounterResult` - A counter metric result.
+- [ ] `TimerResult` - A timer metric result.
+- [ ] `MetricResult` - A metric result.
+- [ ] `Metrics` - A collection of metrics.
+- [ ] `ReportMetricsRequest` - A request to report metrics.
+- [ ] `ScanReport` - A scan report.
+- [ ] `CommitReport` - A commit report.
+- [ ] `OAuthError` - OAuth2 error response.
+- [ ] `OAuthTokenResponse` - OAuth2 token response.
+- [x] `IcebergErrorResponse` - JSON wrapper for all error responses (non-2xx).
+- [x] `CreateNamespaceResponse` - Response for a successful call to create a namespace.
+- [x] `GetNamespaceResponse` - Response for a successful call to get a namespace.
+- [x] `ListTablesResponse` - A list of table identifiers.
+- [x] `ListNamespacesResponse` - A list of namespaces.
+- [x] `UpdateNamespacePropertiesResponse` - JSON data response for a synchronous update properties request.
+- [x] `CommitTableResponse` - Response used when a table is successfully updated.
+- [ ] `StatisticsFile` - A statistics file.
+- [ ] `BlobMetadata` - Blob metadata.
+- [ ] `PartitionStatisticsFile` - A partition statistics file.
+- [ ] `BooleanTypeValue` - A boolean type value.
+- [ ] `IntegerTypeValue` - An integer type value.
+- [ ] `LongTypeValue` - A long type value.
+- [ ] `FloatTypeValue` - A float type value.
+- [ ] `DoubleTypeValue` - A double type value.
+- [ ] `DecimalTypeValue` - A decimal type value.
+- [ ] `StringTypeValue` - A string type value.
+- [ ] `UUIDTypeValue` - A UUID type value.
+- [ ] `DateTypeValue` - A date type value.
+- [ ] `TimeTypeValue` - A time type value.
+- [ ] `TimestampTypeValue` - A timestamp type value.
+- [ ] `TimestampTzTypeValue` - A timestamp with timezone type value.
+- [ ] `TimestampNanoTypeValue` - A timestamp with nanosecond precision type value.
+- [ ] `TimestampTzNanoTypeValue` - A timestamp with timezone and nanosecond precision type value.
+- [ ] `FixedTypeValue` - A fixed length type value.
+- [ ] `BinaryTypeValue` - A binary type value.
+- [ ] `CountMap` - A map of column id to total count.
+- [ ] `ValueMap` - A map of column id to primitive type values.
+- [ ] `PrimitiveTypeValue` - A primitive type value.
+- [ ] `FileFormat` - A file format.
+- [ ] `ContentFile` - A content file.
+- [ ] `DataFile` - A data file.
+- [ ] `DeleteFile` - A delete file.
+- [ ] `PositionDeleteFile` - A position delete file.
+- [ ] `EqualityDeleteFile` - An equality delete file.
+- [ ] `PlanTableScanRequest` - A request to plan a table scan.
+- [ ] `FieldName` - A full field name.
+- [ ] `FetchScanTasksRequest` - A request to fetch scan tasks.
+- [ ] `PlanTask` - An opaque string provided by the REST server that represents a unit of work to produce file scan tasks for scan planning.
+- [ ] `FileScanTask` - A file scan task.
+
+### Reusable Response Objects
+
+- [ ] `OAuthTokenResponse` - OAuth2 token response for client credentials or token exchange
+- [ ] `OAuthErrorResponse` - OAuth2 error response
+- [ ] `BadRequestErrorResponse` - Indicates a bad request error.
+- [ ] `UnauthorizedResponse` - Unauthorized.
+- [ ] `ForbiddenResponse` - Forbidden. Authenticated user does not have the necessary permissions.
+- [ ] `UnsupportedOperationResponse` - Not Acceptable / Unsupported Operation. The server does not support this operation.
+- [x] `IcebergErrorResponse` - JSON wrapper for all error responses (non-2xx)
+- [x] `CreateNamespaceResponse` - Represents a successful call to create a namespace.
+- [x] `GetNamespaceResponse` - Returns a namespace, as well as any properties stored on the namespace.
+- [x] `ListTablesResponse` - A list of table identifiers
+- [x] `ListNamespacesResponse` - A list of namespaces
+- [ ] `AuthenticationTimeoutResponse` - Optional status response type that the REST Catalog can issue when the token has expired.
+- [ ] `ServiceUnavailableResponse` - The service is not ready to handle the request.
+- [ ] `ServerErrorResponse` - A server-side problem that might not be addressable from the client side.
+- [x] `UpdateNamespacePropertiesResponse` - JSON data response for a synchronous update properties request.
+- [x] `CreateTableResponse` - Table metadata result after creating a table
+- [ ] `PlanTableScanResponse` - Result of submitting a table scan to plan
+- [ ] `FetchPlanningResultResponse` - Result of fetching a submitted scan planning operation
+- [ ] `FetchScanTasksResponse` - Result of retrieving additional plan tasks and file scan tasks.
+- [x] `LoadTableResponse` - Table metadata result when loading a table
+- [ ] `LoadViewResponse` - View metadata result when loading a view
+- [x] `CommitTableResponse` - Response used when a table is successfully updated.
+- [ ] `LoadCredentialsResponse` - Table credentials result when loading credentials for a table

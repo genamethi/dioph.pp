@@ -196,9 +196,56 @@ t_pari()       { ld_has pari || [ -f "$PREFIX/include/pari/pari.h" ] || have_pc 
 t_primesieve() { min_ok primesieve 11.0; }
 t_primecount() { min_ok primecount 7.0; }
 t_notcurses()  { have_pc notcurses-core || have_pc notcurses; }
-t_lua()        { for m in lua5.5 lua-5.5 lua; do min_ok "$m" 5.5.0 && max_ok "$m" 5.6.0 && return 0; done; return 1; }
-t_nlohmann()   { for d in "$PREFIX/include" /usr/include /usr/local/include; do [ -f "$d/nlohmann/json.hpp" ] && [ -f "$d/nlohmann/json_fwd.hpp" ] && return 0; done; return 1; }
-t_httplib()    { [ -f "$PREFIX/include/httplib.h" ] || [ -f /usr/include/httplib.h ] || [ -f /usr/local/include/httplib.h ]; }
+# Lua 5.5 from lua.org into /usr/local ships no .pc. If the header is 5.5.x
+# and -llua links, synthesize one so pkg-config sees it (PREFIX leads the path).
+ensure_lua55_pc() {
+  for m in lua lua5.5 lua-5.5; do min_ok "$m" 5.5.0 && max_ok "$m" 5.6.0 && return 0; done
+  hdr=/usr/local/include/lua.h; [ -f "$hdr" ] || return 1
+  major=$(awk '/^#define LUA_VERSION_MAJOR_N[[:space:]]/{print $NF}' "$hdr")
+  minor=$(awk '/^#define LUA_VERSION_MINOR_N[[:space:]]/{print $NF}' "$hdr")
+  patch=$(awk '/^#define LUA_VERSION_RELEASE_N[[:space:]]/{print $NF}' "$hdr")
+  [ "$major" = 5 ] && [ "$minor" = 5 ] || return 1
+  echo 'int main(void){return 0;}' | "$CC" -x c - -L/usr/local/lib -llua -o /dev/null 2>/dev/null || return 1
+  ver="${major}.${minor}.${patch:-0}"
+  prefix_write "$PREFIX/lib/pkgconfig/lua.pc" <<EOF
+prefix=/usr/local
+Name: Lua
+Description: Lua $ver language engine (synthesized by native/configure from /usr/local)
+Version: $ver
+Libs: -L/usr/local/lib -llua -lm -ldl
+Cflags: -I/usr/local/include
+EOF
+}
+t_lua()        { ensure_lua55_pc; for m in lua lua5.5 lua-5.5; do min_ok "$m" 5.5.0 && max_ok "$m" 5.6.0 && return 0; done; return 1; }
+# nlohmann is consumed *directly* by our code AND must match the ABI the
+# iceberg-cpp libs were built against (v0.3.0 pins 3.11.x). The inline-namespace
+# (json_abi_v3_MM_P) is keyed off VERSION_MAJOR/MINOR, so a stray 3.12 header on
+# the include path silently breaks linking against the 3.11 iceberg archives.
+# Read the effective version (abi_macros.hpp for a multi-file tree, else the
+# self-contained single-header json.hpp) and require it to equal the pin.
+nlohmann_ver() { # <nlohmann-dir> -> "MAJOR.MINOR" (empty if undeterminable)
+  for f in "$1/detail/abi_macros.hpp" "$1/json.hpp"; do
+    [ -f "$f" ] || continue
+    maj=$(awk '$1=="#define"&&$2=="NLOHMANN_JSON_VERSION_MAJOR"{print $3; exit}' "$f")
+    min=$(awk '$1=="#define"&&$2=="NLOHMANN_JSON_VERSION_MINOR"{print $3; exit}' "$f")
+    [ -n "$maj" ] && [ -n "$min" ] && { echo "$maj.$min"; return; }
+  done
+}
+t_nlohmann()   { want=${NLOHMANN_VERSION%.*}
+  for d in "$PREFIX/include" /usr/include /usr/local/include; do
+    [ -f "$d/nlohmann/json.hpp" ] && [ -f "$d/nlohmann/json_fwd.hpp" ] || continue
+    [ "$(nlohmann_ver "$d/nlohmann")" = "$want" ]; return  # first found is what the compiler uses
+  done
+  return 1; }
+# Debian's libcpp-httplib ships a *split* httplib.h (declarations only; impl in
+# libcpp-httplib.so). We compile header-only (-pthread, no link lib), so reject a
+# split header — it must contain inline definitions (`inline Server::Server`).
+t_httplib()    {
+  for f in "$PREFIX/include/httplib.h" /usr/local/include/httplib.h /usr/include/httplib.h; do
+    [ -f "$f" ] || continue
+    grep -q "inline Server::Server" "$f"; return  # first found decides; must be header-only
+  done
+  return 1; }
 t_curl()       { have_pc libcurl; }
 t_ssl()        { have_pc openssl || have_pc libssl; }
 t_sqlite()     { have_pc sqlite3; }
@@ -239,10 +286,16 @@ b_primecount() { fetch "https://github.com/kimwalisch/primecount/archive/refs/ta
 b_notcurses() { fetch "https://github.com/dankamongmen/notcurses/archive/refs/tags/v$NOTCURSES_VERSION.tar.gz" "$WORK/notcurses.tar.gz"; tar -C "$WORK" -xf "$WORK/notcurses.tar.gz"
   cmake_build "$WORK/notcurses-$NOTCURSES_VERSION" -DUSE_MULTIMEDIA=none -DUSE_DOCTEST=off \
     -DBUILD_TESTING=off -DUSE_PANDOC=off -DUSE_DEFLATE=off; }
-b_nlohmann() { fetch "https://github.com/nlohmann/json/releases/download/v$NLOHMANN_VERSION/json.hpp" "$WORK/json.hpp"
-  fetch "https://raw.githubusercontent.com/nlohmann/json/v$NLOHMANN_VERSION/include/nlohmann/json_fwd.hpp" "$WORK/json_fwd.hpp"
-  $SUDO mkdir -p "$PREFIX/include/nlohmann"; $SUDO cp "$WORK/json.hpp" "$PREFIX/include/nlohmann/json.hpp"
-  $SUDO cp "$WORK/json_fwd.hpp" "$PREFIX/include/nlohmann/json_fwd.hpp"; }
+# Install the COMPLETE multi-file include tree (not just json.hpp + json_fwd.hpp):
+# json_fwd.hpp pulls in detail/abi_macros.hpp, so a partial overwrite onto an
+# existing newer tree leaves a stale abi_macros.hpp and a mixed ABI. Replace the
+# whole dir so the version is internally consistent.
+b_nlohmann() { fetch "https://github.com/nlohmann/json/releases/download/v$NLOHMANN_VERSION/json.tar.xz" "$WORK/nlohmann.tar.xz"
+  rm -rf "$WORK/nlohmann-src"; mkdir -p "$WORK/nlohmann-src"; tar -C "$WORK/nlohmann-src" -xf "$WORK/nlohmann.tar.xz"
+  src=$(dirname "$(find "$WORK/nlohmann-src" -type f -path '*/include/nlohmann/json.hpp' | head -1)")
+  [ -n "$src" ] || die "nlohmann $NLOHMANN_VERSION tarball missing include/nlohmann/json.hpp"
+  $SUDO rm -rf "$PREFIX/include/nlohmann"; $SUDO mkdir -p "$PREFIX/include"
+  $SUDO cp -r "$src" "$PREFIX/include/nlohmann"; }
 b_httplib() { fetch "https://raw.githubusercontent.com/yhirose/cpp-httplib/v$HTTPLIB_VERSION/httplib.h" "$WORK/httplib.h"
   $SUDO mkdir -p "$PREFIX/include"; $SUDO cp "$WORK/httplib.h" "$PREFIX/include/httplib.h"; }
 b_lua() { fetch "https://www.lua.org/ftp/lua-$LUA_VERSION.tar.gz" "$WORK/lua.tar.gz"; tar -C "$WORK" -xf "$WORK/lua.tar.gz"
@@ -267,7 +320,7 @@ need "pari"       t_pari       pari       libpari-dev       b_pari
 need "primesieve" t_primesieve primesieve libprimesieve-dev b_primesieve
 need "primecount" t_primecount primecount ""               b_primecount
 need "notcurses"  t_notcurses  notcurses  libnotcurses-dev  b_notcurses
-need "lua 5.5.x"  t_lua        lua        liblua5.4-dev     b_lua
+need "lua 5.5.x"  t_lua        lua        liblua5.5-dev     b_lua
 need "nlohmann-json" t_nlohmann nlohmann-json nlohmann-json3-dev b_nlohmann
 need "cpp-httplib" t_httplib  cpp-httplib libcpp-httplib-dev   b_httplib
 need "libcurl"    t_curl       curl       libcurl4-openssl-dev ""
@@ -331,7 +384,7 @@ fi
 # Emit native/config.mk
 # --------------------------------------------------------------------------
 say "Writing native/config.mk"
-luamod=lua; for m in lua5.5 lua-5.5 lua; do have_pc "$m" && { luamod=$m; break; }; done
+luamod=lua; for m in lua lua5.5 lua-5.5; do have_pc "$m" && { luamod=$m; break; }; done
 # Resolve Lua flags HERE (literal values) — config.mk is -include'd before the
 # Makefile defines PKG_CONFIG, so a deferred $(shell ... $(PKG_CONFIG) ...) would
 # expand against an empty PKG_CONFIG and silently drop -llua.

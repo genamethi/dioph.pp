@@ -105,6 +105,15 @@ void SendIcebergError(httplib::Response& res, const E& err) {
   SendError(res, status, "IcebergError", err.message);
 }
 
+// Send a json body whose serialization may itself fail (the IRC models that
+// embed a TableMetadata/Schema have a ToJson returning Result<json>). On a
+// serialization failure we surface a 500 rather than a partial/empty body.
+void SendJsonResult(httplib::Response& res, int status,
+                    iceberg::Result<json> body) {
+  if (!body.has_value()) return SendIcebergError(res, body.error());
+  SendJson(res, status, body.value());
+}
+
 // ---- request parsing helpers ------------------------------------------------
 
 // Iceberg multi-level namespaces are %1F-separated in the URL path (httplib
@@ -137,7 +146,8 @@ bool ParseBody(const httplib::Request& req, httplib::Response& res, json* out) {
 }
 
 // Build the IRC LoadTableResult body for a loaded/created table.
-json LoadTableResultJson(const std::shared_ptr<iceberg::Table>& table) {
+iceberg::Result<json> LoadTableResultJson(
+    const std::shared_ptr<iceberg::Table>& table) {
   ir::LoadTableResult result;
   result.metadata_location = std::string(table->metadata_file_location());
   result.metadata = table->metadata();
@@ -267,7 +277,7 @@ int RunCatalogd(const CatalogdOptions& opts) {
              auto r = catalog->CreateTable(id, cr.schema, spec, order, cr.location,
                                            cr.properties);
              if (!r.has_value()) return SendIcebergError(res, r.error());
-             SendJson(res, 200, LoadTableResultJson(r.value()));
+             SendJsonResult(res, 200, LoadTableResultJson(r.value()));
            });
 
   // POST /v1/namespaces/{ns}/register — register an existing metadata.json.
@@ -283,7 +293,7 @@ int RunCatalogd(const CatalogdOptions& opts) {
                                          .name = rr.name};
              auto r = catalog->RegisterTable(id, rr.metadata_location);
              if (!r.has_value()) return SendIcebergError(res, r.error());
-             SendJson(res, 200, LoadTableResultJson(r.value()));
+             SendJsonResult(res, 200, LoadTableResultJson(r.value()));
            });
 
   // GET /v1/namespaces/{ns}/tables/{table} — load.
@@ -293,7 +303,7 @@ int RunCatalogd(const CatalogdOptions& opts) {
                                         .name = req.matches[2]};
             auto r = catalog->LoadTable(id);
             if (!r.has_value()) return SendIcebergError(res, r.error());
-            SendJson(res, 200, LoadTableResultJson(r.value()));
+            SendJsonResult(res, 200, LoadTableResultJson(r.value()));
           });
 
   // (HEAD /v1/namespaces/{ns}/tables/{table} — exists — is served by the GET
@@ -334,7 +344,7 @@ int RunCatalogd(const CatalogdOptions& opts) {
              ir::CommitTableResponse resp{
                  .metadata_location = std::string(r.value()->metadata_file_location()),
                  .metadata = r.value()->metadata()};
-             SendJson(res, 200, ir::ToJson(resp));
+             SendJsonResult(res, 200, ir::ToJson(resp));
            });
 
   // DELETE /v1/namespaces/{ns}/tables/{table} — drop (?purgeRequested=).
