@@ -3,15 +3,20 @@
 #include "primeparts/query/query_service.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <utility>
 
 #include <arrow/array.h>
 #include <arrow/record_batch.h>
+#include <arrow/type.h>
 
 #include "iceberg/catalog.h"
 #include "iceberg/expression/expressions.h"
@@ -199,6 +204,105 @@ std::vector<ScanHit> QueryService::ScanByK(int32_t k, int64_t p_lo, int64_t p_hi
     scanned += batch->num_rows();
     if (ctl.progress) ctl.progress(scanned, total);
   }
+  return out;
+}
+
+std::vector<GroupCountRow> QueryService::GroupCount(
+    const std::string& table, const std::string& column, int64_t p_lo,
+    int64_t p_hi, int threads, std::string* error, const ScanControl& ctl) {
+  std::vector<GroupCountRow> out;
+  fs::path meta = impl_->ResolveMeta(table, error);
+  if (meta.empty()) return out;
+
+  // Optional p-window pushdown (file pruning only; both base tables carry `p`).
+  std::shared_ptr<iceberg::Expression> filter;
+  if (p_lo > 0) {
+    filter = iceberg::Expressions::GreaterThanOrEqual(
+        "p", iceberg::Literal::Long(p_lo));
+  }
+  if (p_hi > 0) {
+    auto upper =
+        iceberg::Expressions::LessThanOrEqual("p", iceberg::Literal::Long(p_hi));
+    filter = filter ? iceberg::Expressions::And(filter, upper) : upper;
+  }
+
+  if (threads < 1) {
+    const unsigned hw = std::thread::hardware_concurrency();
+    threads = hw == 0 ? 4 : std::max(1, std::min(8, static_cast<int>(hw)));
+  }
+
+  // Total (for progress) via a cheap manifest read on a probe reader.
+  int64_t total = 0;
+  {
+    std::string pe;
+    auto probe = primeparts::SourceTableReader::OpenMetadata(meta, {column},
+                                                             filter, &pe);
+    if (probe) total = probe->total_records();
+  }
+
+  std::vector<std::map<int64_t, int64_t>> partials(threads);
+  std::atomic<int64_t> scanned{0};
+  std::atomic<bool> failed{false};
+  std::mutex err_mu;
+  std::string first_error;
+  auto fail = [&](const std::string& m) {
+    if (!failed.exchange(true)) {
+      std::lock_guard<std::mutex> lock(err_mu);
+      first_error = m;
+    }
+  };
+
+  auto worker = [&](int t) {
+    std::string e;
+    auto reader = primeparts::SourceTableReader::OpenMetadata(
+        meta, {column}, filter, &e, /*shard_index=*/t, /*shard_count=*/threads);
+    if (!reader) { fail("open " + table + ": " + e); return; }
+    auto& acc = partials[static_cast<size_t>(t)];
+    std::shared_ptr<arrow::RecordBatch> batch;
+    while (true) {
+      if (ctl.cancel && ctl.cancel->load()) return;
+      if (!reader->Next(&batch, &e)) { fail("scan " + table + ": " + e); return; }
+      if (!batch) break;  // EOF
+      auto arr = batch->GetColumnByName(column);
+      if (!arr) { fail("column not found: " + column); return; }
+      const int64_t n = batch->num_rows();
+      switch (arr->type_id()) {
+        case arrow::Type::INT32: {
+          auto a = std::static_pointer_cast<arrow::Int32Array>(arr);
+          for (int64_t i = 0; i < n; ++i) acc[a->Value(i)]++;
+          break;
+        }
+        case arrow::Type::INT64: {
+          auto a = std::static_pointer_cast<arrow::Int64Array>(arr);
+          for (int64_t i = 0; i < n; ++i) acc[a->Value(i)]++;
+          break;
+        }
+        default:
+          fail("unsupported (non-integer) column for group: " + column);
+          return;
+      }
+      const int64_t s = scanned.fetch_add(n) + n;
+      // Only thread 0 reports progress, so the (possibly non-thread-safe)
+      // callback is never invoked concurrently.
+      if (t == 0 && ctl.progress) ctl.progress(s, total);
+    }
+  };
+
+  std::vector<std::thread> pool;
+  pool.reserve(static_cast<size_t>(threads));
+  for (int t = 0; t < threads; ++t) pool.emplace_back(worker, t);
+  for (auto& th : pool) th.join();
+
+  if (failed.load()) {
+    if (error) *error = first_error;
+    return out;
+  }
+
+  std::map<int64_t, int64_t> merged;
+  for (const auto& part : partials)
+    for (const auto& [v, c] : part) merged[v] += c;
+  out.reserve(merged.size());
+  for (const auto& [v, c] : merged) out.push_back(GroupCountRow{.value = v, .count = c});
   return out;
 }
 

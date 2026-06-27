@@ -46,6 +46,13 @@ struct ScanHit {
   int64_t prime_rank = 0;
 };
 
+/// One bucket of a GroupCount histogram: `value` of the grouped column and the
+/// number of rows carrying it. Int32 columns are widened to int64.
+struct GroupCountRow {
+  int64_t value = 0;
+  int64_t count = 0;
+};
+
 /// Warehouse-status facts for one table, read from the catalog metadata and the
 /// current snapshot summary (rows / files / size — zero scan). `max_p` is the
 /// max of the "p" column's manifest upper bounds (a manifest aggregate, only
@@ -98,6 +105,22 @@ class QueryService {
   std::vector<ScanHit> ScanByK(int32_t k, int64_t p_lo, int64_t p_hi,
                                int64_t limit, std::string* error,
                                const ScanControl& ctl = {});
+
+  /// General group-by-value count: scans `table`, tallies how many rows carry
+  /// each distinct value of integer column `column`, and returns the histogram
+  /// ordered by value. The optional p-window [p_lo, p_hi] (<= 0 = open) is an
+  /// iceberg file-pruning predicate (both base tables carry `p`). `threads`
+  /// drives sharded parallel readers (SourceTableReader sharding); <= 0 means a
+  /// sensible default. Intended for LOW-cardinality columns (k, m_k, n_k, …) —
+  /// grouping by a high-cardinality column (p) would build a huge map.
+  ///
+  /// This is the one reusable aggregation primitive: e.g. the per-k histogram is
+  /// `GroupCount("primes", "k", 0, 0, 0, &err)`. Empty + *error on failure.
+  std::vector<GroupCountRow> GroupCount(const std::string& table,
+                                        const std::string& column,
+                                        int64_t p_lo, int64_t p_hi, int threads,
+                                        std::string* error,
+                                        const ScanControl& ctl = {});
 
   /// Distinct schema field names across the base tables (primes + partitions),
   /// read from the catalog schema and cached. The authority for preset

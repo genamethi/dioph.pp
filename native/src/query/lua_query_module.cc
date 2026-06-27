@@ -2,9 +2,12 @@
 
 #include "primeparts/query/lua_query_module.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include <lua.hpp>
 
@@ -26,6 +29,18 @@ int64_t opt_int(lua_State* L, const char* key, int64_t dflt, bool* present) {
   bool p = false;
   if (lua_isinteger(L, -1)) { v = (int64_t)lua_tointeger(L, -1); p = true; }
   else if (lua_isnumber(L, -1)) { v = (int64_t)lua_tonumber(L, -1); p = true; }
+  lua_pop(L, 1);
+  if (present) *present = p;
+  return v;
+}
+
+// Read an optional string field from the spec table (index 1).
+std::string opt_str(lua_State* L, const char* key, const char* dflt,
+                    bool* present = nullptr) {
+  lua_getfield(L, 1, key);
+  std::string v = dflt ? dflt : "";
+  bool p = false;
+  if (lua_isstring(L, -1)) { v = lua_tostring(L, -1); p = true; }
   lua_pop(L, 1);
   if (present) *present = p;
   return v;
@@ -127,6 +142,40 @@ int q_kget(lua_State* L) {
   return 1;
 }
 
+// query.hist{ col=, [table="primes"], [init=], [end=]/[hi=], [threads=] }
+//   -> { { [col]=value, count= }, ... }   (ordered by value)
+// General group-by-value count over an integer column — the per-k histogram is
+// query.hist{ col = "k" }. Reads QueryService::GroupCount.
+int q_hist(lua_State* L) {
+  QueryService* qs = qs_upvalue(L);
+  luaL_checktype(L, 1, LUA_TTABLE);
+  bool has_col = false;
+  std::string col = opt_str(L, "col", "", &has_col);
+  if (!has_col || col.empty()) return luaL_error(L, "query.hist requires col");
+  std::string table = opt_str(L, "table", "primes");
+
+  bool d;
+  int64_t lo = opt_int(L, "init", 0, &d);
+  int64_t hi = opt_int(L, "end", 0, &d);
+  if (hi == 0) hi = opt_int(L, "hi", 0, &d);
+  int64_t threads = opt_int(L, "threads", 0, &d);
+
+  lua_newtable(L);  // result array (empty if qs null)
+  if (qs == nullptr) return 1;
+
+  std::string e;
+  auto rows = qs->GroupCount(table, col, lo, hi, static_cast<int>(threads), &e);
+  if (!e.empty()) return luaL_error(L, "query.hist: %s", e.c_str());
+  int idx = 1;
+  for (const auto& r : rows) {
+    lua_newtable(L);
+    lua_pushinteger(L, r.value); lua_setfield(L, -2, col.c_str());
+    lua_pushinteger(L, r.count); lua_setfield(L, -2, "count");
+    lua_seti(L, -2, idx++);
+  }
+  return 1;
+}
+
 }  // namespace
 
 void RegisterQueryModule(lua_State* L, QueryService* qs) {
@@ -147,6 +196,7 @@ void RegisterQueryModule(lua_State* L, QueryService* qs) {
   reg("is_prime_power", nt_is_prime_power);
   reg("pget", q_pget);
   reg("kget", q_kget);
+  reg("hist", q_hist);
   lua_setglobal(L, "query");
 }
 
