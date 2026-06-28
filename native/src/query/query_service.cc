@@ -464,9 +464,17 @@ bool QueryService::ValidatePreset(const QueryPreset& p, std::string* error) {
   if (p.id.empty()) return fail("preset id is empty");
   if (p.kind != "by_k" && p.kind != "lookup")
     return fail("unknown query kind: '" + p.kind + "'");
-  const auto& fields = SchemaFields();
+  // No live schema (no catalog/tables loaded) -> validate accepts/target against
+  // the preset's own declared fields instead of the base-table columns.
+  const auto& schema = SchemaFields();
+  auto declared = [&](const std::string& n) {
+    for (const auto& f : p.fields)
+      if (f.name == n) return true;
+    return false;
+  };
   auto known = [&](const std::string& n) {
-    return std::find(fields.begin(), fields.end(), n) != fields.end();
+    if (schema.empty()) return declared(n);
+    return std::find(schema.begin(), schema.end(), n) != schema.end();
   };
   for (const auto& a : p.accepts)
     if (!known(a)) return fail("accepts unknown schema field: '" + a + "'");
