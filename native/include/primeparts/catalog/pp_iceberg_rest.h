@@ -82,9 +82,13 @@ bool EnsureNamespace(const std::shared_ptr<iceberg::Catalog>& catalog,
 /// codebase that removes warehouse files — purge is a catalog operation, never
 /// something application/analysis code does directly. (The deletion lives here
 /// because the vendored v0.3.0 SqlCatalog FileIO does not purge on its own.)
-/// Idempotent: a table the catalog does not know is treated as already dropped.
+/// Idempotent: a table the catalog does not know is treated as already dropped,
+/// but a purge still reclaims any orphan files under the conventional location
+/// (warehouse/primeparts/<table>) — debris from a build killed after a prior
+/// drop but before CommitFiles.
 bool DropTable(const std::shared_ptr<iceberg::Catalog>& catalog,
-               const std::string& table, bool purge, std::string* error);
+               const fs::path& warehouse, const std::string& table, bool purge,
+               std::string* error);
 
 /// Publish a table to the catalog under namespace `primeparts`.
 ///

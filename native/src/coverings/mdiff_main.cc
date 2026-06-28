@@ -430,8 +430,8 @@ bool BuildMdiff(const std::shared_ptr<iceberg::Catalog>& catalog,
   // Replace semantics: drop (purge) each target table through the catalog seam
   // BEFORE writing fresh per-bucket files. ppc::DropTable owns all file removal.
   for (int k : opts.k_values)
-    if (!ppc::DropTable(catalog, "mdiff_k" + std::to_string(k), /*purge=*/true,
-                        error))
+    if (!ppc::DropTable(catalog, opts.warehouse, "mdiff_k" + std::to_string(k),
+                        /*purge=*/true, error))
       return false;
 
   std::map<int, std::vector<std::shared_ptr<iceberg::DataFile>>> sink;

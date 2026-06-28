@@ -118,7 +118,8 @@ bool EnsureNamespace(const std::shared_ptr<iceberg::Catalog>& catalog,
 }
 
 bool DropTable(const std::shared_ptr<iceberg::Catalog>& catalog,
-               const std::string& table, bool purge, std::string* error) {
+               const fs::path& warehouse, const std::string& table, bool purge,
+               std::string* error) {
   iceberg::TableIdentifier ident{
       .ns = iceberg::Namespace{{"primeparts"}}, .name = table};
 
@@ -126,7 +127,16 @@ bool DropTable(const std::shared_ptr<iceberg::Catalog>& catalog,
   // purge removes exactly the directory tree the catalog says this table owns.
   auto loaded = catalog->LoadTable(ident);
   if (!loaded.has_value()) {
-    return true;  // not registered -> already dropped (idempotent)
+    // Not registered. A clean slate for the catalog — but a build killed after a
+    // prior DropTable (catalog row gone) but before CommitFiles leaves orphan
+    // data files under the conventional location. Complete the purge contract by
+    // reclaiming that directory too, so the next build starts clean. This is the
+    // conventional layout CommitFiles writes (warehouse/primeparts/<table>).
+    if (purge) {
+      std::error_code ec;
+      fs::remove_all(warehouse / "primeparts" / table, ec);
+    }
+    return true;
   }
   fs::path base(common::StripFileScheme(std::string(loaded.value()->location())));
 

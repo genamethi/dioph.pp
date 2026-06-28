@@ -120,7 +120,8 @@ bool Build(const std::shared_ptr<iceberg::Catalog>& catalog, const Options& opts
       {Finish(&d_b), Finish(&q_b), Finish(&e_b), Finish(&ord2_b), Finish(&prim_b)});
 
   // Replace through the catalog seam (the only file-removal path).
-  if (!ppc::DropTable(catalog, "mersenne_factors", /*purge=*/true, error))
+  if (!ppc::DropTable(catalog, opts.warehouse, "mersenne_factors", /*purge=*/true,
+                      error))
     return false;
 
   primeparts::WriterConfig cfg;
