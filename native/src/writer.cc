@@ -76,10 +76,10 @@ std::shared_ptr<parquet::WriterProperties> ParquetWriterProperties(
   builder.compression(parquet::Compression::ZSTD);
   builder.compression_level(config.compression_level);
   builder.data_pagesize(config.data_pagesize);
-  // ~256 MiB target row group => 4 row groups per ~1 GiB file. Both
-  // output schemas land at ~1.1 B/row with DELTA+zstd on the monotone
-  // columns (p, prime_rank, q_k), so 240M rows ~= 264 MiB compressed.
-  builder.max_row_group_length(240'000'000);
+  // Row-group size is caller policy (see WriterConfig.max_row_group_rows). Base
+  // tables use ~240M rows (~256 MiB at ~1.1 B/row); sorted derived tables use a
+  // smaller value so each row group is a narrow sort-key band for pruning.
+  builder.max_row_group_length(config.max_row_group_rows);
   for (const auto& col : config.delta_columns) {
     if (arrow_schema.GetFieldByName(col)) {
       builder.disable_dictionary(col);

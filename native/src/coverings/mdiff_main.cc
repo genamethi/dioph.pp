@@ -65,19 +65,17 @@ namespace {
 constexpr int64_t kReaderBatchSize = 1 << 20;
 const fs::path kDefaultWarehouse =
     "/media/extssd/research/dioph.pp/data/ib-staging";
-const iceberg::Namespace kNs{{"primeparts"}};
-
-int DefaultWorkerThreads() {
-  const unsigned hw = std::thread::hardware_concurrency();
-  if (hw == 0) return 6;
-  return std::max(1, std::min(6, static_cast<int>(hw)));
-}
 
 struct Options {
   fs::path warehouse = kDefaultWarehouse;
   std::set<int> k_values;        // target k tables to (re)build
-  int threads = DefaultWorkerThreads();
-  int64_t flush_rows = 1 << 20;  // per-(bucket,k) batch flush threshold
+  // Default low: each worker holds a chunk buffer (chunk_rows * 16 B) for the
+  // in-memory (shape, p) sort, so peak RAM ~= threads * chunk_rows * 16 B. The
+  // production box is small (~15 GB); 2 * 200M * 16 B ~= 6.4 GB leaves headroom.
+  int threads = 2;
+  int64_t chunk_rows = 200'000'000;   // rows sorted in memory -> one rolled file
+  int64_t row_group_rows = 64'000'000;  // < chunk so each row group is a shape band
+  int64_t flush_rows = 1 << 20;  // arrow batch size feeding the writer
   bool progress = true;
 };
 
@@ -85,11 +83,14 @@ void Usage(const char* argv0) {
   std::fprintf(
       stderr,
       "usage: %s [--warehouse DIR] [--k N]... [--threads N]\n"
-      "          [--flush-rows N] [--no-progress]\n\n"
+      "          [--chunk-rows N] [--row-group-rows N] [--flush-rows N] [--no-progress]\n\n"
       "Builds primeparts.mdiff_k{K} for each --k (a single sorted pass over\n"
-      "primeparts.partitions, per-bucket parallel, run-detected). The\n"
-      "primeparts.mersenne_factors cache is built separately by\n"
-      "primeparts-mersenne.\n",
+      "primeparts.partitions, per-bucket parallel, run-detected). Output is\n"
+      "clustered by covering shape: each bucket is emitted as rolled chunk files\n"
+      "of ~--chunk-rows rows, sorted in memory by (shape, p), with row groups of\n"
+      "~--row-group-rows so each is a narrow shape band. Peak RAM ~=\n"
+      "threads * chunk-rows * 16 B. The mersenne_factors cache is built\n"
+      "separately by primeparts-mersenne.\n",
       argv0);
 }
 
@@ -122,6 +123,16 @@ bool ParseOptions(int argc, char** argv, Options* o) {
         std::fprintf(stderr, "invalid --threads: %s\n", v ? v : ""); return false;
       }
       o->threads = static_cast<int>(p);
+    } else if (a == "--chunk-rows") {
+      const char* v = val("--chunk-rows");
+      if (!v || !ParseI64(v, &o->chunk_rows) || o->chunk_rows <= 0) {
+        std::fprintf(stderr, "invalid --chunk-rows: %s\n", v ? v : ""); return false;
+      }
+    } else if (a == "--row-group-rows") {
+      const char* v = val("--row-group-rows");
+      if (!v || !ParseI64(v, &o->row_group_rows) || o->row_group_rows <= 0) {
+        std::fprintf(stderr, "invalid --row-group-rows: %s\n", v ? v : ""); return false;
+      }
     } else if (a == "--flush-rows") {
       const char* v = val("--flush-rows");
       if (!v || !ParseI64(v, &o->flush_rows) || o->flush_rows <= 0) {
@@ -174,21 +185,33 @@ std::unique_ptr<parquet::arrow::FileReader> OpenParquet(const std::string& path,
   return reader;
 }
 
-// Per-(bucket, k) output accumulator: packs each prime's hit positions into a
-// single int64 hit_mask and streams (p, hit_mask) rows through one
-// BucketParquetWriter (one parquet file per bucket per k). The k-vector and its
-// pairwise differences are recoverable from hit_mask (see HitMaskDiffs); they
-// are not stored. prime_rank = π(p) is likewise dropped (recomputable).
+// shape = hit_mask anchored so its lowest set bit is at position 0 — the
+// translation-invariant covering family (mask >> ctz(mask)). hit_mask > 0 for
+// k >= 2, so ctz is well-defined.
+inline int64_t ShapeOf(int64_t mask) {
+  return static_cast<int64_t>(static_cast<uint64_t>(mask) >>
+                              __builtin_ctzll(static_cast<uint64_t>(mask)));
+}
+
+// Per-(bucket, k) output accumulator. Each prime's hit positions are packed into
+// an int64 hit_mask; rows are buffered up to chunk_rows, sorted in memory by
+// (shape, p), and emitted as one rolled parquet file per chunk. Row groups
+// (writer max_row_group_rows < chunk_rows) are therefore narrow shape bands, so a
+// per-family scan prunes by the shape min/max stat. The k-vector and pairwise
+// differences are recoverable from hit_mask (HitMaskDiffs); prime_rank=π(p) is
+// dropped. Peak memory per accumulator = chunk_rows * 16 B (the buffer).
 struct KAccum {
   int k = 0;
+  int64_t chunk_rows = 0;
+  int64_t flush_rows = 0;
   std::shared_ptr<iceberg::Schema> schema;
   std::unique_ptr<primeparts::BucketParquetWriter> writer;
-  arrow::Int64Builder p_b, mask_b;
-  int64_t pending = 0;
-  int64_t batch_p_min = 0, batch_p_max = 0;
+  std::vector<std::pair<int64_t, int64_t>> buf;  // (p, hit_mask)
 
   bool Init(const fs::path& warehouse, int32_t bv, int32_t bucket,
-            std::string* error) {
+            const Options& opts, std::string* error) {
+    chunk_rows = opts.chunk_rows;
+    flush_rows = opts.flush_rows;
     schema = primeparts::MdiffSchema(k, error);
     if (!schema) return false;
     primeparts::WriterConfig cfg;
@@ -201,42 +224,63 @@ struct KAccum {
     cfg.bucket_version = bv;
     cfg.bucket = bucket;
     cfg.starting_file_seq = 0;
-    cfg.target_rows_per_file = 0;
+    cfg.target_rows_per_file = chunk_rows;        // one rolled file per chunk
+    cfg.max_row_group_rows = opts.row_group_rows;  // shape-band row groups
     writer = primeparts::BucketParquetWriter::Make(cfg, error);
     if (!writer) return false;
+    buf.reserve(static_cast<size_t>(chunk_rows));
     return true;
   }
 
   // m must be sorted ascending, size == k; positions in [1, 63].
   bool Append(int64_t p, const std::vector<int32_t>& m, std::string* error) {
-    if (pending == 0) { batch_p_min = p; batch_p_max = p; }
-    else { batch_p_min = std::min(batch_p_min, p); batch_p_max = std::max(batch_p_max, p); }
     int64_t mask = 0;
     for (int32_t pos : m) mask |= (int64_t{1} << pos);
-    if (!p_b.Append(p).ok() || !mask_b.Append(mask).ok()) {
-      *error = "mdiff: append p/hit_mask failed"; return false;
-    }
-    ++pending;
+    buf.emplace_back(p, mask);
+    if (static_cast<int64_t>(buf.size()) >= chunk_rows) return FlushChunk(error);
     return true;
   }
 
-  bool Flush(std::string* error) {
-    if (pending == 0) return true;
-    arrow::FieldVector fields{arrow::field("p", arrow::int64()),
-                              arrow::field("hit_mask", arrow::int64())};
-    std::vector<std::shared_ptr<arrow::Array>> arrays{Finish(&p_b), Finish(&mask_b)};
-    auto batch = arrow::RecordBatch::Make(arrow::schema(fields), pending, arrays);
-    primeparts::BucketParquetWriter::BatchStats st{};
-    st.p_min = batch_p_min; st.p_max = batch_p_max;
-    st.rank_min = 0; st.rank_max = 0;
-    if (!writer->Write(*batch, st, error)) return false;
-    pending = 0;
+  // Sort the buffered chunk by (shape, p) and write it as one rolled file.
+  bool FlushChunk(std::string* error) {
+    if (buf.empty()) return true;
+    std::sort(buf.begin(), buf.end(),
+              [](const std::pair<int64_t, int64_t>& a,
+                 const std::pair<int64_t, int64_t>& b) {
+                const int64_t sa = ShapeOf(a.second), sb = ShapeOf(b.second);
+                if (sa != sb) return sa < sb;
+                return a.first < b.first;
+              });
+    auto arrow_schema = arrow::schema({arrow::field("p", arrow::int64()),
+                                       arrow::field("hit_mask", arrow::int64()),
+                                       arrow::field("shape", arrow::int64())});
+    const size_t n = buf.size();
+    for (size_t off = 0; off < n; off += static_cast<size_t>(flush_rows)) {
+      const size_t end = std::min(n, off + static_cast<size_t>(flush_rows));
+      arrow::Int64Builder p_b, mask_b, shape_b;
+      int64_t pmin = buf[off].first, pmax = buf[off].first;
+      for (size_t i = off; i < end; ++i) {
+        const int64_t p = buf[i].first, mask = buf[i].second;
+        pmin = std::min(pmin, p); pmax = std::max(pmax, p);
+        if (!p_b.Append(p).ok() || !mask_b.Append(mask).ok() ||
+            !shape_b.Append(ShapeOf(mask)).ok()) {
+          *error = "mdiff: append failed"; return false;
+        }
+      }
+      auto batch = arrow::RecordBatch::Make(
+          arrow_schema, static_cast<int64_t>(end - off),
+          {Finish(&p_b), Finish(&mask_b), Finish(&shape_b)});
+      primeparts::BucketParquetWriter::BatchStats st{};
+      st.p_min = pmin; st.p_max = pmax; st.rank_min = 0; st.rank_max = 0;
+      if (!writer->Write(*batch, st, error)) return false;
+    }
+    buf.clear();
     return true;
   }
 
   bool Close(std::vector<std::shared_ptr<iceberg::DataFile>>* out,
              std::string* error) {
-    if (!Flush(error)) return false;
+    if (!FlushChunk(error)) return false;
     std::vector<primeparts::WrittenFile> written;
     if (!writer->Close(&written, error)) return false;
     for (const auto& wf : written)
@@ -278,7 +322,7 @@ bool ProcessBucket(const std::vector<std::string>& files, int32_t bv,
   std::map<int, KAccum> accums;
   for (int k : opts.k_values) {
     KAccum a; a.k = k;
-    if (!a.Init(opts.warehouse, bv, bucket, error)) return false;
+    if (!a.Init(opts.warehouse, bv, bucket, opts, error)) return false;
     accums.emplace(k, std::move(a));
   }
 
@@ -292,9 +336,9 @@ bool ProcessBucket(const std::vector<std::string>& files, int32_t bv,
     auto it = accums.find(k);
     if (it == accums.end()) return true;  // not a targeted k
     std::sort(run_m.begin(), run_m.end());  // defensive; already (p,m_k)-sorted
+    // Append buffers into the chunk and rolls/sorts/flushes a file when full.
     if (!it->second.Append(cur_p, run_m, err)) return false;
     if (pr) pr->emitted.fetch_add(1);
-    if (it->second.pending >= opts.flush_rows && !it->second.Flush(err)) return false;
     return true;
   };
 

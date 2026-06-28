@@ -101,6 +101,12 @@ struct WriterConfig {
   int32_t compression_level = 3;
   int64_t data_pagesize = 1 << 20;
 
+  // Max rows per row group before parquet cuts a new one. Default ~256 MiB
+  // compressed at the base-table ~1.1 B/row. Tables that physically sort by a
+  // low-cardinality key (mdiff: shape) set this smaller so each row group is a
+  // narrow key band and readers can prune by its min/max stats.
+  int64_t max_row_group_rows = 240'000'000;
+
   // Simpler filename format `<prefix>_<seq:04d>.parquet`, useful for
   // partitions that don't carry the bucket_version/bucket scheme (e.g.
   // covering_system).

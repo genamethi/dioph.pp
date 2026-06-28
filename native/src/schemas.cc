@@ -60,13 +60,15 @@ std::shared_ptr<iceberg::Schema> MdiffSchema(int k, std::string* error) {
     return nullptr;
   }
   // k-agnostic: K hit positions packed into one int64 bitmask. The d-vector and
-  // prime_rank are derived, not stored. popcount(hit_mask) recovers k.
+  // prime_rank are derived, not stored. popcount(hit_mask) recovers k. shape =
+  // hit_mask >> ctz(hit_mask) is the sort/prune key (covering family).
   return std::make_shared<iceberg::Schema>(
       std::vector<iceberg::SchemaField>{
           iceberg::SchemaField::MakeRequired(1, "p",                iceberg::int64()),
           iceberg::SchemaField::MakeRequired(2, "hit_mask",         iceberg::int64()),
-          iceberg::SchemaField::MakeRequired(3, "p_bucket_version", iceberg::int32()),
-          iceberg::SchemaField::MakeRequired(4, "p_bucket",         iceberg::int32()),
+          iceberg::SchemaField::MakeRequired(3, "shape",            iceberg::int64()),
+          iceberg::SchemaField::MakeRequired(4, "p_bucket_version", iceberg::int32()),
+          iceberg::SchemaField::MakeRequired(5, "p_bucket",         iceberg::int32()),
       },
       0);
 }
