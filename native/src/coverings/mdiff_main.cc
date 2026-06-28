@@ -76,21 +76,27 @@ struct Options {
   int64_t chunk_rows = 200'000'000;   // rows sorted in memory -> one rolled file
   int64_t row_group_rows = 64'000'000;  // < chunk so each row group is a shape band
   int64_t flush_rows = 1 << 20;  // arrow batch size feeding the writer
+  // Hard RAM ceiling. Each worker holds one chunk buffer PER target k, so peak
+  // buffer memory = threads * |k_values| * chunk_rows * 16 B. chunk_rows is
+  // capped so that stays under mem_gb. (File size ~= chunk_rows * ~2.2 B; for
+  // bigger files on a small box, drop --threads.)
+  double mem_gb = 10.0;
   bool progress = true;
 };
 
 void Usage(const char* argv0) {
   std::fprintf(
       stderr,
-      "usage: %s [--warehouse DIR] [--k N]... [--threads N]\n"
+      "usage: %s [--warehouse DIR] [--k N]... [--threads N] [--mem-gb G]\n"
       "          [--chunk-rows N] [--row-group-rows N] [--flush-rows N] [--no-progress]\n\n"
       "Builds primeparts.mdiff_k{K} for each --k (a single sorted pass over\n"
       "primeparts.partitions, per-bucket parallel, run-detected). Output is\n"
       "clustered by covering shape: each bucket is emitted as rolled chunk files\n"
       "of ~--chunk-rows rows, sorted in memory by (shape, p), with row groups of\n"
-      "~--row-group-rows so each is a narrow shape band. Peak RAM ~=\n"
-      "threads * chunk-rows * 16 B. The mersenne_factors cache is built\n"
-      "separately by primeparts-mersenne.\n",
+      "~--row-group-rows so each is a narrow shape band. chunk_rows is capped so\n"
+      "peak RAM (threads * |k| * chunk-rows * 16 B) stays under --mem-gb (default\n"
+      "10). For bigger files on a small box, use --threads 1. The mersenne_factors\n"
+      "cache is built separately by primeparts-mersenne.\n",
       argv0);
 }
 
@@ -133,6 +139,13 @@ bool ParseOptions(int argc, char** argv, Options* o) {
       if (!v || !ParseI64(v, &o->row_group_rows) || o->row_group_rows <= 0) {
         std::fprintf(stderr, "invalid --row-group-rows: %s\n", v ? v : ""); return false;
       }
+    } else if (a == "--mem-gb") {
+      const char* v = val("--mem-gb");
+      char* end = nullptr; double g = v ? std::strtod(v, &end) : 0;
+      if (!v || *end != '\0' || g <= 0) {
+        std::fprintf(stderr, "invalid --mem-gb: %s\n", v ? v : ""); return false;
+      }
+      o->mem_gb = g;
     } else if (a == "--flush-rows") {
       const char* v = val("--flush-rows");
       if (!v || !ParseI64(v, &o->flush_rows) || o->flush_rows <= 0) {
@@ -485,6 +498,25 @@ int main(int argc, char** argv) {
     Usage(argv[0]);
     return 2;
   }
+
+  // Cap chunk_rows so peak buffer memory (threads * |k_values| * chunk_rows *
+  // 16 B, since each worker holds one buffer per target k) stays under mem_gb.
+  const int kc = static_cast<int>(opts.k_values.size());
+  const int workers = std::max(1, opts.threads);
+  const int64_t cap =
+      static_cast<int64_t>(opts.mem_gb * 1e9) / (int64_t{16} * workers * kc);
+  if (cap < 1) {
+    std::fprintf(stderr, "--mem-gb too small for %d threads x %d k tables\n",
+                 workers, kc);
+    return 2;
+  }
+  if (opts.chunk_rows > cap) opts.chunk_rows = cap;
+  std::fprintf(stderr,
+               "chunk_rows=%" PRId64 " (peak buffer ~%.1f GB = %d threads x %d k "
+               "x %" PRId64 " x 16 B); row_group_rows=%" PRId64 "\n",
+               opts.chunk_rows,
+               16.0 * workers * kc * opts.chunk_rows / 1e9, workers, kc,
+               opts.chunk_rows, opts.row_group_rows);
 
   std::string err;
   auto catalog = ppc::MakeLocalCatalog(opts.warehouse, &err);
