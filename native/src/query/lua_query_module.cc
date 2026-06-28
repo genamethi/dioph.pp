@@ -131,6 +131,7 @@ int q_kget(lua_State* L) {
 
   std::string e;
   auto hits = qs->ScanByK((int32_t)k, lo, hi, lim, &e);
+  if (!e.empty()) return luaL_error(L, "query.kget: %s", e.c_str());
   int idx = 1;
   for (const auto& h : hits) {
     lua_newtable(L);
