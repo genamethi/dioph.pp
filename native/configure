@@ -35,8 +35,10 @@ WITH_ARROW=0
 BUILD_MISSING=0
 FORCE=0
 
-# Default source versions (recent-or-later; override via env). Arrow tracks a
-# branch, not a version — see ARROW_REF.
+# Default source versions (recent-or-later; override via env). Arrow and
+# iceberg-cpp are pinned to release tags — reproducible, and reliably fetchable
+# on a fresh clone (a shallow server refuses arbitrary gitlink SHAs). See
+# ARROW_REF / ICEBERG_REF.
 GMP_VERSION="${GMP_VERSION:-6.3.0}"
 MPFR_VERSION="${MPFR_VERSION:-4.2.1}"
 FLINT_VERSION="${FLINT_VERSION:-3.5.0}"
@@ -47,7 +49,8 @@ NOTCURSES_VERSION="${NOTCURSES_VERSION:-3.0.17}"
 LUA_VERSION="${LUA_VERSION:-5.5.0}"   # must satisfy >=5.5,<5.6
 NLOHMANN_VERSION="${NLOHMANN_VERSION:-3.11.3}"  # header-only, used by the project directly
 HTTPLIB_VERSION="${HTTPLIB_VERSION:-0.18.3}"     # header-only HTTP server for pp-catalogd
-ARROW_REF="${ARROW_REF:-main}"        # Arrow has no >=25 release tag yet
+ARROW_REF="${ARROW_REF:-apache-arrow-24.0.0}"   # pinned release tag (== iceberg-cpp v0.3.0's Arrow)
+ICEBERG_REF="${ICEBERG_REF:-v0.3.0}"            # pinned iceberg-cpp release tag
 
 # --------------------------------------------------------------------------
 # Output helpers
@@ -138,6 +141,18 @@ fi
 ok "CC=$CC"; ok "CXX=$CXX"
 command -v cmake >/dev/null 2>&1 && ok "cmake=$(cmake --version | head -1)" || warn "cmake absent (only needed for source builds)"
 ok "prefix=$PREFIX  jobs=$JOBS  distro=$DISTRO"
+# iceberg-cpp (v0.3.0) needs two C++23 library features: <format> (libstdc++ >= 13,
+# used by its bundled Avro) AND std::ranges::to (libstdc++ >= 14, used by iceberg's
+# own string_util.h). gcc 14 is therefore the real floor. Probe both now and fail
+# fast with a clear message instead of a cryptic error deep in the build tree.
+if [ "$WITH_ARROW" = 1 ]; then
+  if printf '#include <format>\n#include <ranges>\n#include <vector>\nint main(){auto v=std::views::iota(0,2)|std::ranges::to<std::vector<int>>();return (int)v.size()+(int)std::format("{}",v.size()).size();}\n' \
+       | "$CXX" -std=c++23 -x c++ - -o "$WORK/.cxx23_probe" >/dev/null 2>&1; then
+    ok "C++23 <format> + std::ranges::to available"; rm -f "$WORK/.cxx23_probe"
+  else
+    die "C++ toolchain lacks C++23 <format>/std::ranges::to (need gcc >= 14, or a recent clang+libc++); '$CXX' is too old — iceberg-cpp v0.3.0 requires them. Re-run with CXX=g++-14 (or newer)."
+  fi
+fi
 # LMDB is small + pinned + compiled directly by the Makefile; ensure it's present.
 if [ ! -f "$REPO_ROOT/native/vendor/lmdb/libraries/liblmdb/mdb.c" ]; then
   say "initializing lmdb submodule"; git -C "$REPO_ROOT" submodule update --init --checkout -- native/vendor/lmdb
@@ -153,10 +168,25 @@ min_ok()  { have_pc "$1" && "$PKG_CONFIG" --atleast-version="$2" "$1" 2>/dev/nul
 # max_ok <mod> <ltver>   — true if module present and < ltver
 max_ok()  { have_pc "$1" && ! "$PKG_CONFIG" --atleast-version="$2" "$1" 2>/dev/null; }
 
-fetch() { # fetch <url> <outfile>
-  [ -f "$2" ] && return 0
-  if command -v curl >/dev/null 2>&1; then curl -fsSL --retry 3 -o "$2.part" "$1"; else wget -qO "$2.part" "$1"; fi
-  mv "$2.part" "$2"
+# fetch <outfile> <url> [fallback-url...] — download to <outfile>, trying each URL
+# in turn. Hard connect/stall timeouts so a blackholed or stalled mirror (e.g. a
+# slow GNU FTP host) fails over to the next URL instead of hanging the whole build
+# forever (curl with no --max-time will wait indefinitely on a dead connection).
+fetch() {
+  out=$1; shift
+  [ -f "$out" ] && return 0
+  for url in "$@"; do
+    if command -v curl >/dev/null 2>&1; then
+      curl -fL --connect-timeout 20 --retry 3 --retry-connrefused \
+           --speed-time 30 --speed-limit 2048 -o "$out.part" "$url" \
+        && { mv "$out.part" "$out"; return 0; }
+    else
+      wget --connect-timeout=20 --read-timeout=30 --tries=3 -O "$out.part" "$url" \
+        && { mv "$out.part" "$out"; return 0; }
+    fi
+    rm -f "$out.part"; warn "  fetch: $url failed, trying next mirror"
+  done
+  die "all mirrors failed for $(basename "$out")"
 }
 # Write stdin to a file under PREFIX, elevating only if needed (handles $SUDO).
 prefix_write() { # prefix_write <dest-path-under-prefix>
@@ -269,36 +299,36 @@ EOF
 }
 
 # --- source build recipes (rootless, into PREFIX) ---
-b_gmp() { fetch "https://gmplib.org/download/gmp/gmp-$GMP_VERSION.tar.xz" "$WORK/gmp.tar.xz"; tar -C "$WORK" -xf "$WORK/gmp.tar.xz"
+b_gmp() { fetch "$WORK/gmp.tar.xz" "https://mirrors.kernel.org/gnu/gmp/gmp-$GMP_VERSION.tar.xz" "https://gmplib.org/download/gmp/gmp-$GMP_VERSION.tar.xz" "https://ftp.gnu.org/gnu/gmp/gmp-$GMP_VERSION.tar.xz"; tar -C "$WORK" -xf "$WORK/gmp.tar.xz"
   ( cd "$WORK/gmp-$GMP_VERSION" && ./configure --prefix="$PREFIX" --enable-cxx >/dev/null && make -j"$JOBS" >/dev/null && $SUDO make install >/dev/null ); ensure_gmp_pc; }
-b_mpfr() { fetch "https://ftp.gnu.org/gnu/mpfr/mpfr-$MPFR_VERSION.tar.xz" "$WORK/mpfr.tar.xz"; tar -C "$WORK" -xf "$WORK/mpfr.tar.xz"
+b_mpfr() { fetch "$WORK/mpfr.tar.xz" "https://mirrors.kernel.org/gnu/mpfr/mpfr-$MPFR_VERSION.tar.xz" "https://ftp.gnu.org/gnu/mpfr/mpfr-$MPFR_VERSION.tar.xz"; tar -C "$WORK" -xf "$WORK/mpfr.tar.xz"
   ( cd "$WORK/mpfr-$MPFR_VERSION" && ac_env && ./configure --prefix="$PREFIX" >/dev/null && make -j"$JOBS" >/dev/null && $SUDO make install >/dev/null ); }
-b_flint() { fetch "https://github.com/flintlib/flint/releases/download/v$FLINT_VERSION/flint-$FLINT_VERSION.tar.gz" "$WORK/flint.tar.gz"; tar -C "$WORK" -xf "$WORK/flint.tar.gz"
+b_flint() { fetch "$WORK/flint.tar.gz" "https://github.com/flintlib/flint/releases/download/v$FLINT_VERSION/flint-$FLINT_VERSION.tar.gz"; tar -C "$WORK" -xf "$WORK/flint.tar.gz"
   # FLINT's CMake build is Windows-only; Linux uses the (bootstrapped) autotools
   # path. gmp/mpfr are found via CPPFLAGS/LDFLAGS (PREFIX first, then system).
   ( cd "$WORK/flint-$FLINT_VERSION" && ac_env && ./configure --prefix="$PREFIX" CC="$CC" >/dev/null && make -j"$JOBS" >/dev/null && $SUDO make install >/dev/null ); }
-b_pari() { fetch "https://pari.math.u-bordeaux.fr/pub/pari/unix/pari-$PARI_VERSION.tar.gz" "$WORK/pari.tar.gz"; tar -C "$WORK" -xf "$WORK/pari.tar.gz"
+b_pari() { fetch "$WORK/pari.tar.gz" "https://pari.math.u-bordeaux.fr/pub/pari/unix/pari-$PARI_VERSION.tar.gz"; tar -C "$WORK" -xf "$WORK/pari.tar.gz"
   ( cd "$WORK/pari-$PARI_VERSION" && ac_env && ./Configure --prefix="$PREFIX" >/dev/null && make -j"$JOBS" gp >/dev/null && $SUDO make install >/dev/null ); }
-b_primesieve() { fetch "https://github.com/kimwalisch/primesieve/archive/refs/tags/v$PRIMESIEVE_VERSION.tar.gz" "$WORK/primesieve.tar.gz"; tar -C "$WORK" -xf "$WORK/primesieve.tar.gz"
+b_primesieve() { fetch "$WORK/primesieve.tar.gz" "https://github.com/kimwalisch/primesieve/archive/refs/tags/v$PRIMESIEVE_VERSION.tar.gz"; tar -C "$WORK" -xf "$WORK/primesieve.tar.gz"
   cmake_build "$WORK/primesieve-$PRIMESIEVE_VERSION"; }
-b_primecount() { fetch "https://github.com/kimwalisch/primecount/archive/refs/tags/v$PRIMECOUNT_VERSION.tar.gz" "$WORK/primecount.tar.gz"; tar -C "$WORK" -xf "$WORK/primecount.tar.gz"
+b_primecount() { fetch "$WORK/primecount.tar.gz" "https://github.com/kimwalisch/primecount/archive/refs/tags/v$PRIMECOUNT_VERSION.tar.gz"; tar -C "$WORK" -xf "$WORK/primecount.tar.gz"
   cmake_build "$WORK/primecount-$PRIMECOUNT_VERSION" -DCMAKE_PREFIX_PATH="$PREFIX"; }
-b_notcurses() { fetch "https://github.com/dankamongmen/notcurses/archive/refs/tags/v$NOTCURSES_VERSION.tar.gz" "$WORK/notcurses.tar.gz"; tar -C "$WORK" -xf "$WORK/notcurses.tar.gz"
+b_notcurses() { fetch "$WORK/notcurses.tar.gz" "https://github.com/dankamongmen/notcurses/archive/refs/tags/v$NOTCURSES_VERSION.tar.gz"; tar -C "$WORK" -xf "$WORK/notcurses.tar.gz"
   cmake_build "$WORK/notcurses-$NOTCURSES_VERSION" -DUSE_MULTIMEDIA=none -DUSE_DOCTEST=off \
     -DBUILD_TESTING=off -DUSE_PANDOC=off -DUSE_DEFLATE=off; }
 # Install the COMPLETE multi-file include tree (not just json.hpp + json_fwd.hpp):
 # json_fwd.hpp pulls in detail/abi_macros.hpp, so a partial overwrite onto an
 # existing newer tree leaves a stale abi_macros.hpp and a mixed ABI. Replace the
 # whole dir so the version is internally consistent.
-b_nlohmann() { fetch "https://github.com/nlohmann/json/releases/download/v$NLOHMANN_VERSION/json.tar.xz" "$WORK/nlohmann.tar.xz"
+b_nlohmann() { fetch "$WORK/nlohmann.tar.xz" "https://github.com/nlohmann/json/releases/download/v$NLOHMANN_VERSION/json.tar.xz"
   rm -rf "$WORK/nlohmann-src"; mkdir -p "$WORK/nlohmann-src"; tar -C "$WORK/nlohmann-src" -xf "$WORK/nlohmann.tar.xz"
   src=$(dirname "$(find "$WORK/nlohmann-src" -type f -path '*/include/nlohmann/json.hpp' | head -1)")
   [ -n "$src" ] || die "nlohmann $NLOHMANN_VERSION tarball missing include/nlohmann/json.hpp"
   $SUDO rm -rf "$PREFIX/include/nlohmann"; $SUDO mkdir -p "$PREFIX/include"
   $SUDO cp -r "$src" "$PREFIX/include/nlohmann"; }
-b_httplib() { fetch "https://raw.githubusercontent.com/yhirose/cpp-httplib/v$HTTPLIB_VERSION/httplib.h" "$WORK/httplib.h"
+b_httplib() { fetch "$WORK/httplib.h" "https://raw.githubusercontent.com/yhirose/cpp-httplib/v$HTTPLIB_VERSION/httplib.h"
   $SUDO mkdir -p "$PREFIX/include"; $SUDO cp "$WORK/httplib.h" "$PREFIX/include/httplib.h"; }
-b_lua() { fetch "https://www.lua.org/ftp/lua-$LUA_VERSION.tar.gz" "$WORK/lua.tar.gz"; tar -C "$WORK" -xf "$WORK/lua.tar.gz"
+b_lua() { fetch "$WORK/lua.tar.gz" "https://www.lua.org/ftp/lua-$LUA_VERSION.tar.gz"; tar -C "$WORK" -xf "$WORK/lua.tar.gz"
   ( cd "$WORK/lua-$LUA_VERSION" && make CC="$CC" MYCFLAGS=-fPIC -j"$JOBS" >/dev/null && $SUDO make INSTALL_TOP="$PREFIX" install >/dev/null )
   mm=$(echo "$LUA_VERSION" | cut -d. -f1,2)
   prefix_write "$PREFIX/lib/pkgconfig/lua.pc" <<EOF
@@ -330,16 +360,28 @@ need "sqlite3"    t_sqlite     sqlite     libsqlite3-dev    ""
 # --------------------------------------------------------------------------
 # Stage B — Arrow + iceberg-cpp (on demand)
 # --------------------------------------------------------------------------
-sub_init() { # sub_init <path>  — ensure an on-demand submodule is materialized
-  d="$REPO_ROOT/$1"
-  [ -e "$d/.git" ] || git -C "$REPO_ROOT" submodule update --init --checkout -- "$1"
+# vendor_checkout <path> <url> <ref> — materialize an on-demand vendored repo at a
+# pinned tag/branch ref. A fresh dioph.pp clone leaves these submodule paths empty
+# (update = none), and the recorded gitlink SHA is NOT fetchable from a shallow
+# server — git refuses arbitrary SHAs ("not our ref"), so `git submodule update`
+# dies. Fetching the *ref* (tag/branch) is reliable, so clone/fetch by ref directly
+# instead. Idempotent: re-runs fetch the ref into the existing repo and check it out.
+vendor_checkout() {
+  path=$1; url=$2; ref=$3; full="$REPO_ROOT/$path"
+  if [ -e "$full/.git" ]; then
+    git -C "$full" fetch --depth 1 origin "+refs/tags/$ref:refs/tags/$ref" >/dev/null 2>&1 \
+      || git -C "$full" fetch --depth 1 origin "$ref" >/dev/null 2>&1 || true
+    git -C "$full" checkout -q "$ref" 2>/dev/null \
+      || git -C "$full" checkout -q FETCH_HEAD 2>/dev/null || true
+  else
+    rm -rf "$full"
+    git clone --depth 1 --branch "$ref" "$url" "$full"
+  fi
 }
 
 build_arrow() {
-  say "Arrow ($ARROW_REF) -> $PREFIX  [this is a long build]"
-  sub_init native/vendor/arrow
-  git -C "$REPO_ROOT/native/vendor/arrow" fetch --depth 1 origin "$ARROW_REF" >/dev/null 2>&1 || true
-  git -C "$REPO_ROOT/native/vendor/arrow" checkout -q FETCH_HEAD 2>/dev/null || true
+  say "Arrow ($ARROW_REF) -> $PREFIX  [pinned release tag; bundled deps]"
+  vendor_checkout native/vendor/arrow https://github.com/apache/arrow "$ARROW_REF"
   git -C "$REPO_ROOT/native/vendor/arrow" sparse-checkout set cpp >/dev/null 2>&1 || true
   cmake -S "$REPO_ROOT/native/vendor/arrow/cpp" -B "$REPO_ROOT/native/vendor/arrow/cpp/_bld" \
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX" \
@@ -353,14 +395,11 @@ build_arrow() {
 }
 
 build_iceberg() {
-  say "iceberg-cpp (latest tag >=0.3.x) -> $PREFIX"
-  sub_init native/vendor/iceberg-cpp
-  # latest qualifying tag
-  git -C "$REPO_ROOT/native/vendor/iceberg-cpp" fetch --tags --depth 1 >/dev/null 2>&1 || true
-  # latest release tag (floor v0.3.0 is documented policy; current tags top out there)
-  tag=$(git -C "$REPO_ROOT/native/vendor/iceberg-cpp" tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
-  [ -n "$tag" ] && git -C "$REPO_ROOT/native/vendor/iceberg-cpp" checkout -q "$tag"
-  sh "$REPO_ROOT/scripts/apply_vendor_patches.sh"
+  say "iceberg-cpp ($ICEBERG_REF) -> $PREFIX"
+  vendor_checkout native/vendor/iceberg-cpp https://github.com/apache/iceberg-cpp "$ICEBERG_REF"
+  # apply_vendor_patches.sh has a bash shebang and uses `set -o pipefail`; invoke
+  # it with bash explicitly (this configure runs under sh/dash, which lacks pipefail).
+  bash "$REPO_ROOT/scripts/apply_vendor_patches.sh"
   cmake -S "$REPO_ROOT/native/vendor/iceberg-cpp" -B "$REPO_ROOT/native/vendor/iceberg-cpp/_bld" \
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_PREFIX_PATH="$PREFIX" \
     -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" -DCMAKE_COMPILE_WARNING_AS_ERROR=OFF \
@@ -372,7 +411,7 @@ build_iceberg() {
 
 if [ "$WITH_ARROW" = 1 ]; then
   say "Arrow + iceberg-cpp (Stage B)"
-  { min_ok arrow 25.0.0 && min_ok parquet 25.0.0 && [ "$FORCE" = 0 ]; } && ok "arrow/parquet >=25 already in prefix" || build_arrow
+  { min_ok arrow 24.0.0 && min_ok parquet 24.0.0 && [ "$FORCE" = 0 ]; } && ok "arrow/parquet >=24 already in prefix" || build_arrow
   # iceberg-cpp ships no .pc; key on the installed archives (incl. sql_catalog).
   { [ -f "$PREFIX/lib/libiceberg.a" ] && [ -f "$PREFIX/lib/libiceberg_sql_catalog.a" ] && [ "$FORCE" = 0 ]; } \
     && ok "iceberg already in prefix" || build_iceberg

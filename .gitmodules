@@ -3,16 +3,18 @@
 # lmdb        — pinned, small, populated by default (`git submodule update
 #               --init native/vendor/lmdb`); its mdb.c/midl.c are compiled
 #               directly by native/Makefile into build/liblmdb.a.
-# iceberg-cpp — on-demand (update = none); native/configure checks out the
-#               latest tag >= 0.3.x and applies native/vendor/patches/*.patch.
-# arrow       — on-demand (update = none); tracks `main` (the unreleased 25.x
-#               dev line — Arrow has no >=25 release tag yet). native/configure
-#               does a blobless, sparse (cpp/) shallow fetch and builds it.
+# iceberg-cpp — on-demand (update = none); native/configure checks out the pinned
+#               tag (ICEBERG_REF, default v0.3.0) BY REF and applies
+#               native/vendor/patches/*.patch.
+# arrow       — on-demand (update = none); native/configure checks out the pinned
+#               release tag (ARROW_REF, default apache-arrow-24.0.0) BY REF,
+#               sparse-checks-out cpp/, and builds it static into the prefix.
 #
-# `ignore = all` keeps the moving checkout, applied patches, and build trees of
-# the on-demand submodules out of `git status`. A normal clone does NOT populate
-# arrow/iceberg-cpp; run native/configure (or `git submodule update --init
-# --checkout <path>`) to materialize them.
+# `ignore = all` keeps the checkout, applied patches, and build trees of the
+# on-demand submodules out of `git status`. A normal clone does NOT populate
+# arrow/iceberg-cpp; run native/configure to materialize them by ref. A plain
+# `git submodule update` cannot — the pinned release commit is not a shallow-
+# fetchable SHA ("not our ref"); configure fetches the tag ref instead.
 
 [submodule "native/vendor/lmdb"]
 	path = native/vendor/lmdb
@@ -31,7 +33,7 @@
 [submodule "native/vendor/arrow"]
 	path = native/vendor/arrow
 	url = https://github.com/apache/arrow
-	branch = main
+	branch = apache-arrow-24.0.0
 	update = none
 	shallow = true
 	ignore = all
