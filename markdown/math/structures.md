@@ -337,90 +337,31 @@ Nodes with $W > M_\text{max}$ do not exist in the current topological space. The
 
 Small primes get deep fibers ($r = 1, 2, 3, 4, 5$); massive primes get shallow fibers ($r=1$ only).
 
-### 5.2 Data Structure Architectures
+### 5.2 Data structures — as implemented
 
-The graph is large but exponentially sparse. Two complementary approaches:
+The earlier sketches here (edge-columnar / stalk-fiber generator tables, a
+Rust/Rug + DuckDB/Polars stack, a Mersenne pre-filter crate, and a TDA/GPU
+persistent-homology pipeline) were never built and are superseded by the native
+Iceberg stack. The actual storage is Apache Iceberg (Parquet + an LMDB-backed
+`SqlCatalog`), all access through the catalog seam — see
+`markdown/data_eng/iceberg_data_setup.md` (warehouse layout) and `HANDOFF.md`
+(catalog architecture, tooling, and the index-difference derived tables).
 
-**Stalk-and-Fiber Model** (Document / Object-Oriented): Base prime $p$ is the primary key; powers are the fiber. Good for backward traversal (finding parents).
+Representations are stored as generators, never as evaluated big integers:
+- **Base tables.** `primes` (`p, k, prime_rank, …`) and `partitions`
+  (`p, m_k, n_k, q_k, prime_rank, …`), bucket-partitioned by `p_bucket`.
+- **Index-difference derived tables** `mdiff_k{K}` (one row per prime with
+  k(p)==K): `(p int64, hit_mask int64, shape int64)`. `hit_mask` packs the K hit
+  positions as a bitmask (bit m set iff p−2^m is a prime power; popcount==K) — the
+  whole hit set in one int64, k-agnostic. The pairwise index differences and
+  `prime_rank` are derived on demand, not stored. `shape = hit_mask>>ctz` is the
+  translation-invariant covering family.
+- **`mersenne_factors`** caches the factorization of each 2^d−1 with `ord2` and
+  `is_primitive`, joined against the d's decoded from `hit_mask`.
 
-```json
-{
-  "base_prime": 137438953481,
-  "is_universal_source": false,
-  "total_degree_D": 3,
-  "power_fiber": {
-    "1": {
-      "k_degree": 1,
-      "incoming_edges": [
-        {"parent_q": 3, "parent_s": 2, "m_offset": 37}
-      ]
-    },
-    "2": {
-      "k_degree": 2,
-      "incoming_edges": [
-        {"parent_q": 5, "parent_s": 1, "m_offset": 14},
-        {"parent_q": 11, "parent_s": 3, "m_offset": 8}
-      ]
-    },
-    "3": { "k_degree": 0, "incoming_edges": [] }
-  }
-}
-```
-
-**Edge-First Columnar Model** (Relational / Vectorized): Edges are first-class citizens. Good for statistical sweeps and bi-directional querying.
-
-| Child_p | Child_r | Parent_q | Parent_s | offset_m |
-|---|---|---|---|---|
-| 137438953481 | 1 | 3 | 2 | 37 |
-| 137438953481 | 2 | 5 | 1 | 14 |
-| 41 | 1 | 3 | 2 | 5 |
-| 41 | 1 | 5 | 2 | 4 |
-
-**Optimizations:**
-- $k=0$ primes in a separate Bitset/Bloom Filter.
-- Never store $p^r$ or $q^s$ if they exceed 64 bits. Store generators; compute dynamically.
-- Typing: $p, q$: u64. $m, r, s$: u8 or u16.
-
-### 5.3 Parquet/Polars/DuckDB Schema
-
-Never store evaluated integers in Parquet. Store only generators: `child_p` (u64), `child_r` (u16), `parent_q` (u64), `parent_s` (u16), `offset_m` (u16). Rug constructs massive integers in CPU cache/RAM for arithmetic checks, then drops them.
-
-**DuckDB partitioning:** Primary by `child_r`, secondary by `parent_s`. Total Degree $D(p)$ in a separate materialized view. Query flat planar slices (`WHERE child_r = 1 AND parent_s = 1`) without scanning skew edges.
-
-### 5.4 Rust Plugin: Mersenne Pre-Filter
-
-Before Rug allocates arbitrary-precision memory:
-1. Compute $\Delta = 2^m - 2^{m'}$.
-2. If $\Delta$ is odd, reject.
-3. $v_2(\Delta)$ via `trailing_zeros()`.
-4. If $v_2(\Delta)$ exceeds expected bounds, reject.
-
-### 5.5 TDA Memory Management
-
-Persistent homology is inherently global---a hole can span any partition boundary. The Vietoris-Rips combinatorial explosion ($2^n$ simplices for $n$-cliques) is the main threat.
-
-**Smart Sampling:**
-- *Witness Complex:* Pick Landmarks ($k \ge 5$ and $k=0$ nodes). A simplex is included only if a Witness exists close to all vertices. Reduces 100K nodes to ~1K complex.
-- *Sparse Rips (Sheehy):* Metric hierarchy that deletes redundant nodes. Guarantees polynomial edges.
-
-**Distributed (Mayer-Vietoris):** Chunk into overlapping regions. Workers compute local persistence; master glues via spectral sequences.
-
-**GPU (RTX 3080):**
-- Wins: parallel metric generation, Ripser-GPU/PHAT matrix reduction.
-- Fails: don't build simplicial complexes in VRAM.
-
-**Optimal pipeline:** Farthest Point Sampling (Polars) → GPU metric evaluation → Witness Complex (Rust) → Dimension cap at 2 ($H_0$, $H_1$ only).
-
-### 5.6 Topology Crate Comparison
-
-| Feature | cova-space | amari-topology |
-|---|---|---|
-| Best for | Sheaf theory, categorical modeling | Morse theory, formal verification |
-| Architecture fit | Brauer-Manin obstruction as sheaf cohomology | Morse collapse to save RAM |
-| Data handling | Flexible cell complexes | Strict, verified simplicial complexes |
-| Pipeline fit | Easier dynamic Polars piping | Phantom Type boilerplate required |
-
-**amari-topology** has built-in Discrete Morse Theory: use grading $r$ or offset $m$ as a Morse function to collapse the complex before computing homology. Also consider **lophat** for lockfree persistent homology.
+The TDA/persistent-homology and GPU ideas remain unexplored speculation; they are
+not part of the current architecture and are noted only as possible far-future
+directions in the research priorities below.
 
 ---
 

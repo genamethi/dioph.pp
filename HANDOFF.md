@@ -515,6 +515,72 @@ flowchart TD
   p2 -. "new commit target" .-> sieve
 ```
 
+### Derived tables: mdiff hit_mask/shape + mersenne_factors — and a catalog-seam debt (2026-06-28)
+
+**What was built (on promix live warehouse).** The S-unit / index-difference
+programme produced per-k derived tables `primeparts.mdiff_k{K}` (one row per prime
+with k(p)==K representations of p=2^m+q^n) and a `primeparts.mersenne_factors`
+cache, all via new native tools (`primeparts-mdiff`, `primeparts-mersenne`).
+- `mdiff_k{K}` row = `(p int64, hit_mask int64, shape int64)`. `hit_mask` = OR of
+  `1<<m` over the prime's hit positions (popcount==K); the pairwise index
+  differences `d=m_a−m_b` and `prime_rank` are **not stored** (decoded on demand
+  via `HitMaskDiffs`). `hit_mask` is the **source of truth**.
+- `shape` = `hit_mask>>ctz(hit_mask)` (translation-invariant covering family); rows
+  are written sorted by `(shape, p)`. Built via in-memory chunk-sort capped by
+  `--mem-gb` (peak = threads·|k|·chunk·16 B; the box is ~15 GB, so default 2
+  threads / chunk auto-capped ~156 M).
+- `mersenne_factors` = `(d, prime, exponent, ord2, is_primitive)`,
+  `is_primitive = (ord2==d)`; built by the dedicated `primeparts-mersenne`.
+- Census-exact row counts: k2 = 5,291,635,631; k3 = 3,332,361,926;
+  mersenne_factors = 124 (48 primitive). Sizes: k2 ~11.7 GB (37 files), k3 ~8.5 GB
+  (23 files) — ~43% smaller than the earlier fixed-width m_*/d_* layout.
+
+**CATALOG-SEAM DEBT — must fix before trusting this further.** The native write
+path does **not** honor the intended catalog seam. Intended contract: a writer
+emits parquet to a **staging path outside the warehouse**; the client asks the
+catalog to commit those *source* paths; the commit **moves** them into a location
+the **catalog** chooses (client has zero knowledge of WH layout — it learns a
+table's location only from the catalog) and registers only after the move. So a
+killed build can only leave staging debris; the warehouse never holds anything
+that didn't arrive via a successful commit. Current code violates this on every
+axis: `writer.cc` computes WH paths itself (`BucketDataDir(warehouse, …)`), the
+`BucketParquetWriter` streams parquet straight into
+`warehouse/primeparts/<table>/data/…` before any commit, and `CommitFiles`
+registers those in-WH files in place (no move). This is inherited from `generate`,
+so it's systemic. Remediation: invert to staging→commit-move; drop
+`BucketDataDir(warehouse,…)` from client code; `CommitFiles(source_paths)` asks
+the catalog for the destination, moves, then registers.
+- *Symptom already seen:* a `mdiff` run killed mid-build left **uncommitted
+  parquet inside the warehouse** (orphans). Stopgaps added: unique per-file name
+  tokens (`writer.cc`) and `ppc::DropTable(warehouse, table, purge)` which, on the
+  unregistered-table path, also reclaims the conventional dir. These treat the
+  symptom; the staging→move refactor removes the root cause.
+
+**Open issues in the shape-clustering (not yet trustworthy):**
+1. `shape` is a **derived/redundant** column. Validation found **7 rows in k2**
+   where stored `shape` ≠ `hit_mask>>ctz` (k3 clean) — a real on-disk inconsistency
+   in the redundant column; `hit_mask` is correct. Argues for not storing `shape`
+   at all (recompute), consistent with having dropped the d-vector. Root cause not
+   yet found (all 7 in one tight p-cluster ~47.53 B, all gap-2 masks stored with a
+   gap-4 shape).
+2. **Row-group pruning barely works as built:** `single-shape row groups = 0%`,
+   avg shape-span/rg ≈ 2.4e10. Each chunk-file is independently sorted `0x5…max`,
+   and a 64 M row group only splits a 156 M chunk into ~2–3 shape bands, so a
+   per-family scan still hits the first row group of nearly every file. To get
+   narrow bands, row groups must be ≈ chunk/Nshapes (~5 M), not 64 M.
+3. Distinct shapes are tiny (k2: 32, k3: 203), so the covering-family census is
+   low-cardinality; partitioning by shape was rejected (partitions too small on
+   this volume) in favor of sort-within-coarse-`p_bucket` (6 partitions kept).
+
+**OPEN DECISION (needs the user).** Whether to (a) **drop the `shape` column**
+entirely and recompute it from `hit_mask` on read — consistent with not storing
+derived data (we already dropped the d-vector), and it removes the 7-row
+inconsistency class outright; or (b) **keep `shape`** and fix the row-group sizing
+(row groups ≈ chunk/Nshapes) so the pruning actually pays for it. Recommended: (a).
+Either way the **staging→commit-move seam refactor is the prerequisite** before
+the write path should be trusted/extended; the write path is not to be changed
+further until that direction is set.
+
 1. **Task #6 — migrate `pp_row_delta.cc` / `pp_delete_spike` to the new
    SnapshotUpdate API.** The 2026-06-08 rebuild changed the ABI:
    `CleanUncommitted` return type `void`→`Status`, new virtual
