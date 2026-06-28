@@ -128,12 +128,9 @@ std::shared_ptr<arrow::Schema> IcebergToArrowSchemaWithFieldIds(
 
 // Concrete primeparts schemas (PrimesSchema/PartitionsSchema/MdiffSchema/...)
 // and the p_bucket partition spec live in "primeparts/schemas.h" — the writer
-// is schema-agnostic and only consumes a schema via WriterConfig.
-
-// Default bucket-data-dir layout used by the live writer. Kept here so
-// generate.cc and rewrite.cc compute identical primeparts.* paths.
-fs::path BucketDataDir(const fs::path& warehouse, std::string_view table,
-                       int32_t bucket_version, int32_t bucket);
+// is schema-agnostic and only consumes a schema via WriterConfig. The client
+// chooses its own on-disk sub-layout under the staging root (StagingDataDir);
+// the writer never computes a warehouse path.
 
 // Scan `output_dir` for existing files matching the prefix pattern;
 // return one past the highest seq number found, or 0 if the directory

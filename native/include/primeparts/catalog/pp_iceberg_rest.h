@@ -39,6 +39,18 @@ struct RestOptions {
 /// catalog fallback and by metadata reads.
 std::shared_ptr<iceberg::FileIO> LocalIO();
 
+/// Staging directory a writer emits parquet into BEFORE it is committed. It lives
+/// OUTSIDE the warehouse table tree (a sibling of the warehouse, under a
+/// `.pp-staging/<warehouse-name>/<table>` path on the same filesystem so the
+/// commit-move is an atomic rename). This is the catalog seam: client code never
+/// computes a path under the warehouse table dir — it writes to staging, then
+/// `CommitFiles` asks the catalog for the table's location and MOVES the staged
+/// files there before registering. A build killed before commit can therefore
+/// only ever leave staging debris; the committed table dirs never hold a file
+/// that didn't arrive via a successful commit. Staging debris is uncommitted and
+/// safe to delete (CommitFiles prunes the emptied staging dir on success).
+fs::path StagingDataDir(const fs::path& warehouse, const std::string& table_name);
+
 /// Return the lexicographically-greatest `*.metadata.json` under `metadata_dir`
 /// (iceberg metadata files are zero-padded monotonic, so name order == version
 /// order). Empty path on error, with `*error` set when non-null.
@@ -60,6 +72,29 @@ std::shared_ptr<iceberg::Catalog> MakeCatalog(const RestOptions& opts,
 /// arrow/avro/parquet factories. Returns nullptr + `*error` on failure.
 std::shared_ptr<iceberg::Catalog> MakeLocalCatalog(const fs::path& warehouse,
                                                    std::string* error);
+
+/// Unified catalog entry point — REST is the default pathway, the in-process LMDB
+/// catalog of record is the transparent fallback. This is the single seam every
+/// tool should use to obtain a catalog (instead of choosing MakeCatalog vs
+/// MakeLocalCatalog itself).
+///
+/// URI resolution: `rest_uri` if non-empty, else the `PRIMEPARTS_REST_URI`
+/// environment variable. If a URI is resolved AND the server answers
+/// `GET /v1/config`, returns a RestCatalog client pointed at it (`*mode="rest"`).
+/// Otherwise — no URI configured, or the server is unreachable — transparently
+/// falls back to `MakeLocalCatalog(warehouse)` (`*mode="local"`), emitting a
+/// one-line note to stderr when a configured URI was unreachable. Returns nullptr
+/// + `*error` only if the local fallback itself fails. The returned catalog is
+/// driven through the same `CommitFiles` / `LoadTable` seams either way, so the
+/// snapshot + read paths are identical across modes.
+std::shared_ptr<iceberg::Catalog> OpenCatalog(const fs::path& warehouse,
+                                              const std::string& rest_uri,
+                                              std::string* mode, std::string* error);
+
+/// True if an IRC server at `rest_uri` (scheme://host:port, no context path)
+/// answers `GET /v1/config` within a short timeout. Used by OpenCatalog to decide
+/// REST-vs-local; exposed for tools that want to report the resolved mode.
+bool RestServerReachable(const std::string& rest_uri);
 
 /// Resolve a table's current metadata.json path through the catalog
 /// (LoadTable -> metadata_file_location, file: scheme stripped). Namespace is
@@ -108,12 +143,17 @@ bool PublishTable(const std::shared_ptr<iceberg::Catalog>& catalog,
                   const std::vector<std::shared_ptr<iceberg::DataFile>>& files,
                   std::string* metadata_location, std::string* error);
 
-/// Commit a batch of already-written `DataFile`s to `primeparts.<table_name>`
-/// as a single FastAppend snapshot. Unlike PublishTable (which drops+registers
-/// an on-disk metadata.json), this is the incremental-append seam: it ensures
-/// the namespace, **loads the table if the catalog already knows it, else
-/// creates it**, then appends `files` in one snapshot and refreshes. Resume-safe
-/// — repeated `generate` runs append onto the existing snapshot history.
+/// Commit a batch of `DataFile`s written to a staging dir (see StagingDataDir)
+/// to `primeparts.<table_name>` as a single FastAppend snapshot. This is the
+/// catalog seam and the ONLY place client-written data files enter the warehouse:
+/// it ensures the namespace, **loads the table if the catalog already knows it,
+/// else creates it**, then MOVES each staged file into `<table.location()>/data/`
+/// (the catalog-chosen destination), rewrites each `DataFile`'s `file_path` to
+/// the moved location, appends them in one snapshot, and refreshes. The move
+/// happens before the append so the manifest only ever records committed paths.
+/// Resume-safe — repeated `generate` runs append onto the existing snapshot
+/// history. `files`' pointees are mutated in place (their `file_path` is rewritten
+/// to the committed location).
 ///
 /// Works against any `iceberg::Catalog`: in-process `MakeLocalCatalog` or a
 /// `MakeCatalog` RestCatalog client pointed at `pp-catalogd` (the commit then

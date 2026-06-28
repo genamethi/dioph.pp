@@ -73,9 +73,10 @@ bool ParseArgs(int argc, char** argv, Args* a) {
 int RunRegister(const Args& a) {
   const fs::path wh = a.warehouse;
   std::string err;
-  auto cat = ppc::MakeLocalCatalog(wh, &err);
+  // REST-default via PRIMEPARTS_REST_URI; transparent local LMDB fallback.
+  auto cat = ppc::OpenCatalog(wh, /*rest_uri=*/"", nullptr, &err);
   if (!cat) {
-    std::printf("FAIL (MakeLocalCatalog: %s)\n", err.c_str());
+    std::printf("FAIL (OpenCatalog: %s)\n", err.c_str());
     return 1;
   }
   const iceberg::Namespace ns{{"primeparts"}};

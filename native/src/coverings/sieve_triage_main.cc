@@ -65,9 +65,11 @@ int main(int argc, char** argv) {
     }
 
     std::string error;
-    auto catalog = primeparts::catalog::MakeLocalCatalog(opts.warehouse, &error);
+    // REST-default via PRIMEPARTS_REST_URI; transparent local LMDB fallback.
+    auto catalog = primeparts::catalog::OpenCatalog(opts.warehouse, /*rest_uri=*/"",
+                                                    nullptr, &error);
     if (!catalog) {
-        std::cerr << "Error: MakeLocalCatalog: " << error << "\n";
+        std::cerr << "Error: OpenCatalog: " << error << "\n";
         return 1;
     }
     fs::path latest_metadata =

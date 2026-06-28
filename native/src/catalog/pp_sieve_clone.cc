@@ -79,8 +79,9 @@ int RunCloneSieve(const CloneSieveOptions& opts) {
   std::printf("  warehouse: %s\n", opts.warehouse.c_str());
 
   std::string err;
-  auto catalog = MakeLocalCatalog(opts.warehouse, &err);
-  if (!catalog) { std::printf("FAIL (MakeLocalCatalog: %s)\n", err.c_str()); return 1; }
+  // REST-default via PRIMEPARTS_REST_URI; transparent local LMDB fallback.
+  auto catalog = OpenCatalog(opts.warehouse, /*rest_uri=*/"", nullptr, &err);
+  if (!catalog) { std::printf("FAIL (OpenCatalog: %s)\n", err.c_str()); return 1; }
   if (!EnsureNamespace(catalog, iceberg::Namespace{{"primeparts"}}, &err)) {
     std::printf("FAIL (EnsureNamespace: %s)\n", err.c_str());
     return 1;

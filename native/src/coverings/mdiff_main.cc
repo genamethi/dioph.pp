@@ -229,7 +229,11 @@ struct KAccum {
     if (!schema) return false;
     primeparts::WriterConfig cfg;
     const std::string table = "mdiff_k" + std::to_string(k);
-    cfg.output_dir = primeparts::BucketDataDir(warehouse, table, bv, bucket);
+    // Staging dir outside the warehouse; CommitFiles moves into place (seam),
+    // preserving the bucket sub-path so the committed layout is unchanged.
+    cfg.output_dir = primeparts::catalog::StagingDataDir(warehouse, table) /
+                     ("p_bucket_version=" + std::to_string(bv)) /
+                     ("p_bucket=" + std::to_string(bucket));
     cfg.schema = schema;
     cfg.table_name = table;
     cfg.filename_prefix = table;
@@ -519,8 +523,9 @@ int main(int argc, char** argv) {
                opts.chunk_rows, opts.row_group_rows);
 
   std::string err;
-  auto catalog = ppc::MakeLocalCatalog(opts.warehouse, &err);
-  if (!catalog) { std::fprintf(stderr, "MakeLocalCatalog: %s\n", err.c_str()); return 1; }
+  // REST-default via PRIMEPARTS_REST_URI; transparent local LMDB fallback.
+  auto catalog = ppc::OpenCatalog(opts.warehouse, /*rest_uri=*/"", nullptr, &err);
+  if (!catalog) { std::fprintf(stderr, "OpenCatalog: %s\n", err.c_str()); return 1; }
 
   if (!BuildMdiff(catalog, opts, &err)) {
     std::fprintf(stderr, "build mdiff: %s\n", err.c_str()); return 1;

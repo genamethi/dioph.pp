@@ -105,15 +105,6 @@ void SendIcebergError(httplib::Response& res, const E& err) {
   SendError(res, status, "IcebergError", err.message);
 }
 
-// Send a json body whose serialization may itself fail (the IRC models that
-// embed a TableMetadata/Schema have a ToJson returning Result<json>). On a
-// serialization failure we surface a 500 rather than a partial/empty body.
-void SendJsonResult(httplib::Response& res, int status,
-                    iceberg::Result<json> body) {
-  if (!body.has_value()) return SendIcebergError(res, body.error());
-  SendJson(res, status, body.value());
-}
-
 // ---- request parsing helpers ------------------------------------------------
 
 // Iceberg multi-level namespaces are %1F-separated in the URL path (httplib
@@ -134,24 +125,63 @@ iceberg::Namespace ParseNamespace(const std::string& encoded) {
 }
 
 // Parse the request body into a json object; on failure write a 400 and return
-// false.
+// false. We parse with OUR OWN nlohmann (json::parse) rather than the archive's
+// iceberg::FromJsonString — see the ABI note on SendTableResult: any
+// Result<nlohmann::json> *returned* from the iceberg static archive is miscompiled
+// across this TU boundary, so we never consume one. A json passed BY REFERENCE
+// into the archive (the *FromJson request parsers below) is fine; only by-value
+// Result<json> returns are affected.
 bool ParseBody(const httplib::Request& req, httplib::Response& res, json* out) {
-  auto parsed = iceberg::FromJsonString(req.body);
-  if (!parsed.has_value()) {
-    SendError(res, 400, "BadRequest", parsed.error().message);
+  *out = json::parse(req.body, /*cb=*/nullptr, /*allow_exceptions=*/false);
+  if (out->is_discarded()) {
+    SendError(res, 400, "BadRequest", "request body is not valid JSON");
     return false;
   }
-  *out = std::move(parsed.value());
   return true;
 }
 
-// Build the IRC LoadTableResult body for a loaded/created table.
-iceberg::Result<json> LoadTableResultJson(
-    const std::shared_ptr<iceberg::Table>& table) {
-  ir::LoadTableResult result;
-  result.metadata_location = std::string(table->metadata_file_location());
-  result.metadata = table->metadata();
-  return ir::ToJson(result);
+// Serialize a loaded/created/committed table into the IRC
+// LoadTableResult / CommitTableResponse body shape:
+//   { "metadata-location": <str>, "metadata": <obj> [, "config": {}] }
+//
+// ABI WORKAROUND (load-bearing): the iceberg static archive's serde for the
+// metadata-bearing IRC models returns Result<nlohmann::json> by value
+// (ir::ToJson(LoadTableResult/CommitTableResponse), iceberg::ToJson(TableMetadata)).
+// Under the GCC 16 toolchain that builds both the archive and this TU, such a
+// std::expected<nlohmann::json, Error> return value is corrupted across the
+// archive->server boundary — its `has_value()` discriminant reads garbage, so a
+// successful serialization is misread as an error and reporting that bogus error
+// dereferences a wild string -> std::bad_alloc. The string-returning serde
+// (iceberg::ToJsonString -> Result<std::string>) is NOT affected, so we serialize
+// the heavy TableMetadata via that ABI-safe path and assemble the small wrapper
+// object with our own nlohmann here. (A minimal std::expected<json,Error> proxy
+// does not reproduce, so this is a codegen issue specific to the archive's ToJson;
+// revisit if iceberg-cpp / the toolchain is bumped.)
+iceberg::Result<std::string> TableResultBody(
+    const std::shared_ptr<iceberg::Table>& table, bool with_config) {
+  const auto& meta = table->metadata();
+  if (!meta) {
+    return std::unexpected(
+        iceberg::Error{iceberg::ErrorKind::kInvalid, "table metadata is null"});
+  }
+  auto meta_str = iceberg::ToJsonString(*meta);  // Result<std::string> — ABI-safe
+  if (!meta_str.has_value()) return std::unexpected(meta_str.error());
+  json body;
+  body["metadata-location"] = std::string(table->metadata_file_location());
+  body["metadata"] = json::parse(meta_str.value());
+  if (with_config) body["config"] = json::object();
+  return body.dump();
+}
+
+// Send a LoadTableResult/CommitTableResponse for `table`, or a 500 if the
+// (ABI-safe) metadata serialization itself fails.
+void SendTableResult(httplib::Response& res, int status,
+                     const std::shared_ptr<iceberg::Table>& table,
+                     bool with_config) {
+  auto body = TableResultBody(table, with_config);
+  if (!body.has_value()) return SendIcebergError(res, body.error());
+  res.status = status;
+  res.set_content(body.value(), "application/json");
 }
 
 // ---- the server -------------------------------------------------------------
@@ -277,7 +307,7 @@ int RunCatalogd(const CatalogdOptions& opts) {
              auto r = catalog->CreateTable(id, cr.schema, spec, order, cr.location,
                                            cr.properties);
              if (!r.has_value()) return SendIcebergError(res, r.error());
-             SendJsonResult(res, 200, LoadTableResultJson(r.value()));
+             SendTableResult(res, 200, r.value(), /*with_config=*/true);
            });
 
   // POST /v1/namespaces/{ns}/register — register an existing metadata.json.
@@ -293,7 +323,7 @@ int RunCatalogd(const CatalogdOptions& opts) {
                                          .name = rr.name};
              auto r = catalog->RegisterTable(id, rr.metadata_location);
              if (!r.has_value()) return SendIcebergError(res, r.error());
-             SendJsonResult(res, 200, LoadTableResultJson(r.value()));
+             SendTableResult(res, 200, r.value(), /*with_config=*/true);
            });
 
   // GET /v1/namespaces/{ns}/tables/{table} — load.
@@ -303,7 +333,7 @@ int RunCatalogd(const CatalogdOptions& opts) {
                                         .name = req.matches[2]};
             auto r = catalog->LoadTable(id);
             if (!r.has_value()) return SendIcebergError(res, r.error());
-            SendJsonResult(res, 200, LoadTableResultJson(r.value()));
+            SendTableResult(res, 200, r.value(), /*with_config=*/true);
           });
 
   // (HEAD /v1/namespaces/{ns}/tables/{table} — exists — is served by the GET
@@ -341,10 +371,8 @@ int RunCatalogd(const CatalogdOptions& opts) {
              }
              auto r = catalog->UpdateTable(id, requirements, updates);
              if (!r.has_value()) return SendIcebergError(res, r.error());
-             ir::CommitTableResponse resp{
-                 .metadata_location = std::string(r.value()->metadata_file_location()),
-                 .metadata = r.value()->metadata()};
-             SendJsonResult(res, 200, ir::ToJson(resp));
+             // CommitTableResponse shape == {metadata-location, metadata} (no config).
+             SendTableResult(res, 200, r.value(), /*with_config=*/false);
            });
 
   // DELETE /v1/namespaces/{ns}/tables/{table} — drop (?purgeRequested=).

@@ -74,7 +74,9 @@ namespace ppc = primeparts::catalog;
 
 namespace {
 
-constexpr char kDefaultRestUri[] = "http://192.168.1.202:9090/iceberg";
+// Empty by default: OpenCatalog resolves REST from --rest-uri / PRIMEPARTS_REST_URI
+// and falls back to the in-process LMDB catalog of record when none is reachable.
+constexpr char kDefaultRestUri[] = "";
 constexpr char kDefaultWarehouse[] =
     "/media/extssd/research/dioph.pp/data/ib-staging";
 constexpr char kDefaultTable[] = "primes_k0_sieve";
@@ -422,11 +424,12 @@ int main(int argc, char** argv) {
     return 2;
   }
 
-  // --- Load the table via the local LMDB catalog (read + RowDelta commits) --
+  // --- Load the table via the catalog (read + RowDelta commits). REST-default
+  // (--rest-uri / PRIMEPARTS_REST_URI) with transparent local LMDB fallback. ----
   std::string err;
-  auto catalog = ppc::MakeLocalCatalog(opts.warehouse, &err);
+  auto catalog = ppc::OpenCatalog(opts.warehouse, opts.rest_uri, nullptr, &err);
   if (!catalog) {
-    std::fprintf(stderr, "error: MakeLocalCatalog: %s\n", err.c_str());
+    std::fprintf(stderr, "error: OpenCatalog: %s\n", err.c_str());
     return 1;
   }
   iceberg::TableIdentifier ident{.ns = iceberg::Namespace{{"primeparts"}},

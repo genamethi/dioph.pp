@@ -125,7 +125,8 @@ bool Build(const std::shared_ptr<iceberg::Catalog>& catalog, const Options& opts
     return false;
 
   primeparts::WriterConfig cfg;
-  cfg.output_dir = opts.warehouse / "primeparts" / "mersenne_factors" / "data";
+  // Staging dir outside the warehouse; CommitFiles moves into place (seam).
+  cfg.output_dir = ppc::StagingDataDir(opts.warehouse, "mersenne_factors");
   cfg.schema = schema;
   cfg.table_name = "mersenne_factors";
   cfg.filename_prefix = "mersenne_factors";
@@ -160,8 +161,9 @@ int main(int argc, char** argv) {
   if (!ParseOptions(argc, argv, &opts)) { Usage(argv[0]); return 2; }
 
   std::string err;
-  auto catalog = ppc::MakeLocalCatalog(opts.warehouse, &err);
-  if (!catalog) { std::fprintf(stderr, "MakeLocalCatalog: %s\n", err.c_str()); return 1; }
+  // REST-default via PRIMEPARTS_REST_URI; transparent local LMDB fallback.
+  auto catalog = ppc::OpenCatalog(opts.warehouse, /*rest_uri=*/"", nullptr, &err);
+  if (!catalog) { std::fprintf(stderr, "OpenCatalog: %s\n", err.c_str()); return 1; }
 
   if (!Build(catalog, opts, &err)) {
     std::fprintf(stderr, "build mersenne_factors: %s\n", err.c_str()); return 1;

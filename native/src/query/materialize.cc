@@ -22,10 +22,6 @@
 
 namespace primeparts::query {
 
-namespace {
-const iceberg::Namespace kNs{{"primeparts"}};
-}  // namespace
-
 bool MaterializeIntColumns(
     const std::shared_ptr<iceberg::Catalog>& catalog, const fs::path& warehouse,
     const std::string& name, const std::vector<std::string>& col_names,
@@ -61,17 +57,15 @@ bool MaterializeIntColumns(
   }
   auto batch = arrow::RecordBatch::Make(arrow::schema(afields), nrows, aarrays);
 
-  // Replace semantics: drop the catalog entry + clear on-disk files first.
-  const fs::path tdir = warehouse / "primeparts" / name;
-  (void)catalog->DropTable(iceberg::TableIdentifier{.ns = kNs, .name = name},
-                           /*purge=*/true);
-  std::error_code ec;
-  fs::remove_all(tdir, ec);
-  fs::create_directories(tdir / "data", ec);
-  if (ec) return fail("materialize: mkdir " + (tdir / "data").string() + ": " + ec.message());
+  // Replace semantics: drop the catalog entry and purge old files through the
+  // catalog seam (the only sanctioned file-removal path).
+  if (!primeparts::catalog::DropTable(catalog, warehouse, name, /*purge=*/true,
+                                      error))
+    return false;
 
   primeparts::WriterConfig cfg;
-  cfg.output_dir = tdir / "data";
+  // Staging dir outside the warehouse; CommitFiles moves into place (seam).
+  cfg.output_dir = primeparts::catalog::StagingDataDir(warehouse, name);
   cfg.schema = schema;
   cfg.table_name = name;
   cfg.filename_prefix = name;

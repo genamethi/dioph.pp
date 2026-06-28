@@ -188,13 +188,6 @@ std::shared_ptr<arrow::Schema> IcebergToArrowSchemaWithFieldIds(
   return arrow::schema(fields);
 }
 
-fs::path BucketDataDir(const fs::path& warehouse, std::string_view table,
-                       int32_t bucket_version, int32_t bucket) {
-  return warehouse / "primeparts" / std::string(table) / "data" /
-         ("p_bucket_version=" + std::to_string(bucket_version)) /
-         ("p_bucket=" + std::to_string(bucket));
-}
-
 int32_t NextFileSeq(const fs::path& output_dir, std::string_view prefix) {
   std::error_code ec;
   if (!fs::exists(output_dir, ec)) return 0;

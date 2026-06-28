@@ -63,7 +63,9 @@ QueryService::~QueryService() = default;
 std::unique_ptr<QueryService> QueryService::Open(const fs::path& warehouse,
                                                  std::string* error) {
   auto impl = std::make_unique<Impl>();
-  impl->catalog = catalog::MakeLocalCatalog(warehouse, error);
+  // REST-default via PRIMEPARTS_REST_URI, transparent local fallback.
+  std::string mode;
+  impl->catalog = catalog::OpenCatalog(warehouse, /*rest_uri=*/"", &mode, error);
   if (!impl->catalog) return nullptr;
   impl->warehouse = warehouse;
   return std::unique_ptr<QueryService>(new QueryService(std::move(impl)));

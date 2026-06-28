@@ -866,9 +866,11 @@ int main(int argc, char** argv) {
   }
   if (opts.metadata.empty()) {  // resolve through the catalog, not the filesystem
     std::string cerr;
-    auto cat = primeparts::catalog::MakeLocalCatalog(opts.warehouse, &cerr);
+    // REST-default via PRIMEPARTS_REST_URI; transparent local LMDB fallback.
+    auto cat = primeparts::catalog::OpenCatalog(opts.warehouse, /*rest_uri=*/"",
+                                                nullptr, &cerr);
     if (!cat) {
-      std::fprintf(stderr, "MakeLocalCatalog: %s\n", cerr.c_str());
+      std::fprintf(stderr, "OpenCatalog: %s\n", cerr.c_str());
       return 1;
     }
     fs::path mp = primeparts::catalog::TableMetadataPath(cat, "primes", &cerr);

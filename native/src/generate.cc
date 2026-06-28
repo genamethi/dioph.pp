@@ -48,7 +48,6 @@
 
 namespace fs = std::filesystem;
 
-using primeparts::BucketDataDir;
 using primeparts::BucketParquetWriter;
 using primeparts::NextFileSeq;
 using primeparts::BucketPartitionSpec;
@@ -478,7 +477,7 @@ std::shared_ptr<arrow::RecordBatch> make_partitions_batch(const pp_batch_result&
 // One file per group per table: open a BucketParquetWriter with
 // target_rows_per_file=0 (no rolling), push every batch in the group at
 // it, close, return the written files.
-bool write_group_table(const fs::path& warehouse, const std::string& table,
+bool write_group_table(const fs::path& output_dir, const std::string& table,
                        const std::shared_ptr<iceberg::Schema>& schema,
                        const std::vector<BatchHolder>& batches,
                        const std::vector<int64_t>& rank_starts,
@@ -487,7 +486,9 @@ bool write_group_table(const fs::path& warehouse, const std::string& table,
                        std::vector<WrittenFile>* out_files,
                        std::string* error) {
   WriterConfig cfg;
-  cfg.output_dir = BucketDataDir(warehouse, table, bucket_version, bucket);
+  // Staging dir (outside the warehouse table tree); CommitFiles moves these into
+  // the catalog-chosen location at end-of-run. See StagingDataDir.
+  cfg.output_dir = output_dir;
   cfg.schema = schema;
   cfg.table_name = table;
   cfg.filename_prefix = table;
@@ -733,14 +734,21 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
     int64_t next_idx = options.start_idx;
     int64_t end_idx = options.start_idx + options.count;
     int64_t prime_rank_cursor = options.prime_rank_start;
-    int32_t primes_file_seq = NextFileSeq(
-        BucketDataDir(options.warehouse, "primes", options.bucket_version,
-                      options.bucket),
-        "primes");
-    int32_t partitions_file_seq = NextFileSeq(
-        BucketDataDir(options.warehouse, "partitions", options.bucket_version,
-                      options.bucket),
-        "partitions");
+    // Writers emit to staging dirs outside the warehouse; CommitFiles moves the
+    // files into the catalog-chosen location at end-of-run (the catalog seam),
+    // preserving the path relative to the staging root. Keep the bucket partition
+    // sub-path so files land at <table>/data/p_bucket_version=N/p_bucket=M/ as
+    // before — the client owns its own partition layout, the catalog owns the
+    // table location.
+    const fs::path part_sub =
+        fs::path("p_bucket_version=" + std::to_string(options.bucket_version)) /
+        ("p_bucket=" + std::to_string(options.bucket));
+    const fs::path primes_staging =
+        primeparts::catalog::StagingDataDir(options.warehouse, "primes") / part_sub;
+    const fs::path partitions_staging =
+        primeparts::catalog::StagingDataDir(options.warehouse, "partitions") / part_sub;
+    int32_t primes_file_seq = NextFileSeq(primes_staging, "primes");
+    int32_t partitions_file_seq = NextFileSeq(partitions_staging, "partitions");
     int64_t total_primes = 0;
     int64_t total_partitions = 0;
     int64_t files_written = 0;
@@ -799,7 +807,7 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
       }
 
       std::vector<WrittenFile> primes_files;
-      if (!write_group_table(options.warehouse, "primes", p_schema,
+      if (!write_group_table(primes_staging, "primes", p_schema,
                              group.batches, rank_starts,
                              options.bucket_version, options.bucket,
                              primes_file_seq, /*partitions=*/false,
@@ -819,7 +827,7 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
 
       if (group.partitions_rows > 0) {
         std::vector<WrittenFile> partitions_files;
-        if (!write_group_table(options.warehouse, "partitions", d_schema,
+        if (!write_group_table(partitions_staging, "partitions", d_schema,
                                group.batches, rank_starts,
                                options.bucket_version, options.bucket,
                                partitions_file_seq, /*partitions=*/true,
@@ -871,17 +879,13 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
     // through CommitFiles — over a pp-catalogd RestCatalog client when
     // --rest-uri is set, else in-process MakeLocalCatalog.
     if (!options.temp) {
-      std::shared_ptr<iceberg::Catalog> catalog;
-      if (!options.rest_uri.empty()) {
-        primeparts::catalog::RestOptions ropts;
-        ropts.rest_uri = options.rest_uri;
-        std::string mode;
-        catalog = primeparts::catalog::MakeCatalog(ropts, options.warehouse,
-                                                   &mode, &error);
-      } else {
-        catalog = primeparts::catalog::MakeLocalCatalog(options.warehouse,
-                                                        &error);
-      }
+      // REST is the default pathway (via --rest-uri or PRIMEPARTS_REST_URI);
+      // OpenCatalog falls back to the in-process LMDB catalog of record when no
+      // server is configured or reachable. Both modes commit through CommitFiles.
+      std::string mode;
+      std::shared_ptr<iceberg::Catalog> catalog =
+          primeparts::catalog::OpenCatalog(options.warehouse, options.rest_uri,
+                                           &mode, &error);
       if (!catalog) {
         set_last_error("commit: open catalog: " + error);
         log_line(callbacks, "%s", g_last_error.c_str());
@@ -1001,11 +1005,27 @@ int pp_gen_run(const pp_gen_options* options,
 }  // extern "C"
 
 #ifndef PRIMEPARTS_GENERATE_NO_MAIN
+// Forward each engine log line to stdout, newline-terminated and flushed, so a
+// pipe consumer (the TUI Generate pane, CI logs) sees per-group progress live.
+// The interactive \r progress bar (Progress) covers the TTY case; this covers
+// the non-TTY case, where that bar stays silent.
+void gen_stdout_log(void* /*user_data*/, const char* line) {
+  std::fputs(line, stdout);
+  std::fputc('\n', stdout);
+  std::fflush(stdout);
+}
+
 int main(int argc, char** argv) {
   Options options;
   if (!parse_args(argc, argv, &options)) return 2;
   pp_gen_result out{};
-  int rc = run_generation(options, nullptr, &out);
+  // On a TTY keep the clean self-overwriting progress bar (no log spam); when
+  // stdout is piped, stream the per-group log lines instead so progress is
+  // visible through the pipe.
+  pp_gen_callbacks cbs{};
+  cbs.on_log = gen_stdout_log;
+  const bool stdout_tty = ::isatty(STDOUT_FILENO) != 0;
+  int rc = run_generation(options, stdout_tty ? nullptr : &cbs, &out);
   if (rc != 0) {
     std::cerr << pp_gen_last_error() << "\n";
     return rc;

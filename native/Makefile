@@ -149,7 +149,20 @@ $(BUILD_DIR)/query_service.o: src/query/query_service.cc include/primeparts/quer
 $(BUILD_DIR)/query_service_smoke.o: src/query/query_service_smoke.cc include/primeparts/query/query_service.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/tui_main.o: src/tui/tui_main.cc include/primeparts/query/query_service.h include/primeparts/tui/lua_presets.h | $(BUILD_DIR)
+# TUI screens share primeparts/tui/tui_app.h (App + cross-file decls). Each TU
+# is compiled the same way (notcurses + iceberg headers).
+TUI_APP_HDR := include/primeparts/tui/tui_app.h include/primeparts/query/query_service.h include/primeparts/tui/lua_presets.h
+
+$(BUILD_DIR)/tui_main.o: src/tui/tui_main.cc $(TUI_APP_HDR) | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(NOTCURSES_CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/tui_runquery.o: src/tui/tui_runquery.cc $(TUI_APP_HDR) | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(NOTCURSES_CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/tui_generate.o: src/tui/tui_generate.cc $(TUI_APP_HDR) | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(NOTCURSES_CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/tui_config.o: src/tui/tui_config.cc $(TUI_APP_HDR) | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(NOTCURSES_CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/lua_presets.o: src/tui/lua_presets.cc include/primeparts/tui/lua_presets.h include/primeparts/query/query_preset.h | $(BUILD_DIR)
@@ -310,7 +323,7 @@ $(BUILD_DIR)/primeparts-test-primitive-factors: $(TEST_PRIMITIVE_FACTORS_OBJ) $(
 
 # New TUI (src/tui/, C++ on QueryService + the LMDB catalog seam). Replaces the
 # scrapped tui_frontend.c. SQL_CATALOG_LDLIBS before ICEBERG_LDLIBS; notcurses-core.
-$(BUILD_DIR)/primeparts-tui: $(BUILD_DIR)/tui_main.o $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(BUILD_DIR)/lua_presets.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(SOURCE_SCAN_OBJ) $(LMDB_LIB)
+$(BUILD_DIR)/primeparts-tui: $(BUILD_DIR)/tui_main.o $(BUILD_DIR)/tui_runquery.o $(BUILD_DIR)/tui_generate.o $(BUILD_DIR)/tui_config.o $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(BUILD_DIR)/lua_presets.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(SOURCE_SCAN_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $(NOTCURSES_RPATH) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(NOTCURSES_LDLIBS) $(LUA_LDLIBS) -lsqlite3 -pthread -o $@
 
 $(BUILD_DIR)/primeparts-lua-presets-smoke: $(BUILD_DIR)/lua_presets_smoke.o $(BUILD_DIR)/lua_presets.o $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(SOURCE_SCAN_OBJ) $(LMDB_LIB)
