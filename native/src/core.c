@@ -38,6 +38,19 @@ void pp_shutdown(void)
 {
 }
 
+/* Core options, set once before a (possibly threaded) batch and read read-only by
+ * process_prime/count_prime. g_k_max <= 0 means no upper bound. */
+static int32_t g_k_min = 0;
+static int32_t g_k_max = 0;          /* <= 0 => no upper bound */
+static int g_modular_filter = 1;     /* covering filter on by default */
+
+void pp_set_options(int32_t k_min, int32_t k_max, int modular_filter)
+{
+    g_k_min = k_min < 0 ? 0 : k_min;
+    g_k_max = k_max;
+    g_modular_filter = modular_filter ? 1 : 0;
+}
+
 void pp_batch_result_init(pp_batch_result *result)
 {
     if (result != NULL) {
@@ -454,14 +467,14 @@ static int process_prime(pp_batch_result *result, uint64_t p)
         uint64_t q_candidate = p - power;
         uint64_t base = 0;
         int32_t exponent = 0;
+        int found = 0;
 
         if (q_candidate >= 2 && !exhausted_divides(q_candidate, exhausted, n_exhausted)) {
             uint64_t sole = 0;
-            int nc = covering_count(pr, pm, &sole);
-            int found = 0;
-            if (nc >= 2) {
+            int nc = g_modular_filter ? covering_count(pr, pm, &sole) : 0;
+            if (g_modular_filter && nc >= 2) {
                 found = 0;  /* >= 2 distinct covering factors: not a prime power */
-            } else if (nc == 1) {
+            } else if (g_modular_filter && nc == 1) {
                 found = exact_power_of(q_candidate, sole, &exponent);
                 if (found) base = sole;
             } else {
@@ -477,13 +490,27 @@ static int process_prime(pp_batch_result *result, uint64_t p)
                     return status;
                 }
                 increment_hit(base, hit_base, hit_count, &n_hits, exhausted, &n_exhausted);
+                /* k-range early-out: once k exceeds the upper bound this prime is
+                 * excluded, so stop searching its remaining positions. */
+                if (g_k_max > 0 && (int32_t)(result->decomp_count - decomp_start) > g_k_max) {
+                    break;
+                }
             }
         }
         power <<= 1;
-        for (size_t ci = 0; ci < 6; ci++) pm[ci] = (pm[ci] * 2) % kCoverQ[ci];
+        if (g_modular_filter) {
+            for (size_t ci = 0; ci < 6; ci++) pm[ci] = (pm[ci] * 2) % kCoverQ[ci];
+        }
     }
 
-    return write_prime(result, p, (int32_t)(result->decomp_count - decomp_start));
+    {
+        int32_t k = (int32_t)(result->decomp_count - decomp_start);
+        if (k < g_k_min || (g_k_max > 0 && k > g_k_max)) {
+            result->decomp_count = decomp_start;  /* discard: out of k-range */
+            return PP_OK;
+        }
+        return write_prime(result, p, k);
+    }
 }
 
 static int count_prime(uint64_t p, int64_t *decomp_count)
@@ -519,11 +546,11 @@ static int count_prime(uint64_t p, int64_t *decomp_count)
 
         if (q_candidate >= 2 && !exhausted_divides(q_candidate, exhausted, n_exhausted)) {
             uint64_t sole = 0;
-            int nc = covering_count(pr, pm, &sole);
+            int nc = g_modular_filter ? covering_count(pr, pm, &sole) : 0;
             int found = 0;
-            if (nc >= 2) {
+            if (g_modular_filter && nc >= 2) {
                 found = 0;
-            } else if (nc == 1) {
+            } else if (g_modular_filter && nc == 1) {
                 found = exact_power_of(q_candidate, sole, &exponent);
                 if (found) base = sole;
             } else {
@@ -539,7 +566,9 @@ static int count_prime(uint64_t p, int64_t *decomp_count)
             }
         }
         power <<= 1;
-        for (size_t ci = 0; ci < 6; ci++) pm[ci] = (pm[ci] * 2) % kCoverQ[ci];
+        if (g_modular_filter) {
+            for (size_t ci = 0; ci < 6; ci++) pm[ci] = (pm[ci] * 2) % kCoverQ[ci];
+        }
     }
 
     *decomp_count += local_decomps;
@@ -632,7 +661,10 @@ int pp_process_rank_batch(int64_t start_idx, int64_t count, pp_batch_result *out
 
     primesieve_init(&it);
     primesieve_jump_to(&it, (uint64_t)first_prime, (uint64_t)end_prime);
-    while (out->processed_count < count) {
+    /* Drive by primes iterated, not primes written: the k-range filter may discard
+     * primes (no write_prime), but each is still processed and counts toward count. */
+    int64_t processed = 0;
+    while (processed < count) {
         uint64_t p = primesieve_next_prime(&it);
         if (p == PRIMESIEVE_ERROR || it.is_error) {
             primesieve_free_iterator(&it);
@@ -646,8 +678,10 @@ int pp_process_rank_batch(int64_t start_idx, int64_t count, pp_batch_result *out
             primesieve_free_iterator(&it);
             return status;
         }
+        processed++;
     }
     primesieve_free_iterator(&it);
+    out->processed_count = processed;
 
     if (out->processed_count != count) {
         return PP_ERR_LIBRARY;

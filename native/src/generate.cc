@@ -104,6 +104,11 @@ struct Options {
   // in-process via MakeLocalCatalog. Both funnel through CommitFiles, so the
   // snapshot path is identical either way.
   std::string rest_uri;
+  // k-range filter: drop primes with k outside [k_min, k_max] during generation
+  // (k_max <= 0 = no upper bound). modular_filter toggles the covering filter.
+  int32_t k_min = 0;
+  int32_t k_max = 0;
+  int modular_filter = 1;
 };
 
 struct BatchHolder {
@@ -640,6 +645,9 @@ bool parse_args(int argc, char** argv, Options* options) {
       {"manifest", required_argument, nullptr, 'm'},
       {"temp", no_argument, nullptr, 1004},
       {"rest-uri", required_argument, nullptr, 1005},
+      {"k-min", required_argument, nullptr, 1006},
+      {"k-max", required_argument, nullptr, 1007},
+      {"no-filter", no_argument, nullptr, 1008},
       {"help", no_argument, nullptr, 'h'},
       {nullptr, 0, nullptr, 0},
   };
@@ -674,6 +682,19 @@ bool parse_args(int argc, char** argv, Options* options) {
       case 'm': options->manifest = optarg; break;
       case 1004: options->temp = true; break;
       case 1005: options->rest_uri = optarg; break;
+      case 1006:
+        if (!parse_i32(optarg, &options->k_min)) {
+          std::fprintf(stderr, "invalid --k-min: %s\n", optarg);
+          return false;
+        }
+        break;
+      case 1007:
+        if (!parse_i32(optarg, &options->k_max)) {
+          std::fprintf(stderr, "invalid --k-max: %s\n", optarg);
+          return false;
+        }
+        break;
+      case 1008: options->modular_filter = 0; break;
       case 'h': usage(stdout); std::exit(0);
       default: return false;
     }
@@ -718,6 +739,7 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
     log_line(callbacks, "%s", g_last_error.c_str());
     return 1;
   }
+  pp_set_options(options.k_min, options.k_max, options.modular_filter);
 
   auto run_start = std::chrono::steady_clock::now();
   try {
