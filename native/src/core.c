@@ -513,7 +513,7 @@ static int process_prime(pp_batch_result *result, uint64_t p)
     }
 }
 
-static int count_prime(uint64_t p, int64_t *decomp_count)
+static int count_prime(uint64_t p, int64_t *decomp_count, int64_t *k_histogram)
 {
     int max_m;
     int m;
@@ -572,6 +572,9 @@ static int count_prime(uint64_t p, int64_t *decomp_count)
     }
 
     *decomp_count += local_decomps;
+    if (local_decomps < PP_MAX_K) {
+        k_histogram[local_decomps]++;
+    }
     return PP_OK;
 }
 
@@ -731,7 +734,7 @@ int pp_count_rank_batch(int64_t start_idx, int64_t count, pp_count_result *out)
         if (p >= (uint64_t)end_prime) {
             break;
         }
-        status = count_prime(p, &out->decomp_count);
+        status = count_prime(p, &out->decomp_count, out->k_histogram);
         if (status != PP_OK) {
             primesieve_free_iterator(&it);
             return status;

@@ -39,11 +39,16 @@ typedef struct pp_batch_result {
     int64_t last_p;
 } pp_batch_result;
 
+/* Max k (decompositions per prime) tracked by the count-only histogram; k is
+ * bounded by floor_log2(p) < 64 for any uint64 prime. */
+#define PP_MAX_K 64
+
 typedef struct pp_count_result {
     int64_t processed_count;
     int64_t decomp_count;
     int64_t start_idx;
     int64_t requested_count;
+    int64_t k_histogram[PP_MAX_K];  /* k_histogram[k] = #primes with exactly k decompositions */
 } pp_count_result;
 
 const char *pp_status_message(int status);

@@ -109,6 +109,7 @@ struct Options {
   int32_t k_min = 0;
   int32_t k_max = 0;
   int modular_filter = 1;
+  bool count_only = false;
 };
 
 struct BatchHolder {
@@ -648,6 +649,7 @@ bool parse_args(int argc, char** argv, Options* options) {
       {"k-min", required_argument, nullptr, 1006},
       {"k-max", required_argument, nullptr, 1007},
       {"no-filter", no_argument, nullptr, 1008},
+      {"count-only", no_argument, nullptr, 1009},
       {"help", no_argument, nullptr, 'h'},
       {nullptr, 0, nullptr, 0},
   };
@@ -695,6 +697,7 @@ bool parse_args(int argc, char** argv, Options* options) {
         }
         break;
       case 1008: options->modular_filter = 0; break;
+      case 1009: options->count_only = true; break;
       case 'h': usage(stdout); std::exit(0);
       default: return false;
     }
@@ -703,6 +706,9 @@ bool parse_args(int argc, char** argv, Options* options) {
       options->threads < 0) {
     usage(stderr);
     return false;
+  }
+  if (options->count_only) {
+    return true;  // count-only writes nothing: no warehouse/catalog needed
   }
   if (options->warehouse.empty()) {
     if (!options->temp) {
@@ -1040,6 +1046,26 @@ void gen_stdout_log(void* /*user_data*/, const char* line) {
 int main(int argc, char** argv) {
   Options options;
   if (!parse_args(argc, argv, &options)) return 2;
+  if (options.count_only) {
+    pp_set_options(options.k_min, options.k_max, options.modular_filter);
+    pp_count_result cr;
+    int st = pp_count_rank_batch(options.start_idx, options.count, &cr);
+    if (st != PP_OK) {
+      std::cerr << "count failed: " << pp_status_message(st) << "\n";
+      return 1;
+    }
+    int maxk = 0;
+    for (int k = 0; k < PP_MAX_K; ++k)
+      if (cr.k_histogram[k] > 0) maxk = k;
+    std::cout << "{\"start_idx\":" << cr.start_idx
+              << ",\"count\":" << cr.processed_count
+              << ",\"decomp_count\":" << cr.decomp_count
+              << ",\"k_histogram\":[";
+    for (int k = 0; k <= maxk; ++k)
+      std::cout << (k ? "," : "") << cr.k_histogram[k];
+    std::cout << "]}\n";
+    return 0;
+  }
   pp_gen_result out{};
   // On a TTY keep the clean self-overwriting progress bar (no log spam); when
   // stdout is piped, stream the per-group log lines instead so progress is
