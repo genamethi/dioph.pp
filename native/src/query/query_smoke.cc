@@ -6,7 +6,7 @@
 // This confirms (a) the Expressions/Literal API compiles, (b) `p == P` returns
 // exactly the matching row, (c) it does NOT scan all 23 GB (file pruning works).
 //
-// Build (manual, mirrors the sieve-triage link in native/Makefile):
+// Build (manual, mirrors a source_scan-based link in native/Makefile):
 //   see scripts/run below; links source_scan.o + iceberg static libs.
 //
 // Usage: query_smoke <primes_metadata.json> [p]   (p defaults to 2147483647)

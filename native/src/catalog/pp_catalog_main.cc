@@ -90,6 +90,17 @@ int RunRegister(const Args& a) {
       {"primes", "primeparts/primes/metadata"},
       {"partitions", "primeparts/partitions/metadata"},
       {"boundaries", "primeparts/boundaries/metadata"},
+      // Derived tables under primeparts/ (created through the catalog seam, so
+      // normally already registered; listed here so --register is a complete
+      // re-registration manifest after a catalog rebuild). Missing ones skip.
+      {"mdiff_k2", "primeparts/mdiff_k2/metadata"},
+      {"mdiff_k3", "primeparts/mdiff_k3/metadata"},
+      {"mersenne_factors", "primeparts/mersenne_factors/metadata"},
+      {"k_freq", "primeparts/k_freq/metadata"},
+      {"r_freq", "primeparts/r_freq/metadata"},
+      // Legacy Hive-era tables under primeparts.db/ — registered in place (no
+      // file move); metadata_location is just a pointer, so they still land in
+      // the one logical "primeparts" namespace.
       {"primes_k0", "primeparts.db/primes_k0/metadata"},
       {"primes_k0_sieve", "primeparts.db/primes_k0_sieve/metadata"},
       {"q_k_freq_lo", "primeparts.db/q_k_freq_lo/metadata"},

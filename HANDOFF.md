@@ -21,9 +21,12 @@ stating as much. The point is: Leave the high level stuff to the user.
   harder problem.
 - `primeparts.primes_k0`: 3.87 B obstructed ($k=0$) primes; flat/unpartitioned,
   Iceberg format-version 2, merge-on-read, 111 data files.
-- `primeparts.mdiff_k{K}` row = `(p int64, hit_mask int64, shape int64)`:
-  `hit_mask` = OR of `1<<m` over the prime's hit positions (popcount==K) and is
-  the source of truth; `shape = hit_mask>>ctz(hit_mask)` is derived.
+- `primeparts.mdiff_k{K}` row = `(p int64, hit_mask int64)`: `hit_mask` = OR of
+  `1<<m` over the prime's hit positions (popcount==K) and is the **sole stored
+  truth**. The d-vector, the translation-invariant `shape = hit_mask>>ctz`, the
+  anchor phase (`m_min mod period`, the coset), and `prime_rank` are all derived
+  on read, never stored. The table is **unpartitioned** and physically ordered by
+  `p`; derived groupings (gap `d`, coset) belong in views, not columns.
 - `primeparts.mersenne_factors` = `(d, prime, exponent, ord2, is_primitive)`,
   `is_primitive = (ord2==d)`; 124 rows (48 primitive).
 
@@ -71,22 +74,16 @@ consumes a `Result<nlohmann::json>` from the archive — it serializes via
 response JSON with its own nlohmann. Re-check if iceberg-cpp or the compiler is
 bumped. (`project_catalogd_expected_json_abi`.)
 
-## Open decision — the `shape` column (needs the user)
-
-`shape` is derived (`hit_mask>>ctz`). Validation found 7 `mdiff_k2` rows where
-stored `shape` ≠ recompute (k3 clean), and row-group pruning by shape is
-ineffective at the 64 M row-group size (single-shape row groups 0%; would need
-row groups ≈ chunk/Nshapes ≈ 5 M). Decide:
-(a) **drop `shape`**, recompute from `hit_mask` on read (removes the inconsistency
-class; recommended), or
-(b) **keep `shape`** and fix row-group sizing so the per-family pruning pays.
-This gates the mdiff write path.
-
 ## Remaining work
 
 - Phase 4 — derived read indexes for fast number-theoretic reads (approach open;
   not started).
-- Fold `sieve_triage_main.cc` into the `covering_sieve` stepper.
+- Derived `mdiff` views (gap `d`, anchor coset) as Iceberg view objects — design
+  deferred; the `representations` list is user-defined (a `lua` type, not
+  SQL-only), "materialized" = a rebuildable derived table. Explore `ValidateQuery`
+  → add the representation to the view metadata, keeping the `.lua` preset files
+  on disk for reload. Spec:
+  https://raw.githubusercontent.com/apache/iceberg/refs/heads/main/format/view-spec.md
 - Commit `funbuns.boundaries` through the catalog on `--bucket-is-new` (today
   `generate` only writes the JSONL sidecar boundary row).
 - Add the multi-table `POST /v1/{prefix}/transactions/commit` route if true

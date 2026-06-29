@@ -133,10 +133,12 @@ int RunCloneSieve(const CloneSieveOptions& opts) {
     (void)dropped;  // NotFound is fine — first run.
 
     // --- Create dest: v2, MOR, unpartitioned, same schema/spec --------------
+    // format-version is NOT passed as a property: it is a reserved key the engine
+    // rejects in the user properties map, and CreateTable already defaults to v2
+    // (TableMetadata::kDefaultTableFormatVersion). v2 is verified below.
     const std::string dst_location =
         opts.warehouse + "/primeparts.db/" + opts.dest_table;
     std::unordered_map<std::string, std::string> props = {
-        {"format-version", "2"},
         {"write.delete.mode", "merge-on-read"},
         {"write.merge.mode", "merge-on-read"},
         {"write.update.mode", "merge-on-read"},

@@ -115,6 +115,9 @@ bool BuildDataFile(const WriterConfig& config,
   data_file->file_format = iceberg::FileFormatType::kParquet;
   if (config.partition_values) {
     data_file->partition = *config.partition_values;
+  } else if (spec && spec->fields().empty()) {
+    // Unpartitioned table: the manifest partition tuple is empty.
+    data_file->partition = iceberg::PartitionValues();
   } else {
     data_file->partition = iceberg::PartitionValues({
         iceberg::Literal::Int(config.bucket_version),

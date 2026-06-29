@@ -59,7 +59,6 @@ SOURCE_SCAN_OBJ := $(BUILD_DIR)/source_scan.o
 PRIMITIVE_FACTORS_OBJ := $(BUILD_DIR)/primitive_factors.o
 PRIMITIVE_FACTORS_MAIN_OBJ := $(BUILD_DIR)/primitive_factors_main.o
 COVERING_SIEVE_MAIN_OBJ := $(BUILD_DIR)/covering_sieve_main.o
-SIEVE_TRIAGE_MAIN_OBJ := $(BUILD_DIR)/sieve_triage_main.o
 MDIFF_MAIN_OBJ := $(BUILD_DIR)/mdiff_main.o
 MERSENNE_MAIN_OBJ := $(BUILD_DIR)/mersenne_main.o
 PP_ICEBERG_REST_OBJ := $(BUILD_DIR)/pp_iceberg_rest.o
@@ -89,7 +88,6 @@ all: $(BUILD_DIR)/libprimeparts_core.so \
      $(BUILD_DIR)/primeparts-generate \
      $(BUILD_DIR)/primeparts-primitive-factors \
      $(BUILD_DIR)/primeparts-covering-sieve \
-     $(BUILD_DIR)/primeparts-sieve-triage \
      $(BUILD_DIR)/primeparts-mdiff \
      $(BUILD_DIR)/primeparts-mersenne \
      $(BUILD_DIR)/pp-catalog \
@@ -135,9 +133,6 @@ $(MDIFF_MAIN_OBJ): src/coverings/mdiff_main.cc include/primeparts/writer.h inclu
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(MERSENNE_MAIN_OBJ): src/coverings/mersenne_main.cc include/primeparts/writer.h include/primeparts/schemas.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/coverings/primitive_factors.h | $(BUILD_DIR)
-	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
-
-$(SIEVE_TRIAGE_MAIN_OBJ): src/coverings/sieve_triage_main.cc include/primeparts/source_scan.h include/primeparts/common/thread_pool.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/query_smoke.o: src/query/query_smoke.cc include/primeparts/source_scan.h | $(BUILD_DIR)
@@ -291,11 +286,8 @@ $(BUILD_DIR)/primeparts-primitive-factors: $(PRIMITIVE_FACTORS_MAIN_OBJ) $(PRIMI
 $(BUILD_DIR)/primeparts-covering-sieve: $(COVERING_SIEVE_MAIN_OBJ) $(PRIMITIVE_FACTORS_OBJ) $(SOURCE_SCAN_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_ROW_DELTA_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
 
-$(BUILD_DIR)/primeparts-sieve-triage: $(SIEVE_TRIAGE_MAIN_OBJ) $(SOURCE_SCAN_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
-	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lparquet -larrow -lsqlite3 -pthread -o $@
-
-# mdiff: writer (BucketParquetWriter) + schemas (MdiffSchema/BucketPartitionSpec)
-# + source_scan (partitions enumeration) + catalog seam (CommitFiles/DropTable).
+# mdiff: writer (BucketParquetWriter) + schemas (MdiffSchema) + source_scan
+# (partitions enumeration) + catalog seam (CommitFiles/DropTable).
 # arrow/parquet come from the static ICEBERG_LDLIBS (libarrow.a/libparquet.a); no
 # trailing -lparquet/-larrow, so the binary carries no libarrow.so runtime dep.
 $(BUILD_DIR)/primeparts-mdiff: $(MDIFF_MAIN_OBJ) $(WRITER_OBJ) $(SCHEMAS_OBJ) $(SOURCE_SCAN_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)

@@ -35,19 +35,14 @@ std::shared_ptr<iceberg::Schema> BoundariesSchema();
 // representation is k-agnostic). Field ids contiguous:
 //   p=1                int64
 //   hit_mask=2         int64   (OR of (1<<m) over the run; popcount == K)
-//   shape=3            int64   (hit_mask >> ctz(hit_mask): translation-invariant
-//                               covering shape, anchored at m_min=0; the
-//                               structural family key. Rows are written sorted by
-//                               (shape, p) so row groups are narrow shape bands
-//                               and a per-family scan prunes by shape min/max.)
-//   p_bucket_version=4, p_bucket=5   trailing identity-partition columns
-// The pairwise index differences d = m_a - m_b (each a Mersenne index
-// M_d = 2^d - 1) are NOT stored: they are a pure function of hit_mask, decoded
-// on demand by HitMaskDiffs(). prime_rank = π(p) is also dropped (recomputable).
-// shape is redundant with hit_mask but stored as the sort/prune key (it is the
-// covering family); sorted + low-cardinality, it dictionary/RLE-compresses to
-// almost nothing. The `k` argument is validated (>= 2) but the physical schema is
-// identical for every k. Returns nullptr + *error on k < 2.
+// hit_mask is the SOLE stored truth. Everything else is derived and NOT stored:
+// the pairwise index differences d = m_a - m_b (each a Mersenne index
+// M_d = 2^d - 1) decode on demand via HitMaskDiffs(); the translation-invariant
+// shape (hit_mask >> ctz) and the anchor phase (m_min mod period, the coset) are
+// pure functions of hit_mask; prime_rank = π(p) is recomputable. The table is
+// UNPARTITIONED and physically ordered by p — derived groupings (gap d, coset)
+// belong in views, not columns. The `k` argument is validated (>= 2) but the
+// physical schema is identical for every k. Returns nullptr + *error on k < 2.
 std::shared_ptr<iceberg::Schema> MdiffSchema(int k, std::string* error);
 
 // primeparts.mersenne_factors: full factorization of each 2^d-1 over a working
