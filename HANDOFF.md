@@ -14,12 +14,8 @@ stating as much. The point is: Leave the high level stuff to the user.
 - `primeparts.primes`: $\max(p) = 564{,}575{,}405{,}239 \approx 5.6\times10^{11}$;
   $\mathrm{count} = 21{,}698{,}850{,}257 \approx 21.7\text{ B}$ rows;
   $\min(p) = 3$ (p=2 absent). No primes skipped between 3 and $\max(p)$.
-- `primeparts.partitions`: ~40 B rows. ~99.9 % are $n=1$ edges. These are the
-  solutions for all primes in `primeparts.primes` (non-solutions omitted).
-  **Caveat:** "almost always 1" refers to $n_k$, **not** $q_k$ multiplicity — at
-  large magnitudes $q$ values repeat (~1.8×); the distinct-$q_k$ count is its own
-  harder problem.
-- `primeparts.primes_k0`: 3.87 B obstructed ($k=0$) primes; flat/unpartitioned,
+- `primeparts.partitions`: ~40 B rows.  
+- `primeparts.primes_k0`: 3.87 B $k=0$ primes; flat/unpartitioned,
   Iceberg format-version 2, merge-on-read, 111 data files.
 - `primeparts.mdiff_k{K}` row = `(p int64, hit_mask int64)`: `hit_mask` = OR of
   `1<<m` over the prime's hit positions (popcount==K) and is the **sole stored
@@ -64,15 +60,7 @@ applied idempotently by `scripts/apply_vendor_patches.sh` (run by
    without it native iceberg-cpp cannot scan any Hive-created table (incl.
    `primes_k0`). Re-apply if re-vendored (`project_icebergcpp_hive_uri_patch`).
 
-## Toolchain hazard
 
-The `/usr/local` GCC 16 toolchain miscompiles a `std::expected<nlohmann::json,
-iceberg::Error>` **returned by value across the iceberg static-archive boundary**
-(the `has_value()` discriminant reads garbage). `pp-catalogd` therefore never
-consumes a `Result<nlohmann::json>` from the archive — it serializes via
-`iceberg::ToJsonString` (`Result<std::string>`, unaffected) and assembles
-response JSON with its own nlohmann. Re-check if iceberg-cpp or the compiler is
-bumped. (`project_catalogd_expected_json_abi`.)
 
 ## Remaining work
 
