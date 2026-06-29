@@ -398,6 +398,31 @@ static void increment_hit(uint64_t base, uint64_t *hit_base, unsigned char *hit_
     }
 }
 
+/* Modular covering filter (semantics-preserving). q | (p - 2^m) iff p == 2^m (mod q);
+ * we test that directly from 2^m mod q tracked per m, exact for any order (ord_11(2)=10
+ * and ord_17(2)=8 don't share a fixed period, so no fixed-width mask). >= 2 covering
+ * primes dividing p - 2^m => not a prime power; exactly one (q) => base must be q (a
+ * cheap exact-power check); none => general predicate. Decompositions are identical to
+ * the unfiltered path. */
+static const uint64_t kCoverQ[6] = {3, 5, 7, 11, 13, 17};
+
+static int covering_count(const uint64_t *pr, const uint64_t *pm, uint64_t *sole)
+{
+    int n = 0;
+    for (size_t i = 0; i < 6; i++) {
+        if (pm[i] == pr[i]) { n++; *sole = kCoverQ[i]; }
+    }
+    return n;
+}
+
+static int exact_power_of(uint64_t r, uint64_t base, int32_t *exponent)
+{
+    int e = 0;
+    while (r % base == 0) { r /= base; e++; }
+    if (r == 1 && e > 0) { *exponent = e; return 1; }
+    return 0;
+}
+
 static int process_prime(pp_batch_result *result, uint64_t p)
 {
     int max_m;
@@ -422,17 +447,31 @@ static int process_prime(pp_batch_result *result, uint64_t p)
     memset(hit_count, 0, sizeof(hit_count));
     memset(exhausted, 0, sizeof(exhausted));
 
+    uint64_t pr[6], pm[6];
+    for (size_t ci = 0; ci < 6; ci++) { pr[ci] = p % kCoverQ[ci]; pm[ci] = 2 % kCoverQ[ci]; }
+
     for (m = 1; m <= max_m; m++) {
         uint64_t q_candidate = p - power;
         uint64_t base = 0;
         int32_t exponent = 0;
 
         if (q_candidate >= 2 && !exhausted_divides(q_candidate, exhausted, n_exhausted)) {
-            status = pp_is_prime_power_u64(q_candidate, &base, &exponent);
-            if (status != PP_OK) {
-                return status;
+            uint64_t sole = 0;
+            int nc = covering_count(pr, pm, &sole);
+            int found = 0;
+            if (nc >= 2) {
+                found = 0;  /* >= 2 distinct covering factors: not a prime power */
+            } else if (nc == 1) {
+                found = exact_power_of(q_candidate, sole, &exponent);
+                if (found) base = sole;
+            } else {
+                status = pp_is_prime_power_u64(q_candidate, &base, &exponent);
+                if (status != PP_OK) {
+                    return status;
+                }
+                found = (exponent > 0);
             }
-            if (exponent > 0) {
+            if (found) {
                 status = write_decomp(result, p, (int32_t)m, exponent, base);
                 if (status != PP_OK) {
                     return status;
@@ -441,6 +480,7 @@ static int process_prime(pp_batch_result *result, uint64_t p)
             }
         }
         power <<= 1;
+        for (size_t ci = 0; ci < 6; ci++) pm[ci] = (pm[ci] * 2) % kCoverQ[ci];
     }
 
     return write_prime(result, p, (int32_t)(result->decomp_count - decomp_start));
@@ -469,22 +509,37 @@ static int count_prime(uint64_t p, int64_t *decomp_count)
     memset(hit_count, 0, sizeof(hit_count));
     memset(exhausted, 0, sizeof(exhausted));
 
+    uint64_t pr[6], pm[6];
+    for (size_t ci = 0; ci < 6; ci++) { pr[ci] = p % kCoverQ[ci]; pm[ci] = 2 % kCoverQ[ci]; }
+
     for (m = 1; m <= max_m; m++) {
         uint64_t q_candidate = p - power;
         uint64_t base = 0;
         int32_t exponent = 0;
 
         if (q_candidate >= 2 && !exhausted_divides(q_candidate, exhausted, n_exhausted)) {
-            status = pp_is_prime_power_u64(q_candidate, &base, &exponent);
-            if (status != PP_OK) {
-                return status;
+            uint64_t sole = 0;
+            int nc = covering_count(pr, pm, &sole);
+            int found = 0;
+            if (nc >= 2) {
+                found = 0;
+            } else if (nc == 1) {
+                found = exact_power_of(q_candidate, sole, &exponent);
+                if (found) base = sole;
+            } else {
+                status = pp_is_prime_power_u64(q_candidate, &base, &exponent);
+                if (status != PP_OK) {
+                    return status;
+                }
+                found = (exponent > 0);
             }
-            if (exponent > 0) {
+            if (found) {
                 local_decomps++;
                 increment_hit(base, hit_base, hit_count, &n_hits, exhausted, &n_exhausted);
             }
         }
         power <<= 1;
+        for (size_t ci = 0; ci < 6; ci++) pm[ci] = (pm[ci] * 2) % kCoverQ[ci];
     }
 
     *decomp_count += local_decomps;
