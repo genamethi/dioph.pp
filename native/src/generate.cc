@@ -105,9 +105,11 @@ struct Options {
   // snapshot path is identical either way.
   std::string rest_uri;
   // k-range filter: drop primes with k outside [k_min, k_max] during generation
-  // (k_max <= 0 = no upper bound). modular_filter toggles the covering filter.
+  // (k_max < 0 = no upper bound; k_max == 0 keeps only k == 0). When the filter is
+  // active, --count counts surviving results, not ranks scanned. modular_filter
+  // toggles the covering filter.
   int32_t k_min = 0;
-  int32_t k_max = 0;
+  int32_t k_max = -1;
   int modular_filter = 1;
   bool count_only = false;
 };
@@ -525,6 +527,45 @@ bool write_group_table(const fs::path& output_dir, const std::string& table,
   return writer->Close(out_files, error);
 }
 
+// Result-count trim: truncate a freshly-materialized group to its first `keep`
+// written primes plus the contiguous decomposition rows those primes own, so a
+// filtered --count run lands on the requested result count exactly. Batches are
+// in ascending-prime order; the batch straddling the cutoff is shortened (its
+// decomp_count recomputed from the kept prime_k prefix to preserve the
+// decomp_count == sum(prime_k) invariant make_partitions_batch relies on) and
+// every later batch is zeroed (write_group_table skips count==0 batches).
+// Recomputes the group's row totals and last_p from the kept rows.
+void trim_group_to(FileGroup* group, int64_t keep) {
+  int64_t remaining = keep;
+  int64_t kept_primes = 0;
+  int64_t kept_decomps = 0;
+  int64_t last_p = 0;
+  for (auto& holder : group->batches) {
+    pp_batch_result& b = holder.batch;
+    int64_t pc = static_cast<int64_t>(b.prime_count);
+    if (remaining >= pc) {
+      remaining -= pc;
+      kept_primes += pc;
+      kept_decomps += static_cast<int64_t>(b.decomp_count);
+      if (pc > 0) last_p = b.prime_p[pc - 1];
+      continue;
+    }
+    // Cutoff lands inside this batch (remaining < pc, including remaining == 0
+    // which fully drops it and all that follow).
+    int64_t dc = 0;
+    for (int64_t i = 0; i < remaining; ++i) dc += b.prime_k[i];
+    if (remaining > 0) last_p = b.prime_p[remaining - 1];
+    b.prime_count = static_cast<size_t>(remaining);
+    b.decomp_count = static_cast<size_t>(dc);
+    kept_primes += remaining;
+    kept_decomps += dc;
+    remaining = 0;
+  }
+  group->prime_rows = kept_primes;
+  group->partitions_rows = kept_decomps;
+  if (last_p > 0) group->last_p = last_p;
+}
+
 bool materialize_group(int64_t* next_idx, int64_t end_idx, const Options& options,
                        FileGroup* group, std::string* error) {
   group->start_idx = *next_idx;
@@ -745,8 +786,18 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
       return 1;
     }
 
+    // When the k-filter can drop primes, --count is a target number of surviving
+    // RESULTS, not ranks scanned: scan past start_idx+count as needed, one group
+    // of ranks at a time, and trim the final group to land on the target exactly.
+    // With no active filter, results == ranks and end_idx bounds the scan as
+    // before. (k_max >= 0 is itself a bound under the sentinel, so any explicit
+    // --k-min/--k-max engages result-count mode.)
+    const bool count_results = (options.k_min > 0) || (options.k_max >= 0);
+    const int64_t group_span =
+        (options.threads > 0 ? options.threads : 1) * options.chunk_primes;
     int64_t next_idx = options.start_idx;
-    int64_t end_idx = options.start_idx + options.count;
+    int64_t end_idx =
+        count_results ? INT64_MAX : (options.start_idx + options.count);
     int64_t prime_rank_cursor = options.prime_rank_start;
     // Writers emit to staging dirs outside the warehouse; CommitFiles moves the
     // files into the catalog-chosen location at end-of-run (the catalog seam),
@@ -791,13 +842,23 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
     int64_t groups_done = 0;
     progress.update(0, 0);
 
-    while (next_idx < end_idx) {
+    while (next_idx < end_idx && total_primes < options.count) {
       FileGroup group;
-      if (!materialize_group(&next_idx, end_idx, options, &group, &error)) {
+      // Result-count mode materializes one group of ranks per iteration (a finite
+      // window so materialize_group's chunk math never overflows against the
+      // INT64_MAX scan ceiling); rank mode passes the global end_idx as before.
+      int64_t group_end = count_results ? (next_idx + group_span) : end_idx;
+      if (!materialize_group(&next_idx, group_end, options, &group, &error)) {
         set_last_error("materialize failed: " + error);
         log_line(callbacks, "%s", g_last_error.c_str());
         pp_shutdown();
         return 1;
+      }
+
+      // Trim the group that crosses the result target so the run ends on exactly
+      // --count surviving primes. A no-op in rank mode (totals land exactly).
+      if (total_primes + group.prime_rows > options.count) {
+        trim_group_to(&group, options.count - total_primes);
       }
 
       if (first_p == 0 || group.first_p < first_p) first_p = group.first_p;

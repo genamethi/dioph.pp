@@ -58,7 +58,8 @@ int pp_init(void);
 void pp_shutdown(void);
 
 /* Core options (set once before a batch): keep primes with k_min <= k <= k_max
- * (k_max <= 0 = no upper bound); modular_filter != 0 enables the covering filter. */
+ * (k_max < 0 = no upper bound; k_max == 0 keeps only k == 0); modular_filter != 0
+ * enables the covering filter. */
 void pp_set_options(int32_t k_min, int32_t k_max, int modular_filter);
 
 void pp_batch_result_init(pp_batch_result *result);

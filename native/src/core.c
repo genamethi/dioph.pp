@@ -39,9 +39,10 @@ void pp_shutdown(void)
 }
 
 /* Core options, set once before a (possibly threaded) batch and read read-only by
- * process_prime/count_prime. g_k_max <= 0 means no upper bound. */
+ * process_prime/count_prime. g_k_max < 0 means no upper bound; g_k_max == 0 is a
+ * real bound (keep only k == 0). */
 static int32_t g_k_min = 0;
-static int32_t g_k_max = 0;          /* <= 0 => no upper bound */
+static int32_t g_k_max = -1;         /* < 0 => no upper bound; 0 => keep only k==0 */
 static int g_modular_filter = 1;     /* covering filter on by default */
 
 void pp_set_options(int32_t k_min, int32_t k_max, int modular_filter)
@@ -503,7 +504,7 @@ static int process_prime(pp_batch_result *result, uint64_t p, int64_t rank)
                 increment_hit(base, hit_base, hit_count, &n_hits, exhausted, &n_exhausted);
                 /* k-range early-out: once k exceeds the upper bound this prime is
                  * excluded, so stop searching its remaining positions. */
-                if (g_k_max > 0 && (int32_t)(result->decomp_count - decomp_start) > g_k_max) {
+                if (g_k_max >= 0 && (int32_t)(result->decomp_count - decomp_start) > g_k_max) {
                     break;
                 }
             }
@@ -516,7 +517,7 @@ static int process_prime(pp_batch_result *result, uint64_t p, int64_t rank)
 
     {
         int32_t k = (int32_t)(result->decomp_count - decomp_start);
-        if (k < g_k_min || (g_k_max > 0 && k > g_k_max)) {
+        if (k < g_k_min || (g_k_max >= 0 && k > g_k_max)) {
             result->decomp_count = decomp_start;  /* discard: out of k-range */
             return PP_OK;
         }
