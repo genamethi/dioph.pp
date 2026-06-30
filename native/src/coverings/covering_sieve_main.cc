@@ -74,9 +74,6 @@ namespace ppc = primeparts::catalog;
 
 namespace {
 
-// Empty by default: OpenCatalog resolves REST from --rest-uri / PRIMEPARTS_REST_URI
-// and falls back to the in-process LMDB catalog of record when none is reachable.
-constexpr char kDefaultRestUri[] = "";
 constexpr char kDefaultWarehouse[] =
     "/media/extssd/research/dioph.pp/data/ib-staging";
 constexpr char kDefaultTable[] = "primes_k0_sieve";
@@ -89,7 +86,7 @@ constexpr int kDefaultTop = 5;  // triage rows to display
 
 struct Options {
   std::string warehouse = kDefaultWarehouse;
-  std::string rest_uri = kDefaultRestUri;
+  std::string rest_uri;  // empty => OpenCatalog resolves env or kDefaultRestUri
   std::string table = kDefaultTable;
   uint64_t apply = 0;   // the modulus to add this pass (required)
   bool have_apply = false;
@@ -108,7 +105,7 @@ void Usage(const char* argv0) {
     "  the next modulus by best-class elimination over the residual bitmasks.\n"
     "  --apply S            modulus to add this pass (odd prime, known ord_s(2))\n"
     "  --table NAME         delete-target table (default %s)\n"
-    "  --rest-uri URI       IRC endpoint (default %s)\n"
+    "  --rest-uri URI       IRC endpoint override (default %s)\n"
     "  --warehouse DIR      warehouse root (default %s)\n"
     "  --threads N          parallel read-shard threads (default: hw concurrency)\n"
     "  --top N              triage rows to display (default %d; 0 = no triage)\n"
@@ -119,7 +116,7 @@ void Usage(const char* argv0) {
     "  --report             print the campaign arc from snapshot history, exit\n"
     "  --classify           structural pass: backbone {3,5,7,11,13,17} residual\n"
     "                         gap-count distribution over the table, then exit\n",
-    argv0, kDefaultTable, kDefaultRestUri, kDefaultWarehouse, kDefaultTop);
+    argv0, kDefaultTable, ppc::kDefaultRestUri, kDefaultWarehouse, kDefaultTop);
 }
 
 int FloorLog2(uint64_t x) {

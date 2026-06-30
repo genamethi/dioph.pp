@@ -87,6 +87,7 @@ struct Options {
   // drop --threads.)
   double mem_gb = 10.0;
   bool progress = true;
+  std::string rest_uri;  // empty => OpenCatalog resolves env or kDefaultRestUri
 };
 
 void Usage(const char* argv0) {
@@ -94,7 +95,7 @@ void Usage(const char* argv0) {
       stderr,
       "usage: %s [--warehouse DIR] [--k N]... [--threads N] [--mem-gb G]\n"
       "          [--chunk-rows N] [--file-rows N] [--row-group-rows N]\n"
-      "          [--flush-rows N] [--no-progress]\n\n"
+      "          [--flush-rows N] [--no-progress] [--rest-uri URI]\n\n"
       "Builds primeparts.mdiff_k{K} for each --k (a single sorted pass over\n"
       "primeparts.partitions, per-bucket parallel, run-detected). Each table is\n"
       "UNPARTITIONED, schema (p, hit_mask), physically ordered by p. Rows are\n"
@@ -103,8 +104,11 @@ void Usage(const char* argv0) {
       "chunk_rows is capped so peak RAM (threads * |k| * chunk-rows * 16 B) stays\n"
       "under --mem-gb (default 10). For a bigger sort window on a small box, use\n"
       "--threads 1. The mersenne_factors cache is built separately by\n"
-      "primeparts-mersenne.\n",
-      argv0);
+      "primeparts-mersenne.\n\n"
+      "  --rest-uri URI   IRC endpoint override (default %s); commits go through\n"
+      "                   pp-catalogd, falling back to the local LMDB catalog only\n"
+      "                   if it is unreachable.\n",
+      argv0, ppc::kDefaultRestUri);
 }
 
 bool ParseI64(const char* s, int64_t* out) {
@@ -165,6 +169,8 @@ bool ParseOptions(int argc, char** argv, Options* o) {
       }
     } else if (a == "--no-progress") {
       o->progress = false;
+    } else if (a == "--rest-uri") {
+      const char* v = val("--rest-uri"); if (!v) return false; o->rest_uri = v;
     } else if (a == "--help" || a == "-h") {
       Usage(argv[0]); std::exit(0);
     } else {
@@ -525,7 +531,7 @@ int main(int argc, char** argv) {
 
   std::string err;
   // REST-default via PRIMEPARTS_REST_URI; transparent local LMDB fallback.
-  auto catalog = ppc::OpenCatalog(opts.warehouse, /*rest_uri=*/"", nullptr, &err);
+  auto catalog = ppc::OpenCatalog(opts.warehouse, opts.rest_uri, nullptr, &err);
   if (!catalog) { std::fprintf(stderr, "OpenCatalog: %s\n", err.c_str()); return 1; }
 
   if (!BuildMdiff(catalog, opts, &err)) {

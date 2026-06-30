@@ -47,15 +47,19 @@ const fs::path kDefaultWarehouse =
 struct Options {
   fs::path warehouse = kDefaultWarehouse;
   int32_t max_d = 40;  // working d-range; every 2^d-1 < 2^64 for d <= 63
+  std::string rest_uri;  // empty => OpenCatalog resolves env or kDefaultRestUri
 };
 
 void Usage(const char* argv0) {
   std::fprintf(stderr,
-               "usage: %s [--warehouse DIR] [--max-d N]\n\n"
+               "usage: %s [--warehouse DIR] [--max-d N] [--rest-uri URI]\n\n"
                "Builds primeparts.mersenne_factors: full factorization of each\n"
                "2^d-1 for d in [1, N] with ord2 + is_primitive, published through\n"
-               "the catalog (replace = DropTable purge + CommitFiles).\n",
-               argv0);
+               "the catalog (replace = DropTable purge + CommitFiles).\n\n"
+               "  --rest-uri URI   IRC endpoint override (default %s); commits go\n"
+               "                   through pp-catalogd, falling back to the local\n"
+               "                   LMDB catalog only if it is unreachable.\n",
+               argv0, ppc::kDefaultRestUri);
 }
 
 bool ParseOptions(int argc, char** argv, Options* o) {
@@ -74,6 +78,8 @@ bool ParseOptions(int argc, char** argv, Options* o) {
         std::fprintf(stderr, "invalid --max-d (1..63): %s\n", v ? v : ""); return false;
       }
       o->max_d = static_cast<int32_t>(d);
+    } else if (a == "--rest-uri") {
+      const char* v = val("--rest-uri"); if (!v) return false; o->rest_uri = v;
     } else if (a == "--help" || a == "-h") {
       Usage(argv[0]); std::exit(0);
     } else {
@@ -162,7 +168,7 @@ int main(int argc, char** argv) {
 
   std::string err;
   // REST-default via PRIMEPARTS_REST_URI; transparent local LMDB fallback.
-  auto catalog = ppc::OpenCatalog(opts.warehouse, /*rest_uri=*/"", nullptr, &err);
+  auto catalog = ppc::OpenCatalog(opts.warehouse, opts.rest_uri, nullptr, &err);
   if (!catalog) { std::fprintf(stderr, "OpenCatalog: %s\n", err.c_str()); return 1; }
 
   if (!Build(catalog, opts, &err)) {

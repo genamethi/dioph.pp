@@ -150,6 +150,9 @@ std::shared_ptr<iceberg::Catalog> OpenCatalog(const fs::path& warehouse,
   if (uri.empty()) {
     if (const char* env = std::getenv("PRIMEPARTS_REST_URI")) uri = env;
   }
+  if (uri.empty()) uri = kDefaultRestUri;  // REST is the default channel; the
+                                           // arg/env only OVERRIDE the endpoint.
+                                           // LMDB is the unreachable-fallback below.
   std::string m;  // local mode sink so `mode` may be null
   if (!uri.empty()) {
     if (RestServerReachable(uri)) {

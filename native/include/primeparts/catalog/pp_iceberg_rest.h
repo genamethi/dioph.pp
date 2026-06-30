@@ -25,6 +25,14 @@ namespace primeparts::catalog {
 
 namespace fs = std::filesystem;
 
+/// Default IRC endpoint (bare scheme://host:port, no /v1 suffix), matching
+/// pp-catalogd's default bind (127.0.0.1:8181). OpenCatalog resolves to this when
+/// neither an explicit URI nor PRIMEPARTS_REST_URI is given, so REST is the
+/// default channel everywhere; --rest-uri / the env var only OVERRIDE the URI,
+/// and the in-process LMDB catalog is reached only when this endpoint is
+/// unreachable. Keep in sync with pp_catalogd.h's `port`.
+inline constexpr char kDefaultRestUri[] = "http://127.0.0.1:8181";
+
 /// Connection settings for an iceberg REST catalog (IRC) client. When
 /// `rest_uri` is empty, callers fall back to an in-memory catalog (on-disk
 /// only) — see MakeCatalog.
@@ -78,15 +86,16 @@ std::shared_ptr<iceberg::Catalog> MakeLocalCatalog(const fs::path& warehouse,
 /// tool should use to obtain a catalog (instead of choosing MakeCatalog vs
 /// MakeLocalCatalog itself).
 ///
-/// URI resolution: `rest_uri` if non-empty, else the `PRIMEPARTS_REST_URI`
-/// environment variable. If a URI is resolved AND the server answers
-/// `GET /v1/config`, returns a RestCatalog client pointed at it (`*mode="rest"`).
-/// Otherwise — no URI configured, or the server is unreachable — transparently
-/// falls back to `MakeLocalCatalog(warehouse)` (`*mode="local"`), emitting a
-/// one-line note to stderr when a configured URI was unreachable. Returns nullptr
-/// + `*error` only if the local fallback itself fails. The returned catalog is
-/// driven through the same `CommitFiles` / `LoadTable` seams either way, so the
-/// snapshot + read paths are identical across modes.
+/// URI resolution: `rest_uri` if non-empty, else `PRIMEPARTS_REST_URI`, else the
+/// compiled-in `kDefaultRestUri`. A URI is therefore ALWAYS resolved, so REST is
+/// the default channel — `rest_uri` / the env var only OVERRIDE the endpoint, they
+/// do not toggle REST on. If the resolved server answers `GET /v1/config`, returns
+/// a RestCatalog client (`*mode="rest"`). If it is unreachable, transparently falls
+/// back to `MakeLocalCatalog(warehouse)` (`*mode="local"`), emitting a one-line
+/// note to stderr. Returns nullptr + `*error` only if the local fallback itself
+/// fails. The returned catalog is driven through the same `CommitFiles` /
+/// `LoadTable` seams either way, so the snapshot + read paths are identical across
+/// modes.
 std::shared_ptr<iceberg::Catalog> OpenCatalog(const fs::path& warehouse,
                                               const std::string& rest_uri,
                                               std::string* mode, std::string* error);
