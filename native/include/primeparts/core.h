@@ -21,6 +21,7 @@ enum {
 typedef struct pp_batch_result {
     int64_t *prime_p;
     int32_t *prime_k;
+    int64_t *prime_rank;
     int64_t *decomp_p;
     int32_t *decomp_m;
     int32_t *decomp_n;

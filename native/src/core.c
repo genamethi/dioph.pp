@@ -65,6 +65,7 @@ void pp_batch_result_clear(pp_batch_result *result)
     }
     free(result->prime_p);
     free(result->prime_k);
+    free(result->prime_rank);
     free(result->decomp_p);
     free(result->decomp_m);
     free(result->decomp_n);
@@ -77,7 +78,8 @@ size_t pp_batch_result_used_bytes(const pp_batch_result *result)
     if (result == NULL) {
         return 0;
     }
-    return result->prime_count * (sizeof(*result->prime_p) + sizeof(*result->prime_k))
+    return result->prime_count * (sizeof(*result->prime_p) + sizeof(*result->prime_k)
+            + sizeof(*result->prime_rank))
         + result->decomp_count * (
             sizeof(*result->decomp_p)
             + sizeof(*result->decomp_m)
@@ -90,7 +92,8 @@ size_t pp_batch_result_allocated_bytes(const pp_batch_result *result)
     if (result == NULL) {
         return 0;
     }
-    return result->prime_capacity * (sizeof(*result->prime_p) + sizeof(*result->prime_k))
+    return result->prime_capacity * (sizeof(*result->prime_p) + sizeof(*result->prime_k)
+            + sizeof(*result->prime_rank))
         + result->decomp_capacity * (
             sizeof(*result->decomp_p)
             + sizeof(*result->decomp_m)
@@ -259,6 +262,7 @@ static int reserve_prime_rows(pp_batch_result *result, size_t needed)
 {
     int64_t *new_p;
     int32_t *new_k;
+    int64_t *new_rank;
     size_t new_capacity;
 
     if (needed <= result->prime_capacity) {
@@ -283,6 +287,12 @@ static int reserve_prime_rows(pp_batch_result *result, size_t needed)
         return PP_ERR_ALLOC;
     }
     result->prime_k = new_k;
+
+    new_rank = (int64_t *)realloc(result->prime_rank, new_capacity * sizeof(*new_rank));
+    if (new_rank == NULL) {
+        return PP_ERR_ALLOC;
+    }
+    result->prime_rank = new_rank;
     result->prime_capacity = new_capacity;
     return PP_OK;
 }
@@ -333,7 +343,7 @@ static int reserve_decomp_rows(pp_batch_result *result, size_t needed)
     return PP_OK;
 }
 
-static int write_prime(pp_batch_result *result, uint64_t p, int32_t k)
+static int write_prime(pp_batch_result *result, uint64_t p, int32_t k, int64_t rank)
 {
     int status;
 
@@ -346,6 +356,7 @@ static int write_prime(pp_batch_result *result, uint64_t p, int32_t k)
     }
     result->prime_p[result->prime_count] = (int64_t)p;
     result->prime_k[result->prime_count] = k;
+    result->prime_rank[result->prime_count] = rank;
     if (result->prime_count == 0) {
         result->first_p = (int64_t)p;
     }
@@ -436,7 +447,7 @@ static int exact_power_of(uint64_t r, uint64_t base, int32_t *exponent)
     return 0;
 }
 
-static int process_prime(pp_batch_result *result, uint64_t p)
+static int process_prime(pp_batch_result *result, uint64_t p, int64_t rank)
 {
     int max_m;
     int m;
@@ -509,7 +520,7 @@ static int process_prime(pp_batch_result *result, uint64_t p)
             result->decomp_count = decomp_start;  /* discard: out of k-range */
             return PP_OK;
         }
-        return write_prime(result, p, k);
+        return write_prime(result, p, k, rank);
     }
 }
 
@@ -621,7 +632,7 @@ int pp_process_prime_array(const uint64_t *primes, size_t count, pp_batch_result
     }
 
     for (i = 0; i < count; i++) {
-        status = process_prime(out, primes[i]);
+        status = process_prime(out, primes[i], (int64_t)i);
         if (status != PP_OK) {
             return status;
         }
@@ -676,7 +687,7 @@ int pp_process_rank_batch(int64_t start_idx, int64_t count, pp_batch_result *out
         if (p >= (uint64_t)end_prime) {
             break;
         }
-        status = process_prime(out, p);
+        status = process_prime(out, p, start_idx + processed);
         if (status != PP_OK) {
             primesieve_free_iterator(&it);
             return status;

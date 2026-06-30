@@ -404,24 +404,15 @@ std::shared_ptr<arrow::Array> const_int32_array(int32_t value, int64_t length) {
   return int32_array(values.data(), length);
 }
 
-std::shared_ptr<arrow::Array> dense_int64_range(int64_t start, int64_t length) {
-  std::vector<int64_t> values(static_cast<size_t>(length));
-  for (int64_t i = 0; i < length; ++i) {
-    values[static_cast<size_t>(i)] = start + i;
-  }
-  return int64_array(values.data(), length);
-}
-
 // prime_k[i] is the number of partition rows produced by the C core
 // for prime_p[i]. The decomp_* arrays are filled in prime order with
 // k_i contiguous rows per prime. So the rank column is just each prime's
 // rank repeated k_i times — no scan, no comparison, no edge cases.
-std::shared_ptr<arrow::Array> partitions_rank_array(const pp_batch_result& batch,
-                                                    int64_t rank_start_for_batch) {
+std::shared_ptr<arrow::Array> partitions_rank_array(const pp_batch_result& batch) {
   std::vector<int64_t> ranks;
   ranks.reserve(batch.decomp_count);
   for (size_t i = 0; i < batch.prime_count; ++i) {
-    int64_t rank_i = rank_start_for_batch + static_cast<int64_t>(i);
+    int64_t rank_i = batch.prime_rank[i];
     int32_t kk = batch.prime_k[i];
     for (int32_t j = 0; j < kk; ++j) {
       ranks.push_back(rank_i);
@@ -431,7 +422,6 @@ std::shared_ptr<arrow::Array> partitions_rank_array(const pp_batch_result& batch
 }
 
 std::shared_ptr<arrow::RecordBatch> make_primes_batch(const pp_batch_result& batch,
-                                                      int64_t rank_start_for_batch,
                                                       int32_t bucket_version,
                                                       int32_t bucket) {
   // Column order matches PrimesSchema(): p, k, prime_rank,
@@ -448,13 +438,12 @@ std::shared_ptr<arrow::RecordBatch> make_primes_batch(const pp_batch_result& bat
       schema, rows,
       {int64_array(batch.prime_p, rows),
        int32_array(batch.prime_k, rows),
-       dense_int64_range(rank_start_for_batch, rows),
+       int64_array(batch.prime_rank, rows),
        const_int32_array(bucket_version, rows),
        const_int32_array(bucket, rows)});
 }
 
 std::shared_ptr<arrow::RecordBatch> make_partitions_batch(const pp_batch_result& batch,
-                                                          int64_t rank_start_for_batch,
                                                           int32_t bucket_version,
                                                           int32_t bucket) {
   // Column order matches PartitionsSchema(): p, m_k, n_k, q_k,
@@ -475,7 +464,7 @@ std::shared_ptr<arrow::RecordBatch> make_partitions_batch(const pp_batch_result&
        int32_array(batch.decomp_m, rows),
        int32_array(batch.decomp_n, rows),
        int64_array(batch.decomp_q, rows),
-       partitions_rank_array(batch, rank_start_for_batch),
+       partitions_rank_array(batch),
        const_int32_array(bucket_version, rows),
        const_int32_array(bucket, rows)});
 }
@@ -486,7 +475,6 @@ std::shared_ptr<arrow::RecordBatch> make_partitions_batch(const pp_batch_result&
 bool write_group_table(const fs::path& output_dir, const std::string& table,
                        const std::shared_ptr<iceberg::Schema>& schema,
                        const std::vector<BatchHolder>& batches,
-                       const std::vector<int64_t>& rank_starts,
                        int32_t bucket_version, int32_t bucket,
                        int32_t starting_file_seq, bool partitions,
                        std::vector<WrittenFile>* out_files,
@@ -509,14 +497,13 @@ bool write_group_table(const fs::path& output_dir, const std::string& table,
 
   for (size_t i = 0; i < batches.size(); ++i) {
     const auto& holder = batches[i];
-    int64_t rank_start = rank_starts[i];
     std::shared_ptr<arrow::RecordBatch> batch;
     if (partitions) {
       if (holder.batch.decomp_count == 0) continue;
-      batch = make_partitions_batch(holder.batch, rank_start, bucket_version, bucket);
+      batch = make_partitions_batch(holder.batch, bucket_version, bucket);
     } else {
       if (holder.batch.prime_count == 0) continue;
-      batch = make_primes_batch(holder.batch, rank_start, bucket_version, bucket);
+      batch = make_primes_batch(holder.batch, bucket_version, bucket);
     }
     if (!batch) {
       *error = "failed to build record batch";
@@ -530,9 +517,8 @@ bool write_group_table(const fs::path& output_dir, const std::string& table,
       st.p_min = holder.batch.prime_p[0];
       st.p_max = holder.batch.prime_p[holder.batch.prime_count - 1];
     }
-    st.rank_min = rank_start;
-    st.rank_max = rank_start +
-                  static_cast<int64_t>(holder.batch.prime_count) - 1;
+    st.rank_min = holder.batch.prime_rank[0];
+    st.rank_max = holder.batch.prime_rank[holder.batch.prime_count - 1];
     if (!writer->Write(*batch, st, error)) return false;
   }
 
@@ -817,14 +803,6 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
       if (first_p == 0 || group.first_p < first_p) first_p = group.first_p;
       if (group.last_p > last_p) last_p = group.last_p;
 
-      // Per-batch rank starts: rank of batches[0].prime_p[0] is the
-      // cursor; batch i starts at cursor + sum_prime_count(0..i-1).
-      std::vector<int64_t> rank_starts(group.batches.size(), 0);
-      int64_t acc = 0;
-      for (size_t i = 0; i < group.batches.size(); ++i) {
-        rank_starts[i] = prime_rank_cursor + acc;
-        acc += static_cast<int64_t>(group.batches[i].batch.prime_count);
-      }
       int64_t group_rank_min = prime_rank_cursor;
 
       if (boundary_pending && group.prime_rows > 0) {
@@ -836,7 +814,7 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
 
       std::vector<WrittenFile> primes_files;
       if (!write_group_table(primes_staging, "primes", p_schema,
-                             group.batches, rank_starts,
+                             group.batches,
                              options.bucket_version, options.bucket,
                              primes_file_seq, /*partitions=*/false,
                              &primes_files, &error)) {
@@ -856,7 +834,7 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
       if (group.partitions_rows > 0) {
         std::vector<WrittenFile> partitions_files;
         if (!write_group_table(partitions_staging, "partitions", d_schema,
-                               group.batches, rank_starts,
+                               group.batches,
                                options.bucket_version, options.bucket,
                                partitions_file_seq, /*partitions=*/true,
                                &partitions_files, &error)) {
