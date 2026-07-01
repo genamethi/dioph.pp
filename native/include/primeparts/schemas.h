@@ -53,6 +53,20 @@ std::shared_ptr<iceberg::Schema> MdiffSchema(int k, std::string* error);
 // index. Stored so downstream never rescans earlier d-rows to decide primitivity.
 std::shared_ptr<iceberg::Schema> MersenneFactorsSchema();
 
+// primeparts.covering_system: the over-generated covering system as a compact AP
+// bound — one row per primitive Mersenne modulus l: (l, k) with k=floor(p_max/l),
+// so the progressions l*j + a (0 <= a < l, 0 <= j <= k) tile [0, p_max]. Encodes
+// every AP with no per-prime data. Unpartitioned, ordered by l. Field ids:
+//   l=1 int64, k=2 int64
+std::shared_ptr<iceberg::Schema> CoveringSystemSchema();
+
+// primeparts.covering_log: the Euclidean decomposition of every prime against
+// every modulus — one row per (l, p): (l, k, p, a) with p = l*k + a, k=floor(p/l),
+// a = p mod l. The raw material the reducing pass consumes. Unpartitioned,
+// ordered by (l, p). Field ids:
+//   l=1 int64, k=2 int64, p=3 int64, a=4 int64
+std::shared_ptr<iceberg::Schema> CoveringLogSchema();
+
 // Identity partition spec over (p_bucket_version, p_bucket) for a schema that
 // carries those columns. Returns nullptr + *error if either field is missing.
 std::shared_ptr<iceberg::PartitionSpec> BucketPartitionSpec(

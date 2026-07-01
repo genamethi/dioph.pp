@@ -95,6 +95,26 @@ std::shared_ptr<iceberg::Schema> MersenneFactorsSchema() {
       0);
 }
 
+std::shared_ptr<iceberg::Schema> CoveringSystemSchema() {
+  return std::make_shared<iceberg::Schema>(
+      std::vector<iceberg::SchemaField>{
+          iceberg::SchemaField::MakeRequired(1, "l", iceberg::int64()),
+          iceberg::SchemaField::MakeRequired(2, "k", iceberg::int64()),
+      },
+      0);
+}
+
+std::shared_ptr<iceberg::Schema> CoveringLogSchema() {
+  return std::make_shared<iceberg::Schema>(
+      std::vector<iceberg::SchemaField>{
+          iceberg::SchemaField::MakeRequired(1, "l", iceberg::int64()),
+          iceberg::SchemaField::MakeRequired(2, "k", iceberg::int64()),
+          iceberg::SchemaField::MakeRequired(3, "p", iceberg::int64()),
+          iceberg::SchemaField::MakeRequired(4, "a", iceberg::int64()),
+      },
+      0);
+}
+
 std::shared_ptr<iceberg::PartitionSpec> BucketPartitionSpec(
     const iceberg::Schema& schema, std::string* error) {
   const int32_t bucket_version_id = FieldIdByName(schema, "p_bucket_version");
