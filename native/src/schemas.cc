@@ -95,22 +95,11 @@ std::shared_ptr<iceberg::Schema> MersenneFactorsSchema() {
       0);
 }
 
-std::shared_ptr<iceberg::Schema> CoveringSystemSchema() {
+std::shared_ptr<iceberg::Schema> CoveringSchema() {
   return std::make_shared<iceberg::Schema>(
       std::vector<iceberg::SchemaField>{
-          iceberg::SchemaField::MakeRequired(1, "l", iceberg::int64()),
-          iceberg::SchemaField::MakeRequired(2, "k", iceberg::int64()),
-      },
-      0);
-}
-
-std::shared_ptr<iceberg::Schema> CoveringLogSchema() {
-  return std::make_shared<iceberg::Schema>(
-      std::vector<iceberg::SchemaField>{
-          iceberg::SchemaField::MakeRequired(1, "l", iceberg::int64()),
-          iceberg::SchemaField::MakeRequired(2, "k", iceberg::int64()),
-          iceberg::SchemaField::MakeRequired(3, "p", iceberg::int64()),
-          iceberg::SchemaField::MakeRequired(4, "a", iceberg::int64()),
+          iceberg::SchemaField::MakeRequired(1, "modulus", iceberg::int64()),
+          iceberg::SchemaField::MakeRequired(2, "residue", iceberg::int64()),
       },
       0);
 }
