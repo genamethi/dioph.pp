@@ -1,5 +1,6 @@
 #include "primeparts/schemas.h"
 
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -70,6 +71,20 @@ std::shared_ptr<iceberg::Schema> MdiffSchema(int k, std::string* error) {
           iceberg::SchemaField::MakeRequired(2, "hit_mask", iceberg::int64()),
       },
       0);
+}
+
+std::shared_ptr<iceberg::Schema> PresenceSchema() {
+  // b1..b39 (base-shifted shape) + shift + count. 39 = floor(log2(p_max)); m
+  // ranges 1..39 so a shape spans at most bits 0..38. See schemas.h.
+  std::vector<iceberg::SchemaField> fields;
+  fields.reserve(41);
+  for (int i = 1; i <= 39; ++i) {
+    fields.push_back(iceberg::SchemaField::MakeRequired(
+        i, "b" + std::to_string(i), iceberg::int32()));
+  }
+  fields.push_back(iceberg::SchemaField::MakeRequired(40, "shift", iceberg::int32()));
+  fields.push_back(iceberg::SchemaField::MakeRequired(41, "count", iceberg::int64()));
+  return std::make_shared<iceberg::Schema>(std::move(fields), 0);
 }
 
 std::shared_ptr<iceberg::Schema> BoundariesSchema() {
