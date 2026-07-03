@@ -79,6 +79,9 @@ TEST_OBJ := $(BUILD_DIR)/test_core.o
 TEST_ICEBERG_WRITER_OBJ := $(BUILD_DIR)/test_iceberg_writer.o
 TEST_PRIMITIVE_FACTORS_OBJ := $(BUILD_DIR)/test_primitive_factors.o
 MERSENNE_SIDECAR_OBJ := $(BUILD_DIR)/mersenne_sidecar.o
+TUPLES_OBJ := $(BUILD_DIR)/tuples.o
+TALLY_MAIN_OBJ := $(BUILD_DIR)/tally_main.o
+CLUSTER_MAIN_OBJ := $(BUILD_DIR)/cluster_main.o
 
 .PHONY: all clean test smoke
 
@@ -94,7 +97,9 @@ all: $(BUILD_DIR)/libprimeparts_core.so \
      $(BUILD_DIR)/pp \
      $(BUILD_DIR)/primeparts-catalogd \
      $(BUILD_DIR)/mersenne-sidecar \
-     $(BUILD_DIR)/primeparts-tui
+     $(BUILD_DIR)/primeparts-tui \
+     $(BUILD_DIR)/tally \
+     $(BUILD_DIR)/cluster
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -235,6 +240,16 @@ $(TEST_PRIMITIVE_FACTORS_OBJ): tests/test_primitive_factors.cc include/primepart
 $(MERSENNE_SIDECAR_OBJ): src/mersenne_sidecar.cc | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
+# analysis tools (m-tuple statistics). tuples.o is pure math (no iceberg dep).
+$(TUPLES_OBJ): src/analysis/tuples.cc include/primeparts/analysis/tuples.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(TALLY_MAIN_OBJ): src/analysis/tally_main.cc include/primeparts/analysis/tuples.h include/primeparts/schemas.h include/primeparts/source_scan.h include/primeparts/writer.h include/primeparts/catalog/pp_iceberg_rest.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(CLUSTER_MAIN_OBJ): src/analysis/cluster_main.cc include/primeparts/analysis/tuples.h include/primeparts/source_scan.h include/primeparts/catalog/pp_iceberg_rest.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
 $(BUILD_DIR)/libprimeparts_core.so: $(CORE_OBJ)
 	$(CC) -shared $(LDFLAGS) $^ $(LDLIBS) -o $@
 
@@ -291,6 +306,17 @@ $(BUILD_DIR)/primeparts-covering-sieve: $(COVERING_SIEVE_MAIN_OBJ) $(PRIMITIVE_F
 # arrow/parquet come from the static ICEBERG_LDLIBS (libarrow.a/libparquet.a); no
 # trailing -lparquet/-larrow, so the binary carries no libarrow.so runtime dep.
 $(BUILD_DIR)/primeparts-mdiff: $(MDIFF_MAIN_OBJ) $(WRITER_OBJ) $(SCHEMAS_OBJ) $(SOURCE_SCAN_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
+	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
+
+# tally: build primeparts.mtuple_k{K}. Reads partitions via SourceTableReader,
+# writes via BucketParquetWriter + CommitFiles. Same static-link template as
+# mdiff (no trailing -lparquet/-larrow); tuples.o is the shared analysis math.
+$(BUILD_DIR)/tally: $(TALLY_MAIN_OBJ) $(TUPLES_OBJ) $(SOURCE_SCAN_OBJ) $(WRITER_OBJ) $(SCHEMAS_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
+	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
+
+# cluster: read-only analysis over the mtuple tables (SourceTableReader) + a
+# markdown report. No writer/schemas needed.
+$(BUILD_DIR)/cluster: $(CLUSTER_MAIN_OBJ) $(TUPLES_OBJ) $(SOURCE_SCAN_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
 
 # mersenne: one-time builder of primeparts.mersenne_factors. writer + schemas +

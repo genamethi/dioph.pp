@@ -45,6 +45,22 @@ std::shared_ptr<iceberg::Schema> BoundariesSchema();
 // physical schema is identical for every k. Returns nullptr + *error on k < 2.
 std::shared_ptr<iceberg::Schema> MdiffSchema(int k, std::string* error);
 
+// Hit-tuple frequency schema for primeparts.mtuple_k{K}: one row per distinct
+// m-tuple of a k=K prime (p = 2^m + q^n; the m values are distinct, so a tuple
+// is a set). The tuple is stored base-shifted plus an offset so one row recovers
+// the exact tuple and grouping by the shape columns gives the translation-
+// invariant view. Field ids contiguous:
+//   b1..b39  int32  (id 1..39)  the base-shifted shape: bit (j-1) of
+//                               (mask >> ctz(mask)); b1 is always 1. m ranges
+//                               1..39 = floor(log2(p_max)) (2^39 < p_max < 2^40),
+//                               so a shape spans <=38 bits and 39 columns suffice.
+//   shift    int32  (id 40)     ctz(mask) = m_min; slide the shape left by this
+//                               to recover the original tuple (m = shift+(j-1)).
+//   count    int64  (id 41)     number of primes with that exact tuple.
+// k = sum(b_j); the physical schema is identical for every k (the table name
+// carries K). UNPARTITIONED — files are small.
+std::shared_ptr<iceberg::Schema> PresenceSchema();
+
 // primeparts.mersenne_factors: full factorization of each 2^d-1 over a working
 // d-range, with primitivity precomputed. Unpartitioned. Field ids contiguous:
 //   d=1 int32, prime=2 int64, exponent=3 int32, ord2=4 int32, is_primitive=5 int32
