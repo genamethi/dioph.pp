@@ -110,3 +110,4 @@ native/data/tmp/
 native/bin/nth_prime_boundaries
 .codex
 .mcp.json
+native/install
