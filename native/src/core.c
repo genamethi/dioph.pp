@@ -398,11 +398,29 @@ static void increment_hit(uint64_t base, uint64_t *hit_base, unsigned char *hit_
     }
 }
 
+/* On the killed parity 3 | q, so a prime power there must be 3^n. Non-powers
+ * (v_3(q) == 1) exit after one division. */
+static int power_of_three_exponent(uint64_t q, int32_t *exponent)
+{
+    int32_t e = 0;
+
+    while (q % 3 == 0) {
+        q /= 3;
+        e++;
+    }
+    if (q == 1 && e > 0) {
+        *exponent = e;
+        return 1;
+    }
+    return 0;
+}
+
 static int process_prime(pp_batch_result *result, uint64_t p)
 {
     int max_m;
     int m;
     int status;
+    int killed_parity;
     size_t decomp_start;
     uint64_t power;
     uint64_t hit_base[64];
@@ -416,6 +434,7 @@ static int process_prime(pp_batch_result *result, uint64_t p)
     }
 
     max_m = floor_log2_u64(p);
+    killed_parity = (p % 3 == 2);
     decomp_start = result->decomp_count;
     power = 2;
     memset(hit_base, 0, sizeof(hit_base));
@@ -428,9 +447,16 @@ static int process_prime(pp_batch_result *result, uint64_t p)
         int32_t exponent = 0;
 
         if (q_candidate >= 2 && !exhausted_divides(q_candidate, exhausted, n_exhausted)) {
-            status = pp_is_prime_power_u64(q_candidate, &base, &exponent);
-            if (status != PP_OK) {
-                return status;
+            if ((m & 1) == killed_parity) {
+                /* Set A: 3 | q_candidate; a prime power here can only be 3^n. */
+                if (power_of_three_exponent(q_candidate, &exponent)) {
+                    base = 3;
+                }
+            } else {
+                status = pp_is_prime_power_u64(q_candidate, &base, &exponent);
+                if (status != PP_OK) {
+                    return status;
+                }
             }
             if (exponent > 0) {
                 status = write_decomp(result, p, (int32_t)m, exponent, base);
@@ -451,6 +477,7 @@ static int count_prime(uint64_t p, int64_t *decomp_count)
     int max_m;
     int m;
     int status;
+    int killed_parity;
     int64_t local_decomps = 0;
     uint64_t power;
     uint64_t hit_base[64];
@@ -464,6 +491,7 @@ static int count_prime(uint64_t p, int64_t *decomp_count)
     }
 
     max_m = floor_log2_u64(p);
+    killed_parity = (p % 3 == 2);
     power = 2;
     memset(hit_base, 0, sizeof(hit_base));
     memset(hit_count, 0, sizeof(hit_count));
@@ -475,9 +503,16 @@ static int count_prime(uint64_t p, int64_t *decomp_count)
         int32_t exponent = 0;
 
         if (q_candidate >= 2 && !exhausted_divides(q_candidate, exhausted, n_exhausted)) {
-            status = pp_is_prime_power_u64(q_candidate, &base, &exponent);
-            if (status != PP_OK) {
-                return status;
+            if ((m & 1) == killed_parity) {
+                /* Set A: 3 | q_candidate; a prime power here can only be 3^n. */
+                if (power_of_three_exponent(q_candidate, &exponent)) {
+                    base = 3;
+                }
+            } else {
+                status = pp_is_prime_power_u64(q_candidate, &base, &exponent);
+                if (status != PP_OK) {
+                    return status;
+                }
             }
             if (exponent > 0) {
                 local_decomps++;
