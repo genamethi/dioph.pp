@@ -17,6 +17,8 @@
 #include <cerrno>
 #include <chrono>
 #include <cinttypes>
+#include <condition_variable>
+#include <deque>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -777,73 +779,168 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
     int64_t groups_done = 0;
     progress.update(0, 0);
 
+    // Pipelined write path. The compute pool (materialize_group) and the
+    // Parquet encode/write run concurrently so the pool never stalls on I/O.
+    // The main thread is the producer: it materializes a group, derives its
+    // rank starts / file seqs / boundary, and hands the filled buffer to a
+    // single writer thread that encodes both tables, appends the manifest, and
+    // accumulates the committed DataFiles. A depth-1 job queue bounds resident
+    // memory to at most 3 groups (writing + queued + materializing);
+    // backpressure blocks the producer rather than letting groups pile up.
+    struct WriteJob {
+      FileGroup group;
+      std::vector<int64_t> rank_starts;
+      int64_t group_rank_min = 0;
+      bool emit_boundary = false;
+      int64_t boundary_p_min = 0;
+      int32_t primes_seq = 0;
+      int32_t partitions_seq = 0;
+      bool has_partitions = false;
+    };
+
+    std::mutex q_mu;
+    std::condition_variable q_can_push;
+    std::condition_variable q_can_pop;
+    std::deque<WriteJob> jobs;
+    const size_t kMaxPending = 1;  // one job may wait while another is written
+    bool producer_done = false;
+    bool writer_failed = false;
+    std::string writer_error;
+
+    // The manifest, file-seq counters, byte/file tallies and DataFile vectors
+    // are touched ONLY by this writer thread during the run; the producer reads
+    // them again after join(). No locking needed on them beyond the queue.
+    std::thread writer_thread([&]() {
+      int64_t w_primes = 0;
+      for (;;) {
+        WriteJob job;
+        {
+          std::unique_lock<std::mutex> lk(q_mu);
+          q_can_pop.wait(lk, [&]() { return !jobs.empty() || producer_done; });
+          if (jobs.empty()) return;  // producer_done and drained
+          job = std::move(jobs.front());
+          jobs.pop_front();
+          q_can_push.notify_one();
+        }
+
+        std::string werr;
+        if (job.emit_boundary) {
+          append_manifest_boundary(manifest, options.bucket_version,
+                                   options.bucket, job.boundary_p_min,
+                                   job.group_rank_min);
+        }
+
+        std::vector<WrittenFile> primes_files;
+        if (!write_group_table(primes_staging, "primes", p_schema,
+                               job.group.batches, job.rank_starts,
+                               options.bucket_version, options.bucket,
+                               job.primes_seq, /*partitions=*/false,
+                               &primes_files, &werr)) {
+          std::lock_guard<std::mutex> guard(q_mu);
+          writer_failed = true;
+          writer_error = "write primes failed: " + werr;
+          q_can_push.notify_one();
+          return;
+        }
+        for (const auto& wf : primes_files) {
+          append_manifest_file(manifest, wf);
+          files_written++;
+          bytes_written += wf.bytes;
+          if (wf.data_file) primes_data_files.push_back(wf.data_file);
+        }
+
+        if (job.has_partitions) {
+          std::vector<WrittenFile> partitions_files;
+          if (!write_group_table(partitions_staging, "partitions", d_schema,
+                                 job.group.batches, job.rank_starts,
+                                 options.bucket_version, options.bucket,
+                                 job.partitions_seq, /*partitions=*/true,
+                                 &partitions_files, &werr)) {
+            std::lock_guard<std::mutex> guard(q_mu);
+            writer_failed = true;
+            writer_error = "write partitions failed: " + werr;
+            q_can_push.notify_one();
+            return;
+          }
+          for (const auto& wf : partitions_files) {
+            append_manifest_file(manifest, wf);
+            files_written++;
+            bytes_written += wf.bytes;
+            if (wf.data_file) partitions_data_files.push_back(wf.data_file);
+          }
+        }
+
+        w_primes += job.group.prime_rows;
+        log_line(callbacks,
+                 "group written | primes=%" PRId64 " | files=%" PRId64,
+                 w_primes, files_written);
+
+        manifest.flush();
+        if (!manifest) {
+          std::lock_guard<std::mutex> guard(q_mu);
+          writer_failed = true;
+          writer_error =
+              "failed to flush manifest: " + options.manifest.string();
+          q_can_push.notify_one();
+          return;
+        }
+      }
+    });
+
+    // Ensure the writer thread is always signalled and joined, even if the
+    // producer path throws before its explicit join below.
+    struct WriterGuard {
+      std::thread& t;
+      std::mutex& m;
+      std::condition_variable& cv;
+      bool& done;
+      ~WriterGuard() {
+        {
+          std::lock_guard<std::mutex> g(m);
+          done = true;
+          cv.notify_one();
+        }
+        if (t.joinable()) t.join();
+      }
+    } writer_guard{writer_thread, q_mu, q_can_pop, producer_done};
+
+    bool producer_error = false;
     while (next_idx < end_idx) {
       FileGroup group;
       if (!materialize_group(&next_idx, end_idx, options, &group, &error)) {
         set_last_error("materialize failed: " + error);
-        log_line(callbacks, "%s", g_last_error.c_str());
-        pp_shutdown();
-        return 1;
+        producer_error = true;
+        break;
       }
 
       if (first_p == 0 || group.first_p < first_p) first_p = group.first_p;
       if (group.last_p > last_p) last_p = group.last_p;
 
-      // Per-batch rank starts: rank of batches[0].prime_p[0] is the
-      // cursor; batch i starts at cursor + sum_prime_count(0..i-1).
-      std::vector<int64_t> rank_starts(group.batches.size(), 0);
+      WriteJob job;
+      // Per-batch rank starts: rank of batches[0].prime_p[0] is the cursor;
+      // batch i starts at cursor + sum_prime_count(0..i-1).
+      job.rank_starts.assign(group.batches.size(), 0);
       int64_t acc = 0;
       for (size_t i = 0; i < group.batches.size(); ++i) {
-        rank_starts[i] = prime_rank_cursor + acc;
+        job.rank_starts[i] = prime_rank_cursor + acc;
         acc += static_cast<int64_t>(group.batches[i].batch.prime_count);
       }
-      int64_t group_rank_min = prime_rank_cursor;
+      job.group_rank_min = prime_rank_cursor;
 
       if (boundary_pending && group.prime_rows > 0) {
-        append_manifest_boundary(manifest, options.bucket_version,
-                                 options.bucket, group.first_p,
-                                 group_rank_min);
+        job.emit_boundary = true;
+        job.boundary_p_min = group.first_p;
         boundary_pending = false;
       }
 
-      std::vector<WrittenFile> primes_files;
-      if (!write_group_table(primes_staging, "primes", p_schema,
-                             group.batches, rank_starts,
-                             options.bucket_version, options.bucket,
-                             primes_file_seq, /*partitions=*/false,
-                             &primes_files, &error)) {
-        set_last_error("write primes failed: " + error);
-        log_line(callbacks, "%s", g_last_error.c_str());
-        pp_shutdown();
-        return 1;
-      }
-      for (const auto& wf : primes_files) {
-        append_manifest_file(manifest, wf);
-        files_written++;
-        bytes_written += wf.bytes;
-        if (wf.data_file) primes_data_files.push_back(wf.data_file);
-      }
-      primes_file_seq += static_cast<int32_t>(primes_files.size());
-
+      // One file per table per group (target_rows_per_file == 0), so seqs are
+      // assigned deterministically here without waiting on the write.
+      job.primes_seq = primes_file_seq;
+      primes_file_seq += 1;
       if (group.partitions_rows > 0) {
-        std::vector<WrittenFile> partitions_files;
-        if (!write_group_table(partitions_staging, "partitions", d_schema,
-                               group.batches, rank_starts,
-                               options.bucket_version, options.bucket,
-                               partitions_file_seq, /*partitions=*/true,
-                               &partitions_files, &error)) {
-          set_last_error("write partitions failed: " + error);
-          log_line(callbacks, "%s", g_last_error.c_str());
-          pp_shutdown();
-          return 1;
-        }
-        for (const auto& wf : partitions_files) {
-          append_manifest_file(manifest, wf);
-          files_written++;
-          bytes_written += wf.bytes;
-          if (wf.data_file) partitions_data_files.push_back(wf.data_file);
-        }
-        partitions_file_seq += static_cast<int32_t>(partitions_files.size());
+        job.has_partitions = true;
+        job.partitions_seq = partitions_file_seq;
+        partitions_file_seq += 1;
       }
 
       total_primes += group.prime_rows;
@@ -851,22 +948,35 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
       prime_rank_cursor += group.prime_rows;
       groups_done++;
       progress.update(groups_done, total_primes);
-      log_line(
-          callbacks,
-          "group %" PRId64 "/%" PRId64 " complete | primes=%" PRId64 " | files=%" PRId64,
-          groups_done, total_groups, total_primes, files_written);
 
-      manifest.flush();
-      if (!manifest) {
-        set_last_error("failed to flush manifest: " + options.manifest.string());
-        log_line(callbacks, "%s", g_last_error.c_str());
-        pp_shutdown();
-        return 1;
+      job.group = std::move(group);
+      {
+        std::unique_lock<std::mutex> lk(q_mu);
+        q_can_push.wait(
+            lk, [&]() { return jobs.size() < kMaxPending || writer_failed; });
+        if (writer_failed) break;
+        jobs.push_back(std::move(job));
+        q_can_pop.notify_one();
       }
+
       if (stop_monitor.stop_requested()) {
         stop_requested = true;
         break;
       }
+    }
+
+    {
+      std::lock_guard<std::mutex> guard(q_mu);
+      producer_done = true;
+      q_can_pop.notify_one();
+    }
+    writer_thread.join();
+
+    if (producer_error || writer_failed) {
+      if (writer_failed && !producer_error) set_last_error(writer_error);
+      log_line(callbacks, "%s", g_last_error.c_str());
+      pp_shutdown();
+      return 1;
     }
     progress.finish();
 
