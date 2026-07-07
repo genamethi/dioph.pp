@@ -103,12 +103,13 @@ funbuns_native/Cargo.lock
 pixi.lock
 # native/vendor/{arrow,iceberg-cpp,lmdb} are git submodules (see .gitmodules);
 # patches/, PATCHES.md, README.md under native/vendor are tracked. Only ignore
-# the generated configure output and any repo-local install prefix.
+# the generated configure output and Lua-from-source build leftovers.
 native/config.mk
 native/.local/
 native/data/tmp/
 native/bin/nth_prime_boundaries
 .codex
 .mcp.json
-native/install
+native/vendor/lua-5.5.0/
+native/vendor/lua-5.5.0.tar.gz
 markdown/math/.speculative

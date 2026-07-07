@@ -1,456 +1,102 @@
 #!/usr/bin/env sh
-# native/configure — rootless, portable provisioning for the primeparts native
-# build. Detects (and, if missing, builds from source into a profile prefix) the
-# C/C++ dependencies, materializes the on-demand Arrow + iceberg-cpp submodules,
-# and writes native/config.mk for the Makefile to include.
-#
-# Default prefix ($HOME/.local) needs no sudo. If --prefix points somewhere not
-# user-writable (e.g. /usr/local), configure builds as the user but runs the
-# *install* step under sudo, prompting once up front. No required system package
-# manager. Targets Arch and Debian with gcc.
-# Version policy: minimums, prefer latest, almost no caps (see native/vendor/README.md).
-#
-#   ./native/configure [--prefix DIR] [--with-arrow] [--build-missing]
-#                      [--jobs N] [--force] [--help]
-#
-#   --prefix DIR   install dependencies here (default $HOME/.local). A non-
-#                  writable DIR triggers sudo for installs (build stays user).
-#
-# Stage A (always): toolchain probe + prerequisite detection (gmp, flint, pari,
-#   primesieve, primecount, notcurses, lua>=5.5<5.6, libcurl/openssl/sqlite3).
-#   Missing/too-old deps are built from source into PREFIX when --build-missing
-#   is set; otherwise they are reported with a distro install hint.
-# Stage B (--with-arrow): fetch Arrow main (blobless/sparse) + the latest
-#   iceberg-cpp tag, apply patches, build both static into PREFIX.
-set -eu
+set -e
 
-# --------------------------------------------------------------------------
-# Locations & defaults
-# --------------------------------------------------------------------------
-NATIVE_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
-REPO_ROOT=$(CDPATH= cd -- "$NATIVE_DIR/.." && pwd -P)
-PREFIX="${PREFIX:-$HOME/.local}"
-JOBS="${JOBS:-$(nproc 2>/dev/null || echo 4)}"
-WITH_ARROW=0
-BUILD_MISSING=0
-FORCE=0
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+VENDOR="$ROOT/vendor"
+PREFIX="${PREFIX:-/usr/local}"
+JOBS=$(nproc 2>/dev/null || echo 4)
+CXX="${CXX:-g++}"
 
-# Default source versions (recent-or-later; override via env). Arrow and
-# iceberg-cpp are pinned to release tags — reproducible, and reliably fetchable
-# on a fresh clone (a shallow server refuses arbitrary gitlink SHAs). See
-# ARROW_REF / ICEBERG_REF.
-GMP_VERSION="${GMP_VERSION:-6.3.0}"
-MPFR_VERSION="${MPFR_VERSION:-4.2.1}"
-FLINT_VERSION="${FLINT_VERSION:-3.5.0}"
-PARI_VERSION="${PARI_VERSION:-2.17.3}"
-PRIMESIEVE_VERSION="${PRIMESIEVE_VERSION:-12.14}"
-PRIMECOUNT_VERSION="${PRIMECOUNT_VERSION:-8.5}"
-NOTCURSES_VERSION="${NOTCURSES_VERSION:-3.0.17}"
-LUA_VERSION="${LUA_VERSION:-5.5.0}"   # must satisfy >=5.5,<5.6
-NLOHMANN_VERSION="${NLOHMANN_VERSION:-3.11.3}"  # header-only, used by the project directly
-HTTPLIB_VERSION="${HTTPLIB_VERSION:-0.18.3}"     # header-only HTTP server for pp-catalogd
-ARROW_REF="${ARROW_REF:-apache-arrow-24.0.0}"   # pinned release tag (== iceberg-cpp v0.3.0's Arrow)
-ICEBERG_REF="${ICEBERG_REF:-v0.3.0}"            # pinned iceberg-cpp release tag
+command -v yay >/dev/null 2>&1 || { echo "yay required (arch target)"; exit 1; }
 
-# --------------------------------------------------------------------------
-# Output helpers
-# --------------------------------------------------------------------------
-if [ -t 1 ]; then B=$(printf '\033[1m'); G=$(printf '\033[32m'); Y=$(printf '\033[33m'); R=$(printf '\033[31m'); Z=$(printf '\033[0m'); else B=; G=; Y=; R=; Z=; fi
-say()  { printf '%s==>%s %s\n' "$B" "$Z" "$*"; }
-ok()   { printf '  %sok%s   %s\n' "$G" "$Z" "$*"; }
-warn() { printf '  %swarn%s %s\n' "$Y" "$Z" "$*"; }
-die()  { printf '%serror:%s %s\n' "$R" "$Z" "$*" >&2; exit 1; }
+PKGS="base-devel pkgconf cmake ninja git curl tar boost \
+gmp mpfr flint pari primesieve primecount notcurses lmdb sqlite openssl \
+nlohmann-json \
+thrift snappy brotli protobuf abseil-cpp re2 utf8proc lz4 zstd zlib bzip2"
 
-usage() { sed -n '2,/^set -eu/p' "$0" | sed 's/^# \{0,1\}//; /^set -eu/d'; exit 0; }
-
-# --------------------------------------------------------------------------
-# Argument parsing
-# --------------------------------------------------------------------------
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --prefix)        PREFIX=$2; shift 2;;
-    --prefix=*)      PREFIX=${1#*=}; shift;;
-    --jobs)          JOBS=$2; shift 2;;
-    --jobs=*)        JOBS=${1#*=}; shift;;
-    --with-arrow)    WITH_ARROW=1; shift;;
-    --build-missing) BUILD_MISSING=1; shift;;
-    --force)         FORCE=1; shift;;
-    -h|--help)       usage;;
-    *) die "unknown option: $1 (try --help)";;
-  esac
+missing=
+for p in $PKGS; do
+  pacman -Qq "$p" >/dev/null 2>&1 || pacman -Qg "$p" >/dev/null 2>&1 || missing="$missing $p"
 done
-case "$PREFIX" in /*) ;; *) PREFIX=$(CDPATH= cd -- "$(dirname -- "$PREFIX")" 2>/dev/null && pwd -P)/$(basename -- "$PREFIX") || PREFIX="$PWD/$PREFIX";; esac
+[ -n "$missing" ] && yay -S --needed $missing || echo "system deps present"
 
-# Scratch builds always live in a user-writable cache (never under a root-owned
-# prefix, and never in the repo) so compilation runs as the unprivileged user.
-WORK="${WORK:-${XDG_CACHE_HOME:-$HOME/.cache}/primeparts-native}"
-mkdir -p "$WORK"
+printf '#include <format>\n#include <ranges>\n#include <vector>\n#include <expected>\nint main(){auto v=std::views::iota(0,1)|std::ranges::to<std::vector<int>>();return (int)std::format("{}",v.size()).size();}\n' \
+  | "$CXX" -std=c++23 -x c++ - -o "$(mktemp -u)" 2>/dev/null \
+  || { echo "toolchain lacks c++23 <format>/std::ranges::to/<expected> (need gcc>=14); set CXX="; exit 1; }
+echo "c++23 toolchain ok"
 
-# --------------------------------------------------------------------------
-# Privilege: build as the user; only elevate the *install* step into a prefix
-# that isn't user-writable (e.g. --prefix /usr/local). SUDO prefixes the
-# install/mkdir-into-prefix commands; it's empty for a writable prefix.
-# --------------------------------------------------------------------------
-SUDO=""
-need_root_for() {  # true if $1 (or its nearest existing ancestor) is not writable
-  d=$1; while [ ! -e "$d" ]; do d=$(dirname -- "$d"); done; [ ! -w "$d" ]
-}
-if need_root_for "$PREFIX" && [ "$(id -u)" -ne 0 ]; then
-  command -v sudo >/dev/null 2>&1 || die "prefix '$PREFIX' needs root to install into, but sudo is not available (pick a writable --prefix, e.g. \$HOME/.local)"
-  SUDO="sudo"
-  warn "prefix '$PREFIX' is not user-writable — the install step will use sudo (builds still run as $(id -un))"
-  say "Authenticating sudo for installs into $PREFIX"
-  sudo -v || die "sudo authentication failed"
-  # Keep the sudo timestamp warm across the long build so installs don't re-prompt.
-  ( while true; do sleep 50; sudo -n true 2>/dev/null || exit; kill -0 "$$" 2>/dev/null || exit; done ) &
-  SUDO_KEEPALIVE_PID=$!
-  trap 'kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true' EXIT INT TERM
-fi
+for t in cmake ninja make git curl tar pkg-config; do
+  command -v "$t" >/dev/null 2>&1 || { echo "missing tool: $t"; exit 1; }
+done
 
-$SUDO mkdir -p "$PREFIX/lib/pkgconfig" "$PREFIX/include" "$PREFIX/bin"
-PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PREFIX/lib64/pkgconfig:${PKG_CONFIG_PATH:-/usr/lib/pkgconfig:/usr/lib64/pkgconfig:/usr/share/pkgconfig}"
-export PKG_CONFIG_PATH
-PKG_CONFIG="${PKG_CONFIG:-pkg-config}"
-
-# --------------------------------------------------------------------------
-# Distro detection (for install hints only — never invoked)
-# --------------------------------------------------------------------------
-DISTRO=unknown
-if [ -r /etc/os-release ]; then . /etc/os-release; case "${ID:-} ${ID_LIKE:-}" in *arch*) DISTRO=arch;; *debian*|*ubuntu*) DISTRO=debian;; esac; fi
-hint() { # hint <arch-pkg> <debian-pkg>
-  case "$DISTRO" in
-    arch)   warn "  install hint: sudo pacman -S --needed $1";;
-    debian) warn "  install hint: sudo apt install $2";;
-    *)      warn "  install hint (arch): $1   (debian): $2";;
-  esac
-}
-
-# --------------------------------------------------------------------------
-# Toolchain probe
-# --------------------------------------------------------------------------
-say "Toolchain"
-CC="${CC:-$(command -v gcc || true)}"
-CXX="${CXX:-$(command -v g++ || true)}"
-[ -n "$CC" ]  || die "gcc not found (set CC=)"
-[ -n "$CXX" ] || die "g++ not found (set CXX=)"
-for t in "$PKG_CONFIG" git; do command -v "$t" >/dev/null 2>&1 || die "$t not found in PATH"; done
-# cmake/make are only needed to build from source (Stage B or --build-missing).
-if [ "$WITH_ARROW" = 1 ] || [ "$BUILD_MISSING" = 1 ]; then
-  for t in cmake make; do command -v "$t" >/dev/null 2>&1 || die "$t not found in PATH (needed to build from source)"; done
-fi
-ok "CC=$CC"; ok "CXX=$CXX"
-command -v cmake >/dev/null 2>&1 && ok "cmake=$(cmake --version | head -1)" || warn "cmake absent (only needed for source builds)"
-ok "prefix=$PREFIX  jobs=$JOBS  distro=$DISTRO"
-# iceberg-cpp (v0.3.0) needs two C++23 library features: <format> (libstdc++ >= 13,
-# used by its bundled Avro) AND std::ranges::to (libstdc++ >= 14, used by iceberg's
-# own string_util.h). gcc 14 is therefore the real floor. Probe both now and fail
-# fast with a clear message instead of a cryptic error deep in the build tree.
-if [ "$WITH_ARROW" = 1 ]; then
-  if printf '#include <format>\n#include <ranges>\n#include <vector>\nint main(){auto v=std::views::iota(0,2)|std::ranges::to<std::vector<int>>();return (int)v.size()+(int)std::format("{}",v.size()).size();}\n' \
-       | "$CXX" -std=c++23 -x c++ - -o "$WORK/.cxx23_probe" >/dev/null 2>&1; then
-    ok "C++23 <format> + std::ranges::to available"; rm -f "$WORK/.cxx23_probe"
-  else
-    die "C++ toolchain lacks C++23 <format>/std::ranges::to (need gcc >= 14, or a recent clang+libc++); '$CXX' is too old — iceberg-cpp v0.3.0 requires them. Re-run with CXX=g++-14 (or newer)."
-  fi
-fi
-# LMDB is small + pinned + compiled directly by the Makefile; ensure it's present.
-if [ ! -f "$REPO_ROOT/native/vendor/lmdb/libraries/liblmdb/mdb.c" ]; then
-  say "initializing lmdb submodule"; git -C "$REPO_ROOT" submodule update --init --checkout -- native/vendor/lmdb
-fi
-
-# --------------------------------------------------------------------------
-# Generic detection: pkg-config module at a minimum version
-# --------------------------------------------------------------------------
-have_pc() { "$PKG_CONFIG" --exists "$1" 2>/dev/null; }            # have_pc <mod>
-pc_ver()  { "$PKG_CONFIG" --modversion "$1" 2>/dev/null; }
-# min_ok <mod> <minver>  — true if module present and >= minver
-min_ok()  { have_pc "$1" && "$PKG_CONFIG" --atleast-version="$2" "$1" 2>/dev/null; }
-# max_ok <mod> <ltver>   — true if module present and < ltver
-max_ok()  { have_pc "$1" && ! "$PKG_CONFIG" --atleast-version="$2" "$1" 2>/dev/null; }
-
-# fetch <outfile> <url> [fallback-url...] — download to <outfile>, trying each URL
-# in turn. Hard connect/stall timeouts so a blackholed or stalled mirror (e.g. a
-# slow GNU FTP host) fails over to the next URL instead of hanging the whole build
-# forever (curl with no --max-time will wait indefinitely on a dead connection).
-fetch() {
-  out=$1; shift
-  [ -f "$out" ] && return 0
-  for url in "$@"; do
-    if command -v curl >/dev/null 2>&1; then
-      curl -fL --connect-timeout 20 --retry 3 --retry-connrefused \
-           --speed-time 30 --speed-limit 2048 -o "$out.part" "$url" \
-        && { mv "$out.part" "$out"; return 0; }
-    else
-      wget --connect-timeout=20 --read-timeout=30 --tries=3 -O "$out.part" "$url" \
-        && { mv "$out.part" "$out"; return 0; }
-    fi
-    rm -f "$out.part"; warn "  fetch: $url failed, trying next mirror"
-  done
-  die "all mirrors failed for $(basename "$out")"
-}
-# Write stdin to a file under PREFIX, elevating only if needed (handles $SUDO).
-prefix_write() { # prefix_write <dest-path-under-prefix>
-  tmp="$WORK/.pcgen.$$"; cat > "$tmp"
-  $SUDO mkdir -p "$(dirname -- "$1")"; $SUDO cp "$tmp" "$1"; rm -f "$tmp"
-}
-cmake_build() { # cmake_build <srcdir> [extra cmake args...]
-  src=$1; shift
-  cmake -S "$src" -B "$src/_bld" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-        -DCMAKE_PREFIX_PATH="$PREFIX" -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" \
-        -DBUILD_SHARED_LIBS=ON "$@" >/dev/null
-  cmake --build "$src/_bld" -j "$JOBS" >/dev/null   # build as the user
-  $SUDO cmake --install "$src/_bld" >/dev/null       # elevate only the install
-}
-# Autotools recipes find PREFIX-built deps first, then fall back to system.
-ac_env() { CPPFLAGS="-I$PREFIX/include ${CPPFLAGS:-}"; LDFLAGS="-L$PREFIX/lib ${LDFLAGS:-}"; export CPPFLAGS LDFLAGS; }
-
-# --------------------------------------------------------------------------
-# Stage A — prerequisites
-# --------------------------------------------------------------------------
-MISSING=""
-need() { # need <label> <pkgconfig-test-expr-as-fn> <arch-pkg> <debian-pkg> <build-fn>
-  label=$1 testfn=$2 apkg=$3 dpkg=$4 buildfn=$5
-  if "$testfn"; then ok "$label present"; return 0; fi
-  if [ "$BUILD_MISSING" = 1 ] && [ -n "$buildfn" ]; then
-    say "building $label from source -> $PREFIX"; "$buildfn"; "$testfn" && ok "$label built" || die "$label build did not satisfy $testfn"
-  else
-    warn "$label missing or too old"; hint "$apkg" "$dpkg"; MISSING="$MISSING $label"
-  fi
-}
-
-# --- detection predicates (named so `need` can re-test after a build) ---
-t_gmp()        { ensure_gmp_pc; have_pc gmp; }
-t_mpfr()       { min_ok mpfr 4.0.0 || { [ -f "$PREFIX/include/mpfr.h" ] && return 0; ld_has mpfr; }; }
-t_flint()      { min_ok flint 3.0.0; }
-t_pari()       { ld_has pari || [ -f "$PREFIX/include/pari/pari.h" ] || have_pc pari; }
-t_primesieve() { min_ok primesieve 11.0; }
-t_primecount() { min_ok primecount 7.0; }
-t_notcurses()  { have_pc notcurses-core || have_pc notcurses; }
-# Lua 5.5 from lua.org into /usr/local ships no .pc. If the header is 5.5.x
-# and -llua links, synthesize one so pkg-config sees it (PREFIX leads the path).
-ensure_lua55_pc() {
-  for m in lua lua5.5 lua-5.5; do min_ok "$m" 5.5.0 && max_ok "$m" 5.6.0 && return 0; done
-  hdr=/usr/local/include/lua.h; [ -f "$hdr" ] || return 1
-  major=$(awk '/^#define LUA_VERSION_MAJOR_N[[:space:]]/{print $NF}' "$hdr")
-  minor=$(awk '/^#define LUA_VERSION_MINOR_N[[:space:]]/{print $NF}' "$hdr")
-  patch=$(awk '/^#define LUA_VERSION_RELEASE_N[[:space:]]/{print $NF}' "$hdr")
-  [ "$major" = 5 ] && [ "$minor" = 5 ] || return 1
-  echo 'int main(void){return 0;}' | "$CC" -x c - -L/usr/local/lib -llua -o /dev/null 2>/dev/null || return 1
-  ver="${major}.${minor}.${patch:-0}"
-  prefix_write "$PREFIX/lib/pkgconfig/lua.pc" <<EOF
-prefix=/usr/local
-Name: Lua
-Description: Lua $ver language engine (synthesized by native/configure from /usr/local)
-Version: $ver
-Libs: -L/usr/local/lib -llua -lm -ldl
-Cflags: -I/usr/local/include
-EOF
-}
-t_lua()        { ensure_lua55_pc; for m in lua lua5.5 lua-5.5; do min_ok "$m" 5.5.0 && max_ok "$m" 5.6.0 && return 0; done; return 1; }
-# nlohmann is consumed *directly* by our code AND must match the ABI the
-# iceberg-cpp libs were built against (v0.3.0 pins 3.11.x). The inline-namespace
-# (json_abi_v3_MM_P) is keyed off VERSION_MAJOR/MINOR, so a stray 3.12 header on
-# the include path silently breaks linking against the 3.11 iceberg archives.
-# Read the effective version (abi_macros.hpp for a multi-file tree, else the
-# self-contained single-header json.hpp) and require it to equal the pin.
-nlohmann_ver() { # <nlohmann-dir> -> "MAJOR.MINOR" (empty if undeterminable)
-  for f in "$1/detail/abi_macros.hpp" "$1/json.hpp"; do
-    [ -f "$f" ] || continue
-    maj=$(awk '$1=="#define"&&$2=="NLOHMANN_JSON_VERSION_MAJOR"{print $3; exit}' "$f")
-    min=$(awk '$1=="#define"&&$2=="NLOHMANN_JSON_VERSION_MINOR"{print $3; exit}' "$f")
-    [ -n "$maj" ] && [ -n "$min" ] && { echo "$maj.$min"; return; }
-  done
-}
-t_nlohmann()   { want=${NLOHMANN_VERSION%.*}
-  for d in "$PREFIX/include" /usr/include /usr/local/include; do
-    [ -f "$d/nlohmann/json.hpp" ] && [ -f "$d/nlohmann/json_fwd.hpp" ] || continue
-    [ "$(nlohmann_ver "$d/nlohmann")" = "$want" ]; return  # first found is what the compiler uses
-  done
-  return 1; }
-# Debian's libcpp-httplib ships a *split* httplib.h (declarations only; impl in
-# libcpp-httplib.so). We compile header-only (-pthread, no link lib), so reject a
-# split header — it must contain inline definitions (`inline Server::Server`).
-t_httplib()    {
-  for f in "$PREFIX/include/httplib.h" /usr/local/include/httplib.h /usr/include/httplib.h; do
-    [ -f "$f" ] || continue
-    grep -q "inline Server::Server" "$f"; return  # first found decides; must be header-only
-  done
-  return 1; }
-t_curl()       { have_pc libcurl; }
-t_ssl()        { have_pc openssl || have_pc libssl; }
-t_sqlite()     { have_pc sqlite3; }
-
-ld_has() { echo 'int main(void){return 0;}' | "$CC" -x c - -L"$PREFIX/lib" -L/usr/lib -l"$1" -o /dev/null 2>/dev/null; }
-
-# GMP upstream ships no gmp.pc; synthesize one if libgmp is present but unseen.
-ensure_gmp_pc() {
-  have_pc gmp && return 0
-  if [ -f /usr/include/gmp.h ] || [ -f "$PREFIX/include/gmp.h" ]; then
-    v=$(awk -F'[ "]+' '/define __GNU_MP_VERSION /{a=$3} /define __GNU_MP_VERSION_MINOR /{b=$3} /define __GNU_MP_VERSION_PATCHLEVEL /{c=$3} END{print a"."b"."c}' /usr/include/gmp.h 2>/dev/null || echo "6.0.0")
-    prefix_write "$PREFIX/lib/pkgconfig/gmp.pc" <<EOF
-prefix=/usr
-Name: gmp
-Description: GNU Multiple Precision arithmetic library (synthesized by native/configure)
-Version: ${v:-6.0.0}
-Libs: -lgmp
-Cflags:
-EOF
-  fi
-}
-
-# --- source build recipes (rootless, into PREFIX) ---
-b_gmp() { fetch "$WORK/gmp.tar.xz" "https://mirrors.kernel.org/gnu/gmp/gmp-$GMP_VERSION.tar.xz" "https://gmplib.org/download/gmp/gmp-$GMP_VERSION.tar.xz" "https://ftp.gnu.org/gnu/gmp/gmp-$GMP_VERSION.tar.xz"; tar -C "$WORK" -xf "$WORK/gmp.tar.xz"
-  ( cd "$WORK/gmp-$GMP_VERSION" && ./configure --prefix="$PREFIX" --enable-cxx >/dev/null && make -j"$JOBS" >/dev/null && $SUDO make install >/dev/null ); ensure_gmp_pc; }
-b_mpfr() { fetch "$WORK/mpfr.tar.xz" "https://mirrors.kernel.org/gnu/mpfr/mpfr-$MPFR_VERSION.tar.xz" "https://ftp.gnu.org/gnu/mpfr/mpfr-$MPFR_VERSION.tar.xz"; tar -C "$WORK" -xf "$WORK/mpfr.tar.xz"
-  ( cd "$WORK/mpfr-$MPFR_VERSION" && ac_env && ./configure --prefix="$PREFIX" >/dev/null && make -j"$JOBS" >/dev/null && $SUDO make install >/dev/null ); }
-b_flint() { fetch "$WORK/flint.tar.gz" "https://github.com/flintlib/flint/releases/download/v$FLINT_VERSION/flint-$FLINT_VERSION.tar.gz"; tar -C "$WORK" -xf "$WORK/flint.tar.gz"
-  # FLINT's CMake build is Windows-only; Linux uses the (bootstrapped) autotools
-  # path. gmp/mpfr are found via CPPFLAGS/LDFLAGS (PREFIX first, then system).
-  ( cd "$WORK/flint-$FLINT_VERSION" && ac_env && ./configure --prefix="$PREFIX" CC="$CC" >/dev/null && make -j"$JOBS" >/dev/null && $SUDO make install >/dev/null ); }
-b_pari() { fetch "$WORK/pari.tar.gz" "https://pari.math.u-bordeaux.fr/pub/pari/unix/pari-$PARI_VERSION.tar.gz"; tar -C "$WORK" -xf "$WORK/pari.tar.gz"
-  ( cd "$WORK/pari-$PARI_VERSION" && ac_env && ./Configure --prefix="$PREFIX" >/dev/null && make -j"$JOBS" gp >/dev/null && $SUDO make install >/dev/null ); }
-b_primesieve() { fetch "$WORK/primesieve.tar.gz" "https://github.com/kimwalisch/primesieve/archive/refs/tags/v$PRIMESIEVE_VERSION.tar.gz"; tar -C "$WORK" -xf "$WORK/primesieve.tar.gz"
-  cmake_build "$WORK/primesieve-$PRIMESIEVE_VERSION"; }
-b_primecount() { fetch "$WORK/primecount.tar.gz" "https://github.com/kimwalisch/primecount/archive/refs/tags/v$PRIMECOUNT_VERSION.tar.gz"; tar -C "$WORK" -xf "$WORK/primecount.tar.gz"
-  cmake_build "$WORK/primecount-$PRIMECOUNT_VERSION" -DCMAKE_PREFIX_PATH="$PREFIX"; }
-b_notcurses() { fetch "$WORK/notcurses.tar.gz" "https://github.com/dankamongmen/notcurses/archive/refs/tags/v$NOTCURSES_VERSION.tar.gz"; tar -C "$WORK" -xf "$WORK/notcurses.tar.gz"
-  cmake_build "$WORK/notcurses-$NOTCURSES_VERSION" -DUSE_MULTIMEDIA=none -DUSE_DOCTEST=off \
-    -DBUILD_TESTING=off -DUSE_PANDOC=off -DUSE_DEFLATE=off; }
-# Install the COMPLETE multi-file include tree (not just json.hpp + json_fwd.hpp):
-# json_fwd.hpp pulls in detail/abi_macros.hpp, so a partial overwrite onto an
-# existing newer tree leaves a stale abi_macros.hpp and a mixed ABI. Replace the
-# whole dir so the version is internally consistent.
-b_nlohmann() { fetch "$WORK/nlohmann.tar.xz" "https://github.com/nlohmann/json/releases/download/v$NLOHMANN_VERSION/json.tar.xz"
-  rm -rf "$WORK/nlohmann-src"; mkdir -p "$WORK/nlohmann-src"; tar -C "$WORK/nlohmann-src" -xf "$WORK/nlohmann.tar.xz"
-  src=$(dirname "$(find "$WORK/nlohmann-src" -type f -path '*/include/nlohmann/json.hpp' | head -1)")
-  [ -n "$src" ] || die "nlohmann $NLOHMANN_VERSION tarball missing include/nlohmann/json.hpp"
-  $SUDO rm -rf "$PREFIX/include/nlohmann"; $SUDO mkdir -p "$PREFIX/include"
-  $SUDO cp -r "$src" "$PREFIX/include/nlohmann"; }
-b_httplib() { fetch "$WORK/httplib.h" "https://raw.githubusercontent.com/yhirose/cpp-httplib/v$HTTPLIB_VERSION/httplib.h"
-  $SUDO mkdir -p "$PREFIX/include"; $SUDO cp "$WORK/httplib.h" "$PREFIX/include/httplib.h"; }
-b_lua() { fetch "$WORK/lua.tar.gz" "https://www.lua.org/ftp/lua-$LUA_VERSION.tar.gz"; tar -C "$WORK" -xf "$WORK/lua.tar.gz"
-  ( cd "$WORK/lua-$LUA_VERSION" && make CC="$CC" MYCFLAGS=-fPIC -j"$JOBS" >/dev/null && $SUDO make INSTALL_TOP="$PREFIX" install >/dev/null )
-  mm=$(echo "$LUA_VERSION" | cut -d. -f1,2)
-  prefix_write "$PREFIX/lib/pkgconfig/lua.pc" <<EOF
-prefix=$PREFIX
-Name: Lua
-Description: Lua language engine (built by native/configure)
-Version: $LUA_VERSION
-Libs: -L$PREFIX/lib -llua -lm -ldl
-Cflags: -I$PREFIX/include
-EOF
-  $SUDO cp -f "$PREFIX/lib/pkgconfig/lua.pc" "$PREFIX/lib/pkgconfig/lua$mm.pc" 2>/dev/null || true
-}
-
-say "Prerequisites (Stage A)"
-need "gmp"        t_gmp        gmp        libgmp-dev        b_gmp
-need "mpfr"       t_mpfr       mpfr       libmpfr-dev       b_mpfr
-need "flint>=3"   t_flint      flint      libflint-dev      b_flint
-need "pari"       t_pari       pari       libpari-dev       b_pari
-need "primesieve" t_primesieve primesieve libprimesieve-dev b_primesieve
-need "primecount" t_primecount primecount ""               b_primecount
-need "notcurses"  t_notcurses  notcurses  libnotcurses-dev  b_notcurses
-need "lua 5.5.x"  t_lua        lua        liblua5.5-dev     b_lua
-need "nlohmann-json" t_nlohmann nlohmann-json nlohmann-json3-dev b_nlohmann
-need "cpp-httplib" t_httplib  cpp-httplib libcpp-httplib-dev   b_httplib
-need "libcurl"    t_curl       curl       libcurl4-openssl-dev ""
-need "openssl"    t_ssl        openssl    libssl-dev        ""
-need "sqlite3"    t_sqlite     sqlite     libsqlite3-dev    ""
-
-# --------------------------------------------------------------------------
-# Stage B — Arrow + iceberg-cpp (on demand)
-# --------------------------------------------------------------------------
-# vendor_checkout <path> <url> <ref> — materialize an on-demand vendored repo at a
-# pinned tag/branch ref. A fresh dioph.pp clone leaves these submodule paths empty
-# (update = none), and the recorded gitlink SHA is NOT fetchable from a shallow
-# server — git refuses arbitrary SHAs ("not our ref"), so `git submodule update`
-# dies. Fetching the *ref* (tag/branch) is reliable, so clone/fetch by ref directly
-# instead. Idempotent: re-runs fetch the ref into the existing repo and check it out.
-vendor_checkout() {
-  path=$1; url=$2; ref=$3; full="$REPO_ROOT/$path"
-  if [ -e "$full/.git" ]; then
-    git -C "$full" fetch --depth 1 origin "+refs/tags/$ref:refs/tags/$ref" >/dev/null 2>&1 \
-      || git -C "$full" fetch --depth 1 origin "$ref" >/dev/null 2>&1 || true
-    git -C "$full" checkout -q "$ref" 2>/dev/null \
-      || git -C "$full" checkout -q FETCH_HEAD 2>/dev/null || true
-  else
-    rm -rf "$full"
-    git clone --depth 1 --branch "$ref" "$url" "$full"
-  fi
-}
-
-build_arrow() {
-  say "Arrow ($ARROW_REF) -> $PREFIX  [pinned release tag; bundled deps]"
-  vendor_checkout native/vendor/arrow https://github.com/apache/arrow "$ARROW_REF"
-  git -C "$REPO_ROOT/native/vendor/arrow" sparse-checkout set cpp >/dev/null 2>&1 || true
-  cmake -S "$REPO_ROOT/native/vendor/arrow/cpp" -B "$REPO_ROOT/native/vendor/arrow/cpp/_bld" \
-    -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-    -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" \
-    -DARROW_BUILD_STATIC=ON -DARROW_BUILD_SHARED=OFF -DARROW_DEPENDENCY_USE_SHARED=OFF \
-    -DARROW_PARQUET=ON -DARROW_WITH_ZSTD=ON -DARROW_WITH_SNAPPY=ON -DARROW_WITH_BROTLI=ON \
-    -DARROW_FILESYSTEM=ON -DARROW_COMPUTE=ON -DARROW_JSON=ON \
-    -DARROW_BUILD_TESTS=OFF -DARROW_DEPENDENCY_SOURCE=BUNDLED >/dev/null
-  cmake --build "$REPO_ROOT/native/vendor/arrow/cpp/_bld" -j "$JOBS"
-  $SUDO cmake --install "$REPO_ROOT/native/vendor/arrow/cpp/_bld" >/dev/null
-}
-
-build_iceberg() {
-  say "iceberg-cpp ($ICEBERG_REF) -> $PREFIX"
-  vendor_checkout native/vendor/iceberg-cpp https://github.com/apache/iceberg-cpp "$ICEBERG_REF"
-  # apply_vendor_patches.sh has a bash shebang and uses `set -o pipefail`; invoke
-  # it with bash explicitly (this configure runs under sh/dash, which lacks pipefail).
-  bash "$REPO_ROOT/scripts/apply_vendor_patches.sh"
-  cmake -S "$REPO_ROOT/native/vendor/iceberg-cpp" -B "$REPO_ROOT/native/vendor/iceberg-cpp/_bld" \
-    -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_PREFIX_PATH="$PREFIX" \
-    -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" -DCMAKE_COMPILE_WARNING_AS_ERROR=OFF \
-    -DICEBERG_BUILD_STATIC=ON -DICEBERG_BUILD_SHARED=OFF -DICEBERG_BUILD_BUNDLE=ON \
-    -DICEBERG_BUILD_REST=ON -DICEBERG_BUILD_SQL_CATALOG=ON -DICEBERG_BUILD_TESTS=OFF >/dev/null
-  cmake --build "$REPO_ROOT/native/vendor/iceberg-cpp/_bld" -j "$JOBS"
-  $SUDO cmake --install "$REPO_ROOT/native/vendor/iceberg-cpp/_bld" >/dev/null
-}
-
-if [ "$WITH_ARROW" = 1 ]; then
-  say "Arrow + iceberg-cpp (Stage B)"
-  { min_ok arrow 24.0.0 && min_ok parquet 24.0.0 && [ "$FORCE" = 0 ]; } && ok "arrow/parquet >=24 already in prefix" || build_arrow
-  # iceberg-cpp ships no .pc; key on the installed archives (incl. sql_catalog).
-  { [ -f "$PREFIX/lib/libiceberg.a" ] && [ -f "$PREFIX/lib/libiceberg_sql_catalog.a" ] && [ "$FORCE" = 0 ]; } \
-    && ok "iceberg already in prefix" || build_iceberg
+if [ ! -x /usr/local/bin/lua ] || ! /usr/local/bin/lua -v 2>&1 | grep -q "Lua 5.5"; then
+  tmp=$(mktemp -d)
+  cd "$tmp"
+  curl -L -R -O https://www.lua.org/ftp/lua-5.5.0.tar.gz
+  tar zxf lua-5.5.0.tar.gz
+  cd lua-5.5.0
+  make all test
+  sudo make install
+  cd "$ROOT"
+  rm -rf "$tmp"
 else
-  warn "Stage B skipped (no --with-arrow): Arrow/iceberg targets won't build until you run with --with-arrow"
+  echo "lua 5.5 present"
 fi
 
-# --------------------------------------------------------------------------
-# Emit native/config.mk
-# --------------------------------------------------------------------------
-say "Writing native/config.mk"
-luamod=lua; for m in lua lua5.5 lua-5.5; do have_pc "$m" && { luamod=$m; break; }; done
-# Resolve Lua flags HERE (literal values) — config.mk is -include'd before the
-# Makefile defines PKG_CONFIG, so a deferred $(shell ... $(PKG_CONFIG) ...) would
-# expand against an empty PKG_CONFIG and silently drop -llua.
-LUA_CPPFLAGS_R=$("$PKG_CONFIG" --cflags "$luamod" 2>/dev/null || true)
-LUA_LDLIBS_R=$("$PKG_CONFIG" --libs "$luamod" 2>/dev/null || true)
-NOTCURSES_RPATH="-Wl,-rpath,$PREFIX/lib"
+if [ ! -f "$PREFIX/lib/libarrow.a" ]; then
+  cd "$VENDOR/arrow/cpp"
+  mkdir -p build
+  cd build
+  cmake .. --preset ninja-release -DARROW_BUILD_STATIC=ON
+  cmake --build . -j "$JOBS"
+  sudo cmake --install .
+  cd "$ROOT"
+else
+  echo "arrow static present"
+fi
+
+if [ ! -f "$PREFIX/lib/libiceberg_sql_catalog.a" ]; then
+  cd "$VENDOR/iceberg-cpp"
+  cmake -S . -B build -G Ninja \
+    -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_PREFIX_PATH="$PREFIX" \
+    -DICEBERG_BUILD_BUNDLE=ON -DICEBERG_SQL_SQLITE=ON -DICEBERG_BUILD_SQL_CATALOG=ON
+  cmake --build build -j "$JOBS"
+  sudo cmake --install build
+  cd "$ROOT"
+else
+  echo "iceberg present"
+fi
+
+# iceberg installs headers per-subdir but the base catalog dir (src/iceberg/
+# catalog/CMakeLists.txt) never calls iceberg_install_all_headers, so its own
+# headers (session_catalog.h, session_context.h) are left out of the prefix even
+# though the installed catalog/rest/rest_catalog.h includes them. Fill the prefix
+# from the vendored src; if that install can't complete, emit a last-resort src
+# include for the Makefile.
+ICEBERG_SRC="$VENDOR/iceberg-cpp/src"
+FALLBACK=
+NEED="iceberg/catalog/session_catalog.h iceberg/catalog/session_context.h"
+need_cp=
+for h in $NEED; do [ -f "$PREFIX/include/$h" ] || need_cp=1; done
+if [ -n "$need_cp" ]; then
+  sudo mkdir -p "$PREFIX/include/iceberg/catalog" 2>/dev/null || true
+  sudo cp "$ICEBERG_SRC"/iceberg/catalog/*.h "$PREFIX/include/iceberg/catalog/" 2>/dev/null || true
+  for h in $NEED; do [ -f "$PREFIX/include/$h" ] || FALLBACK=1; done
+  [ -n "$FALLBACK" ] && echo "warn: could not install catalog headers to prefix; using vendored src include" || echo "catalog headers installed to prefix"
+else
+  echo "iceberg catalog headers present"
+fi
 
 {
-  echo "# Generated by native/configure on $(date -u +%Y-%m-%dT%H:%M:%SZ). Do not edit."
+  echo "# generated by native/configure"
   echo "PREFIX := $PREFIX"
-  echo "PKG_CONFIG_PATH := $PKG_CONFIG_PATH"
-  echo "CC := $CC"
-  echo "CXX := $CXX"
-  echo "LUA_CPPFLAGS := $LUA_CPPFLAGS_R"
-  echo "LUA_LDLIBS := $LUA_LDLIBS_R -lm -ldl"
-  echo "NOTCURSES_RPATH := $NOTCURSES_RPATH"
-} > "$NATIVE_DIR/config.mk"
-ok "native/config.mk written"
+  [ -n "$FALLBACK" ] && echo "ICEBERG_FALLBACK_CPPFLAGS := -I$ICEBERG_SRC"
+} > "$ROOT/config.mk"
 
-# --------------------------------------------------------------------------
-# Summary
-# --------------------------------------------------------------------------
-echo
-if [ -n "$MISSING" ]; then
-  warn "missing prerequisites:$MISSING"
-  warn "re-run with --build-missing to build them from source into $PREFIX, or install via the hints above."
-fi
-say "Done. Build with:  make -C native all   (or a specific target)"
-[ "$WITH_ARROW" = 0 ] && say "Arrow/iceberg targets need:  native/configure --with-arrow --build-missing"
-exit 0
+INSTALL_PATH="${PP_INSTALL_PATH:-$HOME/.local/bin}"
+case ":$PATH:" in
+  *":$INSTALL_PATH:"*) ;;
+  *) echo "warn: install dir $INSTALL_PATH not in PATH (installed binaries won't be found until you add it)" ;;
+esac
+
+echo "done. build:  make -C $ROOT   install:  make -C $ROOT install"

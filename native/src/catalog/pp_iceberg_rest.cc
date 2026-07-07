@@ -101,8 +101,12 @@ std::shared_ptr<iceberg::Catalog> MakeCatalog(const RestOptions& opts,
     }
     auto r = iceberg::rest::RestCatalog::Make(config);
     if (!r.has_value()) { *error = r.error().message; return nullptr; }
+    // RestCatalog is a SessionCatalog root, not a Catalog; bind its default
+    // session to get the standard Catalog view the rest of the project uses.
+    auto cat = r.value()->AsCatalog();
+    if (!cat.has_value()) { *error = cat.error().message; return nullptr; }
     *mode = "rest";
-    return std::move(r.value());
+    return std::move(cat.value());
   }
   *mode = "in-memory";
   return std::make_shared<iceberg::InMemoryCatalog>(

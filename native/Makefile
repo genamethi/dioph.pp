@@ -17,18 +17,21 @@ EXE_LDFLAGS += -no-pie
 LDLIBS += $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --libs primecount primesieve gmp flint) -lpari -lm
 NOTCURSES_LDLIBS ?= $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --libs notcurses-core 2>/dev/null || PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --libs notcurses 2>/dev/null)
 NOTCURSES_CPPFLAGS ?= $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --cflags notcurses-core 2>/dev/null || PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --cflags notcurses 2>/dev/null)
-NOTCURSES_RPATH ?= -Wl,-rpath,/usr/local/lib
+NOTCURSES_RPATH ?= -Wl,-rpath,$(PREFIX)/lib
 
 # Lua 5.5 embedded in the TUI (parses scripts/lua/*.lua presets). Static
-# liblua.a at /usr/local keeps the all-static build; Lua needs -lm -ldl.
-LUA_CPPFLAGS ?= -I/usr/local/include
-LUA_LDLIBS ?= /usr/local/lib/liblua.a -lm -ldl
+# liblua.a under the prefix keeps the all-static build; Lua needs -lm -ldl.
+LUA_CPPFLAGS ?= -I$(PREFIX)/include
+LUA_LDLIBS ?= $(PREFIX)/lib/liblua.a -lm -ldl
 
 # iceberg-cpp is built from source in vendor/iceberg-cpp/ and installed
 # to $(PREFIX) by hand. We link the static archives directly and pick up
 # arrow/parquet from the same prefix via pkg-config so the transitive
 # static dep set (brotli, snappy, protobuf, abseil, ...) stays correct.
-ICEBERG_CPPFLAGS += -I$(PREFIX)/include
+# Single prefix by default. ICEBERG_FALLBACK_CPPFLAGS is emitted into config.mk
+# by native/configure ONLY when it couldn't install iceberg's base catalog
+# headers into the prefix (upstream install gap); normally empty.
+ICEBERG_CPPFLAGS += -I$(PREFIX)/include $(ICEBERG_FALLBACK_CPPFLAGS)
 ICEBERG_LDFLAGS +=
 ICEBERG_LDLIBS += \
 	-liceberg_data -liceberg_bundle -liceberg_rest -liceberg_vendored_cpr \
@@ -41,8 +44,8 @@ ICEBERG_LDLIBS += \
 # LMDB is vendored in vendor/lmdb and built into a small static archive used by
 # the native catalog store (pp_lmdb_store). Build-time only; it adds no
 # transitive dependencies. The upstream SQL-catalog engine lives in the
-# separately-installed libiceberg_sql_catalog.a (no SQL connector was built, so
-# no sqlpp23/sqlite); we inject the LMDB store through its CatalogStore seam.
+# separately-installed libiceberg_sql_catalog.a (built with the sqlite connector,
+# -DICEBERG_SQL_SQLITE=ON); we inject the LMDB store through its CatalogStore seam.
 LMDB_DIR := vendor/lmdb/libraries/liblmdb
 LMDB_CPPFLAGS += -I$(LMDB_DIR)
 LMDB_CFLAGS := -O3 -g -fPIC -pthread
@@ -83,7 +86,34 @@ TUPLES_OBJ := $(BUILD_DIR)/tuples.o
 TALLY_MAIN_OBJ := $(BUILD_DIR)/tally_main.o
 CLUSTER_MAIN_OBJ := $(BUILD_DIR)/cluster_main.o
 
-.PHONY: all clean test smoke
+.PHONY: all clean test smoke install
+
+# Install destination for the built executables. Defaults out of the source tree
+# to keep the repo clean; override with `make install PP_INSTALL_PATH=/some/dir`.
+# No sudo is taken: if the target is root-owned the cp fails with a permission
+# error and the user can elevate the invocation themselves.
+PP_INSTALL_PATH ?= $(HOME)/.local/bin
+
+INSTALL_BINS := \
+     $(BUILD_DIR)/primeparts-bench-core \
+     $(BUILD_DIR)/primeparts-bench-materialize \
+     $(BUILD_DIR)/primeparts-generate \
+     $(BUILD_DIR)/primeparts-primitive-factors \
+     $(BUILD_DIR)/primeparts-covering-sieve \
+     $(BUILD_DIR)/primeparts-mdiff \
+     $(BUILD_DIR)/primeparts-mersenne \
+     $(BUILD_DIR)/pp-catalog \
+     $(BUILD_DIR)/pp \
+     $(BUILD_DIR)/primeparts-catalogd \
+     $(BUILD_DIR)/mersenne-sidecar \
+     $(BUILD_DIR)/primeparts-tui \
+     $(BUILD_DIR)/tally \
+     $(BUILD_DIR)/cluster
+
+install: all
+	mkdir -p "$(PP_INSTALL_PATH)"
+	cp $(INSTALL_BINS) "$(PP_INSTALL_PATH)/"
+	@echo "installed $(words $(INSTALL_BINS)) binaries to $(PP_INSTALL_PATH)"
 
 all: $(BUILD_DIR)/libprimeparts_core.so \
      $(BUILD_DIR)/primeparts-bench-core \
