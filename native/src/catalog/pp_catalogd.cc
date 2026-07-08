@@ -6,11 +6,6 @@
 //   requirements, applies updates, writes metadata.json and CASes the LMDB head
 //   pointer; this file owns no metadata logic.
 //
-// Serde is reused from iceberg-cpp's INTERNAL headers (json_serde_internal.h).
-// Those declarations are not installed under $PREFIX/include but the symbols are
-// ICEBERG[_REST]_EXPORT in the static archives, so the build adds
-// -Ivendor/iceberg-cpp/src for this TU only (see the Makefile). nlohmann/json
-// must match the archives' ABI (3.11.3) — it does (configure pins it).
 
 #include "primeparts/catalog/pp_catalogd.h"
 

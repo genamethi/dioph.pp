@@ -19,18 +19,9 @@ NOTCURSES_LDLIBS ?= $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --l
 NOTCURSES_CPPFLAGS ?= $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --cflags notcurses-core 2>/dev/null || PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --cflags notcurses 2>/dev/null)
 NOTCURSES_RPATH ?= -Wl,-rpath,$(PREFIX)/lib
 
-# Lua 5.5 embedded in the TUI (parses scripts/lua/*.lua presets). Static
-# liblua.a under the prefix keeps the all-static build; Lua needs -lm -ldl.
 LUA_CPPFLAGS ?= -I$(PREFIX)/include
 LUA_LDLIBS ?= $(PREFIX)/lib/liblua.a -lm -ldl
 
-# iceberg-cpp is built from source in vendor/iceberg-cpp/ and installed
-# to $(PREFIX) by hand. We link the static archives directly and pick up
-# arrow/parquet from the same prefix via pkg-config so the transitive
-# static dep set (brotli, snappy, protobuf, abseil, ...) stays correct.
-# Single prefix by default. ICEBERG_FALLBACK_CPPFLAGS is emitted into config.mk
-# by native/configure ONLY when it couldn't install iceberg's base catalog
-# headers into the prefix (upstream install gap); normally empty.
 ICEBERG_CPPFLAGS += -I$(PREFIX)/include $(ICEBERG_FALLBACK_CPPFLAGS)
 ICEBERG_LDFLAGS +=
 ICEBERG_LDLIBS += \
@@ -41,11 +32,6 @@ ICEBERG_LDLIBS += \
 	$(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --libs --static parquet arrow | sed -e 's/-lparquet[ ]//g' -e 's/-larrow[ ]//g' -e 's/-L[^ ]*[ ]//g') \
 	-lcurl -lssl -lcrypto -ldl -lrt
 
-# LMDB is vendored in vendor/lmdb and built into a small static archive used by
-# the native catalog store (pp_lmdb_store). Build-time only; it adds no
-# transitive dependencies. The upstream SQL-catalog engine lives in the
-# separately-installed libiceberg_sql_catalog.a (built with the sqlite connector,
-# -DICEBERG_SQL_SQLITE=ON); we inject the LMDB store through its CatalogStore seam.
 LMDB_DIR := vendor/lmdb/libraries/liblmdb
 LMDB_CPPFLAGS += -I$(LMDB_DIR)
 LMDB_CFLAGS := -O3 -g -fPIC -pthread
@@ -73,10 +59,6 @@ LMDB_LIB := $(BUILD_DIR)/liblmdb.a
 PP_CATALOG_MAIN_OBJ := $(BUILD_DIR)/pp_catalog_main.o
 PP_CATALOGD_OBJ := $(BUILD_DIR)/pp_catalogd.o
 PP_CATALOGD_MAIN_OBJ := $(BUILD_DIR)/pp_catalogd_main.o
-# pp_catalogd reuses iceberg-cpp's internal JSON serde (declared in
-# vendor/iceberg-cpp/src/.../json_serde_internal.h, defined in the installed
-# static archives). The prefix include comes first so public headers resolve
-# there; only the uninstalled internal headers come from the vendored src tree.
 ICEBERG_SRC_CPPFLAGS := -Ivendor/iceberg-cpp/src
 TEST_OBJ := $(BUILD_DIR)/test_core.o
 TEST_ICEBERG_WRITER_OBJ := $(BUILD_DIR)/test_iceberg_writer.o
@@ -88,10 +70,6 @@ CLUSTER_MAIN_OBJ := $(BUILD_DIR)/cluster_main.o
 
 .PHONY: all clean test smoke install
 
-# Install destination for the built executables. Defaults out of the source tree
-# to keep the repo clean; override with `make install PP_INSTALL_PATH=/some/dir`.
-# No sudo is taken: if the target is root-owned the cp fails with a permission
-# error and the user can elevate the invocation themselves.
 PP_INSTALL_PATH ?= $(HOME)/.local/bin
 
 INSTALL_BINS := \
@@ -179,8 +157,6 @@ $(BUILD_DIR)/query_service.o: src/query/query_service.cc include/primeparts/quer
 $(BUILD_DIR)/query_service_smoke.o: src/query/query_service_smoke.cc include/primeparts/query/query_service.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-# TUI screens share primeparts/tui/tui_app.h (App + cross-file decls). Each TU
-# is compiled the same way (notcurses + iceberg headers).
 TUI_APP_HDR := include/primeparts/tui/tui_app.h include/primeparts/query/query_service.h include/primeparts/tui/lua_presets.h
 
 $(BUILD_DIR)/tui_main.o: src/tui/tui_main.cc $(TUI_APP_HDR) | $(BUILD_DIR)
@@ -247,14 +223,9 @@ $(PP_CATALOGD_OBJ): src/catalog/pp_catalogd.cc include/primeparts/catalog/pp_cat
 $(PP_CATALOGD_MAIN_OBJ): src/catalog/pp_catalogd_main.cc include/primeparts/catalog/pp_catalogd.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-# The acceptance smoke is a pure client (RestCatalog) + writer; it forks the
-# server (PP_CATALOGD_OBJ) in-process, so no -Ivendor/iceberg-cpp/src here.
 $(BUILD_DIR)/pp_catalogd_smoke.o: src/catalog/pp_catalogd_smoke.cc include/primeparts/catalog/pp_catalogd.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/writer.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-# generate-commit smoke: pure RestCatalog client that forks the server and
-# execs the real primeparts-generate binary (no generate.o link — it has its
-# own main). Same client compile recipe as pp_catalogd_smoke.
 $(BUILD_DIR)/generate_smoke.o: src/generate_smoke.cc include/primeparts/catalog/pp_catalogd.h include/primeparts/catalog/pp_iceberg_rest.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
@@ -270,7 +241,6 @@ $(TEST_PRIMITIVE_FACTORS_OBJ): tests/test_primitive_factors.cc include/primepart
 $(MERSENNE_SIDECAR_OBJ): src/mersenne_sidecar.cc | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-# analysis tools (m-tuple statistics). tuples.o is pure math (no iceberg dep).
 $(TUPLES_OBJ): src/analysis/tuples.cc include/primeparts/analysis/tuples.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
@@ -289,38 +259,21 @@ $(BUILD_DIR)/primeparts-bench-core: $(CORE_OBJ) $(BENCH_CORE_OBJ)
 $(BUILD_DIR)/primeparts-bench-materialize: $(CORE_OBJ) $(BENCH_MATERIALIZE_OBJ)
 	$(CC) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) -pthread -o $@
 
-# generate now publishes its written DataFiles through CommitFiles (in-process
-# MakeLocalCatalog or a pp-catalogd RestCatalog client), so it links the catalog
-# engine like pp-catalog: SQL_CATALOG_LDLIBS before ICEBERG_LDLIBS, liblmdb.a
-# backs pp_lmdb_store.o.
 $(BUILD_DIR)/primeparts-generate: $(CORE_OBJ) $(GENERATE_OBJ) $(WRITER_OBJ) $(SCHEMAS_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
 
-# pp_iceberg_rest now provides MakeLocalCatalog = SqlCatalog(LmdbStore), so every
-# consumer links the SQL-catalog engine + LMDB store. SQL_CATALOG_LDLIBS must
-# precede ICEBERG_LDLIBS (static link order); liblmdb.a backs pp_lmdb_store.o.
 $(BUILD_DIR)/pp-catalog: $(PP_CATALOG_MAIN_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_SIEVE_CLONE_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
 
-# pp-catalogd: IRC HTTP server over MakeLocalCatalog. Same link recipe as
-# pp-catalog (SQL_CATALOG_LDLIBS before ICEBERG_LDLIBS; liblmdb.a backs the
-# store); cpp-httplib is header-only (needs only -pthread).
 $(BUILD_DIR)/primeparts-catalogd: $(PP_CATALOGD_MAIN_OBJ) $(PP_CATALOGD_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
 
-# Client round-trip acceptance smoke: forks the server, drives it with the
-# RestCatalog client (createTable + FastAppend commit + scan). Links the writer
-# (real parquet data file) + the server object.
 $(BUILD_DIR)/primeparts-catalogd-smoke: $(BUILD_DIR)/pp_catalogd_smoke.o $(PP_CATALOGD_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(WRITER_OBJ) $(SCHEMAS_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
 
-# generate-commit smoke links the client side only (forks server + execs the
-# generate binary). Order-only dep on primeparts-generate so it exists to exec.
 $(BUILD_DIR)/primeparts-generate-smoke: $(BUILD_DIR)/generate_smoke.o $(PP_CATALOGD_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB) | $(BUILD_DIR)/primeparts-generate
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $(BUILD_DIR)/generate_smoke.o $(PP_CATALOGD_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB) $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
 
-# libiceberg_sql_catalog.a must precede the iceberg core archives so its
-# references resolve in static link order; liblmdb.a backs pp_lmdb_store.o.
 $(BUILD_DIR)/primeparts-lmdb-smoke: $(PP_LMDB_SMOKE_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $(PP_LMDB_SMOKE_OBJ) $(PP_LMDB_STORE_OBJ) \
 		$(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(LMDB_LIB) -pthread -o $@
@@ -331,35 +284,21 @@ $(BUILD_DIR)/primeparts-primitive-factors: $(PRIMITIVE_FACTORS_MAIN_OBJ) $(PRIMI
 $(BUILD_DIR)/primeparts-covering-sieve: $(COVERING_SIEVE_MAIN_OBJ) $(PRIMITIVE_FACTORS_OBJ) $(SOURCE_SCAN_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_ROW_DELTA_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
 
-# mdiff: writer (BucketParquetWriter) + schemas (MdiffSchema) + source_scan
-# (partitions enumeration) + catalog seam (CommitFiles/DropTable).
-# arrow/parquet come from the static ICEBERG_LDLIBS (libarrow.a/libparquet.a); no
-# trailing -lparquet/-larrow, so the binary carries no libarrow.so runtime dep.
 $(BUILD_DIR)/primeparts-mdiff: $(MDIFF_MAIN_OBJ) $(WRITER_OBJ) $(SCHEMAS_OBJ) $(SOURCE_SCAN_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
 
-# tally: build primeparts.mtuple_k{K}. Reads partitions via SourceTableReader,
-# writes via BucketParquetWriter + CommitFiles. Same static-link template as
-# mdiff (no trailing -lparquet/-larrow); tuples.o is the shared analysis math.
 $(BUILD_DIR)/tally: $(TALLY_MAIN_OBJ) $(TUPLES_OBJ) $(SOURCE_SCAN_OBJ) $(WRITER_OBJ) $(SCHEMAS_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
 
-# cluster: read-only analysis over the mtuple tables (SourceTableReader) + a
-# markdown report. No writer/schemas needed.
 $(BUILD_DIR)/cluster: $(CLUSTER_MAIN_OBJ) $(TUPLES_OBJ) $(SOURCE_SCAN_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
 
-# mersenne: one-time builder of primeparts.mersenne_factors. writer + schemas +
-# primitive_factors (BuildMersenneHelper) + catalog seam. Same static-link
-# template as mdiff (no trailing -lparquet/-larrow).
 $(BUILD_DIR)/primeparts-mersenne: $(MERSENNE_MAIN_OBJ) $(WRITER_OBJ) $(SCHEMAS_OBJ) $(PRIMITIVE_FACTORS_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
 
 $(BUILD_DIR)/query-smoke: $(BUILD_DIR)/query_smoke.o $(SOURCE_SCAN_OBJ)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(ICEBERG_LDLIBS) -lparquet -larrow -lsqlite3 -pthread -o $@
 
-# QueryService links the catalog seam (SqlCatalog(LmdbStore)): SQL_CATALOG_LDLIBS
-# before ICEBERG_LDLIBS; liblmdb.a backs pp_lmdb_store.o.
 $(BUILD_DIR)/query-service-smoke: $(BUILD_DIR)/query_service_smoke.o $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(SOURCE_SCAN_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
 
@@ -369,27 +308,18 @@ $(BUILD_DIR)/primeparts-test-iceberg-writer: $(TEST_ICEBERG_WRITER_OBJ) $(WRITER
 $(BUILD_DIR)/primeparts-test-primitive-factors: $(TEST_PRIMITIVE_FACTORS_OBJ) $(PRIMITIVE_FACTORS_OBJ)
 	$(CXX) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) -o $@
 
-# New TUI (src/tui/, C++ on QueryService + the LMDB catalog seam). Replaces the
-# scrapped tui_frontend.c. SQL_CATALOG_LDLIBS before ICEBERG_LDLIBS; notcurses-core.
 $(BUILD_DIR)/primeparts-tui: $(BUILD_DIR)/tui_main.o $(BUILD_DIR)/tui_runquery.o $(BUILD_DIR)/tui_generate.o $(BUILD_DIR)/tui_config.o $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(BUILD_DIR)/lua_presets.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(SOURCE_SCAN_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $(NOTCURSES_RPATH) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(NOTCURSES_LDLIBS) $(LUA_LDLIBS) -lsqlite3 -pthread -o $@
 
 $(BUILD_DIR)/primeparts-lua-presets-smoke: $(BUILD_DIR)/lua_presets_smoke.o $(BUILD_DIR)/lua_presets.o $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(SOURCE_SCAN_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(LUA_LDLIBS) -lsqlite3 -pthread -o $@
 
-# The reader `query` Lua module + smoke. Links core.o for the number-theory
-# bindings (primecount/primesieve/FLINT via $(LDLIBS)).
 $(BUILD_DIR)/primeparts-lua-query-smoke: $(BUILD_DIR)/lua_query_smoke.o $(BUILD_DIR)/lua_query_module.o $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(CORE_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(SOURCE_SCAN_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(LUA_LDLIBS) -lsqlite3 -pthread -o $@
 
-# pp — the Lua query shell. Same link recipe as the lua-query smoke (core.o for
-# the number-theory bindings; QueryService + catalog seam + embedded Lua).
 $(BUILD_DIR)/pp: $(BUILD_DIR)/pp_main.o $(BUILD_DIR)/lua_query_module.o $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(CORE_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(SOURCE_SCAN_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(LUA_LDLIBS) -lsqlite3 -pthread -o $@
 
-# v0.3.0 arrow pulls mimalloc/brotli via libarrow_bundled_dependencies.a; the
-# bare -larrow -lparquet link no longer resolves them. ICEBERG_LDLIBS carries the
-# full static transitive set (libarrow.a + libparquet.a + bundled deps).
 $(BUILD_DIR)/mersenne-sidecar: $(MERSENNE_SIDECAR_OBJ)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(ICEBERG_LDLIBS) -o $@
 
@@ -401,10 +331,6 @@ test: $(BUILD_DIR)/test_core \
 	$(BUILD_DIR)/test_core
 	$(BUILD_DIR)/primeparts-test-primitive-factors
 
-# Exercises the LMDB catalog seam + the embedded-Lua path (presets/config DSL and
-# the reader `query` module). The Lua smokes degrade gracefully with no
-# warehouse; lua-presets-smoke runs from the repo root so it finds
-# scripts/lua/queries.lua.
 smoke: $(BUILD_DIR)/primeparts-lmdb-smoke \
        $(BUILD_DIR)/primeparts-catalogd-smoke \
        $(BUILD_DIR)/primeparts-generate-smoke \

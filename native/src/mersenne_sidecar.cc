@@ -1,3 +1,6 @@
+//Needs to remove writer.h and any direct arrow/io. May be obsolete,
+//But out of the whole primitive factors/covering system work
+//The most general useful tool (it came first.)
 #include <arrow/api.h>
 #include <arrow/io/file.h>
 #include <parquet/arrow/writer.h>

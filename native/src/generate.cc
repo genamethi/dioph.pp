@@ -1,10 +1,3 @@
-// Frontier writer. Generates primes via the C core (FLINT/primesieve),
-// materializes (p, k) plus decompositions, assigns prime_rank in stream,
-// stamps the coordinator-supplied (p_bucket_version, p_bucket) onto every
-// row, and writes Parquet files via primeparts/writer.h. Emits the same
-// JSONL manifest format the rewriter produces, so the commit step
-// doesn't care whether bytes came from FLINT or from a rewrite pass.
-
 #include "primeparts/catalog/pp_iceberg_rest.h"
 #include "primeparts/core.h"
 #include "primeparts/generate.h"
@@ -40,10 +33,6 @@
 #include <utility>
 #include <vector>
 
-// iceberg::Schema is still the source of truth for field IDs; the
-// schema factories live in writer.h and the parquet write path lives
-// in writer.cc. This file only handles row materialization and
-// per-batch arrow array construction.
 #include "iceberg/schema.h"
 #include "iceberg/schema_field.h"
 #include "iceberg/type.h"
@@ -77,34 +66,17 @@ void log_line(const pp_gen_callbacks* callbacks, const char* fmt, ...) {
 }
 
 struct Options {
-  int64_t start_idx = 0;        // 1-indexed prime rank of first prime to generate
+  int64_t start_idx = 0;        // i-th prime. should be optional 
   int64_t count = -1;
   int64_t chunk_primes = kDefaultChunkPrimes;
   int64_t threads = 0;
-  // Bucket assignment for every parquet file this invocation writes.
-  // The coordinator (planner / rewriter handoff) picks these per
-  // segment; the writer stamps them onto every row.
   int32_t bucket_version = 1;
   int32_t bucket = 0;
-  // prime_rank to stamp on the first prime row. Per spec, the new
-  // staging schema uses 0-indexed rank with rank 0 = p=3 (p=2 is
-  // intentionally absent). The coordinator passes this explicitly via
-  // PRIMEPARTS_PRIME_RANK_START. The default fallback to start_idx is
-  // a stand-alone-run convenience that does NOT match the spec
-  // convention; production callers must set the env var.
   int64_t prime_rank_start = 0;
-  // If true, this invocation opens a brand-new bucket; the writer emits
-  // a boundary JSONL row so the commit step extends funbuns.boundaries
-  // atomically with the data file appends.
   bool bucket_is_new = false;
   bool temp = false;
   fs::path warehouse;
   fs::path manifest;
-  // Catalog target for the end-of-run commit. Non-empty => commit through a
-  // pp-catalogd RestCatalog client at this base URI (e.g. http://127.0.0.1:8181,
-  // no /v1 suffix — the client appends the IRC routes); empty => commit
-  // in-process via MakeLocalCatalog. Both funnel through CommitFiles, so the
-  // snapshot path is identical either way.
   std::string rest_uri;
 };
 
@@ -141,8 +113,6 @@ struct FileGroup {
   int64_t processed_count = 0;
 };
 
-// Single-line stderr progress bar. Uses \r so it overwrites itself;
-// emits nothing when stderr isn't a TTY so pipes/CI logs stay clean.
 class Progress {
  public:
   Progress(int64_t total_groups, int64_t total_primes)
@@ -408,10 +378,6 @@ std::shared_ptr<arrow::Array> dense_int64_range(int64_t start, int64_t length) {
   return int64_array(values.data(), length);
 }
 
-// prime_k[i] is the number of partition rows produced by the C core
-// for prime_p[i]. The decomp_* arrays are filled in prime order with
-// k_i contiguous rows per prime. So the rank column is just each prime's
-// rank repeated k_i times — no scan, no comparison, no edge cases.
 std::shared_ptr<arrow::Array> partitions_rank_array(const pp_batch_result& batch,
                                                     int64_t rank_start_for_batch) {
   std::vector<int64_t> ranks;
@@ -430,8 +396,6 @@ std::shared_ptr<arrow::RecordBatch> make_primes_batch(const pp_batch_result& bat
                                                       int64_t rank_start_for_batch,
                                                       int32_t bucket_version,
                                                       int32_t bucket) {
-  // Column order matches PrimesSchema(): p, k, prime_rank,
-  // p_bucket_version, p_bucket.
   auto schema = arrow::schema({
       arrow::field("p",                arrow::int64()),
       arrow::field("k",                arrow::int32()),
@@ -453,8 +417,6 @@ std::shared_ptr<arrow::RecordBatch> make_partitions_batch(const pp_batch_result&
                                                           int64_t rank_start_for_batch,
                                                           int32_t bucket_version,
                                                           int32_t bucket) {
-  // Column order matches PartitionsSchema(): p, m_k, n_k, q_k,
-  // prime_rank, p_bucket_version, p_bucket.
   auto schema = arrow::schema({
       arrow::field("p",                arrow::int64()),
       arrow::field("m_k",              arrow::int32()),
@@ -476,9 +438,6 @@ std::shared_ptr<arrow::RecordBatch> make_partitions_batch(const pp_batch_result&
        const_int32_array(bucket, rows)});
 }
 
-// One file per group per table: open a BucketParquetWriter with
-// target_rows_per_file=0 (no rolling), push every batch in the group at
-// it, close, return the written files.
 bool write_group_table(const fs::path& output_dir, const std::string& table,
                        const std::shared_ptr<iceberg::Schema>& schema,
                        const std::vector<BatchHolder>& batches,
@@ -488,8 +447,6 @@ bool write_group_table(const fs::path& output_dir, const std::string& table,
                        std::vector<WrittenFile>* out_files,
                        std::string* error) {
   WriterConfig cfg;
-  // Staging dir (outside the warehouse table tree); CommitFiles moves these into
-  // the catalog-chosen location at end-of-run. See StagingDataDir.
   cfg.output_dir = output_dir;
   cfg.schema = schema;
   cfg.table_name = table;
@@ -736,12 +693,6 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
     int64_t next_idx = options.start_idx;
     int64_t end_idx = options.start_idx + options.count;
     int64_t prime_rank_cursor = options.prime_rank_start;
-    // Writers emit to staging dirs outside the warehouse; CommitFiles moves the
-    // files into the catalog-chosen location at end-of-run (the catalog seam),
-    // preserving the path relative to the staging root. Keep the bucket partition
-    // sub-path so files land at <table>/data/p_bucket_version=N/p_bucket=M/ as
-    // before — the client owns its own partition layout, the catalog owns the
-    // table location.
     const fs::path part_sub =
         fs::path("p_bucket_version=" + std::to_string(options.bucket_version)) /
         ("p_bucket=" + std::to_string(options.bucket));
@@ -763,9 +714,6 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
     auto p_schema = PrimesSchema();
     auto d_schema = PartitionsSchema();
 
-    // DataFiles accumulated across all groups for the end-of-run catalog
-    // commit. Each WrittenFile already carries a built iceberg::DataFile;
-    // we FastAppend them in one snapshot per table after the run.
     std::vector<std::shared_ptr<iceberg::DataFile>> primes_data_files;
     std::vector<std::shared_ptr<iceberg::DataFile>> partitions_data_files;
 
@@ -779,14 +727,6 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
     int64_t groups_done = 0;
     progress.update(0, 0);
 
-    // Pipelined write path. The compute pool (materialize_group) and the
-    // Parquet encode/write run concurrently so the pool never stalls on I/O.
-    // The main thread is the producer: it materializes a group, derives its
-    // rank starts / file seqs / boundary, and hands the filled buffer to a
-    // single writer thread that encodes both tables, appends the manifest, and
-    // accumulates the committed DataFiles. A depth-1 job queue bounds resident
-    // memory to at most 3 groups (writing + queued + materializing);
-    // backpressure blocks the producer rather than letting groups pile up.
     struct WriteJob {
       FileGroup group;
       std::vector<int64_t> rank_starts;
@@ -807,9 +747,6 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
     bool writer_failed = false;
     std::string writer_error;
 
-    // The manifest, file-seq counters, byte/file tallies and DataFile vectors
-    // are touched ONLY by this writer thread during the run; the producer reads
-    // them again after join(). No locking needed on them beyond the queue.
     std::thread writer_thread([&]() {
       int64_t w_primes = 0;
       for (;;) {
@@ -887,8 +824,6 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
       }
     });
 
-    // Ensure the writer thread is always signalled and joined, even if the
-    // producer path throws before its explicit join below.
     struct WriterGuard {
       std::thread& t;
       std::mutex& m;
@@ -917,8 +852,6 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
       if (group.last_p > last_p) last_p = group.last_p;
 
       WriteJob job;
-      // Per-batch rank starts: rank of batches[0].prime_p[0] is the cursor;
-      // batch i starts at cursor + sum_prime_count(0..i-1).
       job.rank_starts.assign(group.batches.size(), 0);
       int64_t acc = 0;
       for (size_t i = 0; i < group.batches.size(); ++i) {
@@ -933,8 +866,6 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
         boundary_pending = false;
       }
 
-      // One file per table per group (target_rows_per_file == 0), so seqs are
-      // assigned deterministically here without waiting on the write.
       job.primes_seq = primes_file_seq;
       primes_file_seq += 1;
       if (group.partitions_rows > 0) {
@@ -982,16 +913,7 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
 
     manifest.close();
 
-    // End-of-run commit. --temp is the ephemeral mode (files only, no
-    // catalog publish). Otherwise publish both tables as one FastAppend
-    // snapshot each, partitions BEFORE primes so a resume always sees a
-    // hole-free primes frontier (HANDOFF §5.2 write model). Both commits go
-    // through CommitFiles — over a pp-catalogd RestCatalog client when
-    // --rest-uri is set, else in-process MakeLocalCatalog.
     if (!options.temp) {
-      // REST is the default pathway (via --rest-uri or PRIMEPARTS_REST_URI);
-      // OpenCatalog falls back to the in-process LMDB catalog of record when no
-      // server is configured or reachable. Both modes commit through CommitFiles.
       std::string mode;
       std::shared_ptr<iceberg::Catalog> catalog =
           primeparts::catalog::OpenCatalog(options.warehouse, options.rest_uri,
@@ -1115,10 +1037,6 @@ int pp_gen_run(const pp_gen_options* options,
 }  // extern "C"
 
 #ifndef PRIMEPARTS_GENERATE_NO_MAIN
-// Forward each engine log line to stdout, newline-terminated and flushed, so a
-// pipe consumer (the TUI Generate pane, CI logs) sees per-group progress live.
-// The interactive \r progress bar (Progress) covers the TTY case; this covers
-// the non-TTY case, where that bar stays silent.
 void gen_stdout_log(void* /*user_data*/, const char* line) {
   std::fputs(line, stdout);
   std::fputc('\n', stdout);
@@ -1129,9 +1047,6 @@ int main(int argc, char** argv) {
   Options options;
   if (!parse_args(argc, argv, &options)) return 2;
   pp_gen_result out{};
-  // On a TTY keep the clean self-overwriting progress bar (no log spam); when
-  // stdout is piped, stream the per-group log lines instead so progress is
-  // visible through the pipe.
   pp_gen_callbacks cbs{};
   cbs.on_log = gen_stdout_log;
   const bool stdout_tty = ::isatty(STDOUT_FILENO) != 0;

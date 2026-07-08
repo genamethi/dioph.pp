@@ -25,10 +25,6 @@ int32_t FieldIdByName(const iceberg::Schema& schema, std::string_view name) {
 
 }  // namespace
 
-// All fields required. The staging warehouse is the post-backfill target —
-// prime_rank is materialized either inline by the rewriter or by a separate
-// backfill pass before metadata publish, and downstream readers can rely on it
-// being non-null. Field ids are contiguous.
 std::shared_ptr<iceberg::Schema> PrimesSchema() {
   return std::make_shared<iceberg::Schema>(
       std::vector<iceberg::SchemaField>{
@@ -60,11 +56,6 @@ std::shared_ptr<iceberg::Schema> MdiffSchema(int k, std::string* error) {
     if (error) *error = "MdiffSchema: k must be >= 2";
     return nullptr;
   }
-  // k-agnostic: K hit positions packed into one int64 bitmask, the sole stored
-  // truth. popcount(hit_mask) recovers k; the d-vector, the translation-invariant
-  // shape (hit_mask >> ctz), the anchor phase (m_min mod period), and prime_rank
-  // are all derived on read — not stored. The table is unpartitioned and ordered
-  // by p (sort order is the only on-disk organization).
   return std::make_shared<iceberg::Schema>(
       std::vector<iceberg::SchemaField>{
           iceberg::SchemaField::MakeRequired(1, "p",        iceberg::int64()),
@@ -74,8 +65,6 @@ std::shared_ptr<iceberg::Schema> MdiffSchema(int k, std::string* error) {
 }
 
 std::shared_ptr<iceberg::Schema> PresenceSchema() {
-  // b1..b39 (base-shifted shape) + shift + count. 39 = floor(log2(p_max)); m
-  // ranges 1..39 so a shape spans at most bits 0..38. See schemas.h.
   std::vector<iceberg::SchemaField> fields;
   fields.reserve(41);
   for (int i = 1; i <= 39; ++i) {
