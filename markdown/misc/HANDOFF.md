@@ -9,15 +9,12 @@ stating as much. The point is: Leave the high level stuff to the user.
 
 ---
 
-## Dataset basics
+## Tables
 
-Numbers drift as `generate` extends the census; re-query the live snapshot
-(`SELECT MIN, MAX, COUNT(*)`) rather than trusting these.
-
-- `primeparts.primes`: $\min(p)=3$ (p=2 absent), $\max(p) \approx 6.19\times10^{11}$,
-  $\mathrm{count} \approx 23.7\text{ B}$. No primes skipped between 3 and $\max(p)$.
-- `primeparts.partitions`: $\approx 44.6\text{ B}$ rows; mean $k \approx 1.88$.
-- `primeparts.primes_k0`: $k=0$ primes; flat/unpartitioned, Iceberg format-version
+- `primeparts.primes`: one row per prime, `p`-ordered. $\min(p)=3$ (p=2 absent);
+  no primes skipped between 3 and $\max(p)$.
+- `primeparts.partitions`: the `(m_k, n_k, q_k)` tuples; most edges are `n=1`.
+- `primeparts.primes_k0`: `k=0` primes; flat/unpartitioned, Iceberg format-version
   2, merge-on-read.
 - `primeparts.mdiff_k{K}` row = `(p int64, hit_mask int64)`: `hit_mask` = OR of
   `1<<m` over the prime's hit positions (popcount==K), the **sole stored truth**.

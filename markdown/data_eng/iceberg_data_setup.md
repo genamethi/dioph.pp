@@ -20,17 +20,9 @@ HTTP through `pp-catalogd`; it holds each table's current `metadata_location`
 pointer. Base table data stays as Parquet + `metadata/*.metadata.json` on the
 filesystem.
 
-### Dataset basics
-
-Numbers drift as `generate` extends the census; size memory / cardinality
-estimates by running `SELECT MIN, MAX, COUNT(*)` against the current snapshot.
-
-| Quantity | Value |
-|---|---|
-| `MIN(p)` | 3 (p=2 intentionally absent — see prime_rank semantics) |
-| `MAX(p)` | ≈ 6.19×10¹¹ |
-| `COUNT(*)` of `primes` | ≈ 23.7 B |
-| `partitions` rows | ≈ 44.6 B (mean k ≈ 1.88; ~99.9% are n=1 edges) |
+`MIN(p)` is 3 — p=2 is intentionally absent (see prime_rank semantics). Size
+memory / cardinality estimates by running `SELECT MIN, MAX, COUNT(*)` against the
+current snapshot.
 
 ## Tables
 
@@ -109,12 +101,10 @@ Declared on the table; the writer enforces it (input arrives p-sorted).
 `native/src/writer.cc` + the per-table `delta_columns` passed by the producer:
 
 - `p`, `prime_rank`, `q_k`: `DELTA_BINARY_PACKED + zstd-3`, dictionary off.
-  Monotone (or segment-monotone, for `q_k` under `(p, q_k)` order) → delta near
-  optimal. Measured: `q_k` delta beats dictionary by ~23%.
-- `m_k`, `n_k`: dictionary + zstd-3 (default). Range-constrained, non-monotone;
-  dictionary wins (delta is ~17% worse on `m_k`; `n_k` is ~free either way, mostly
-  `n_k=1`).
-- On disk: `primes` ≈ 1.1 bytes/row, `partitions` ≈ 3.8 bytes/row.
+  Monotone (or segment-monotone, for `q_k` under `(p, q_k)` order) → delta beats
+  dictionary.
+- `m_k`, `n_k`: dictionary + zstd-3 (default). Range-constrained and non-monotone,
+  so dictionary wins; `n_k` is near-free (mostly `n_k=1`).
 - Row groups: ~4 per file.
 
 ## Bucketing
