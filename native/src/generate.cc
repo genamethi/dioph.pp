@@ -1,3 +1,5 @@
+#include "primeparts/aligned_writer.h"
+#include "primeparts/catalog/pp_commit.h"
 #include "primeparts/catalog/pp_iceberg_rest.h"
 #include "primeparts/core.h"
 #include "primeparts/generate.h"
@@ -18,12 +20,10 @@
 #include <cstring>
 #include <ctime>
 #include <filesystem>
-#include <fstream>
 #include <getopt.h>
 #include <iostream>
 #include <memory>
 #include <mutex>
-#include <sstream>
 #include <string>
 #include <string_view>
 #include <sys/select.h>
@@ -34,17 +34,19 @@
 #include <vector>
 
 #include "iceberg/schema.h"
-#include "iceberg/schema_field.h"
-#include "iceberg/type.h"
 
 namespace fs = std::filesystem;
 
-using primeparts::BucketParquetWriter;
-using primeparts::NextFileSeq;
+using primeparts::AlignedBucketWriter;
+using primeparts::AtomKey;
+using primeparts::BoundTable;
 using primeparts::BucketPartitionSpec;
+using primeparts::CommitPlan;
+using primeparts::LoadAlignedResume;
 using primeparts::PartitionsSchema;
 using primeparts::PrimesSchema;
-using primeparts::WriterConfig;
+using primeparts::ResumeState;
+using primeparts::ShapePolicy;
 using primeparts::WrittenFile;
 
 namespace {
@@ -66,17 +68,13 @@ void log_line(const pp_gen_callbacks* callbacks, const char* fmt, ...) {
 }
 
 struct Options {
-  int64_t start_idx = 0;        // i-th prime. should be optional 
+  int64_t start_idx = 0;
   int64_t count = -1;
   int64_t chunk_primes = kDefaultChunkPrimes;
   int64_t threads = 0;
-  int32_t bucket_version = 1;
-  int32_t bucket = 0;
   int64_t prime_rank_start = 0;
-  bool bucket_is_new = false;
   bool temp = false;
   fs::path warehouse;
-  fs::path manifest;
   std::string rest_uri;
 };
 
@@ -229,35 +227,23 @@ void usage(FILE* stream) {
       stream,
       "usage: primeparts-generate --start-idx N --count N [options]\n"
       "\n"
-      "Native frontier writer for funbuns.{primes,partitions} under the\n"
-      "new bucket-partitioned layout. Writes one parquet file per\n"
-      "table per file-group under a fixed (bucket_version, bucket)\n"
-      "assignment; emits a JSONL manifest the commit step consumes.\n"
+      "Streams primes+partitions to the pp REST client, which shapes byte-\n"
+      "driven p-aligned buckets (primes >= 1 GiB) and commits both tables in\n"
+      "one atomic transaction.\n"
       "\n"
       "Options:\n"
-      "  --temp                    Create $FUNBUNS_DATA_DIR/tmp/iceberg_temp_<ts>/warehouse\n"
-      "                            (FUNBUNS_DATA_DIR default: /media/extssd/research/dioph.pp/data)\n"
-      "  --rest-uri URL            Commit through a pp-catalogd RestCatalog\n"
-      "                            client at URL, a bare base (e.g.\n"
-      "                            http://127.0.0.1:8181, no /v1 suffix);\n"
-      "                            default commits in-process\n"
+      "  --temp                    Write to $FUNBUNS_DATA_DIR/tmp/iceberg_temp_<ts>/\n"
+      "                            warehouse and skip the commit (files-only)\n"
+      "  --rest-uri URL            Commit through pp-catalogd at URL (bare base,\n"
+      "                            e.g. http://127.0.0.1:8181); default in-process\n"
       "  --warehouse PATH          Warehouse root to write under\n"
-      "  --manifest PATH           JSONL file list to write\n"
       "  --chunk-primes N          Materialization chunk size (default: 500000)\n"
       "  --threads N               Materialization threads (default: hw)\n"
       "  --help\n"
       "\n"
-      "Environment (coordinator-owned):\n"
-      "  PRIMEPARTS_BUCKET_VERSION  default: 1\n"
-      "  PRIMEPARTS_BUCKET          default: 0\n"
-      "  PRIMEPARTS_PRIME_RANK_START prime_rank to stamp on the first prime\n"
-      "                              row (spec convention: rank 0 = p=3,\n"
-      "                              p=2 absent). Default: --start-idx (the\n"
-      "                              FLINT 1-indexed rank), which only matches\n"
-      "                              spec when --start-idx is set so that the\n"
-      "                              first emitted prime is at the desired\n"
-      "                              spec-rank.\n"
-      "  PRIMEPARTS_BUCKET_IS_NEW   if set/1, emit a boundary row in the manifest\n");
+      "Environment:\n"
+      "  PRIMEPARTS_PRIME_RANK_START prime_rank to stamp on the first prime row.\n"
+      "                              Default: --start-idx.\n");
 }
 
 bool parse_i64(const char* text, int64_t* out) {
@@ -269,14 +255,7 @@ bool parse_i64(const char* text, int64_t* out) {
   return true;
 }
 
-bool parse_i32(const char* text, int32_t* out) {
-  int64_t value = 0;
-  if (!parse_i64(text, &value) || value < INT32_MIN || value > INT32_MAX) return false;
-  *out = static_cast<int32_t>(value);
-  return true;
-}
-
-bool resolve_bucket_state(Options* options) {
+bool resolve_rank_start(Options* options) {
   const char* rank_env = std::getenv("PRIMEPARTS_PRIME_RANK_START");
   if (rank_env != nullptr && rank_env[0] != '\0') {
     if (!parse_i64(rank_env, &options->prime_rank_start) ||
@@ -287,27 +266,6 @@ bool resolve_bucket_state(Options* options) {
   } else {
     options->prime_rank_start = options->start_idx;
   }
-
-  const char* ver_env = std::getenv("PRIMEPARTS_BUCKET_VERSION");
-  if (ver_env != nullptr && ver_env[0] != '\0') {
-    if (!parse_i32(ver_env, &options->bucket_version) ||
-        options->bucket_version <= 0) {
-      std::fprintf(stderr, "invalid PRIMEPARTS_BUCKET_VERSION: %s\n", ver_env);
-      return false;
-    }
-  }
-
-  const char* bkt_env = std::getenv("PRIMEPARTS_BUCKET");
-  if (bkt_env != nullptr && bkt_env[0] != '\0') {
-    if (!parse_i32(bkt_env, &options->bucket) || options->bucket < 0) {
-      std::fprintf(stderr, "invalid PRIMEPARTS_BUCKET: %s\n", bkt_env);
-      return false;
-    }
-  }
-
-  const char* new_env = std::getenv("PRIMEPARTS_BUCKET_IS_NEW");
-  options->bucket_is_new =
-      new_env != nullptr && new_env[0] != '\0' && new_env[0] != '0';
   return true;
 }
 
@@ -345,6 +303,8 @@ std::string json_escape(std::string_view text) {
   return out;
 }
 
+// --- producer: pp_batch_result -> arrow RecordBatch (this producer's columns) -
+
 std::shared_ptr<arrow::Array> int64_array(const int64_t* values, int64_t length) {
   arrow::Int64Builder builder;
   if (length > 0) {
@@ -365,11 +325,6 @@ std::shared_ptr<arrow::Array> int32_array(const int32_t* values, int64_t length)
   return out;
 }
 
-std::shared_ptr<arrow::Array> const_int32_array(int32_t value, int64_t length) {
-  std::vector<int32_t> values(static_cast<size_t>(length), value);
-  return int32_array(values.data(), length);
-}
-
 std::shared_ptr<arrow::Array> dense_int64_range(int64_t start, int64_t length) {
   std::vector<int64_t> values(static_cast<size_t>(length));
   for (int64_t i = 0; i < length; ++i) {
@@ -379,52 +334,43 @@ std::shared_ptr<arrow::Array> dense_int64_range(int64_t start, int64_t length) {
 }
 
 std::shared_ptr<arrow::Array> partitions_rank_array(const pp_batch_result& batch,
-                                                    int64_t rank_start_for_batch) {
+                                                    int64_t rank_start) {
   std::vector<int64_t> ranks;
   ranks.reserve(batch.decomp_count);
   for (size_t i = 0; i < batch.prime_count; ++i) {
-    int64_t rank_i = rank_start_for_batch + static_cast<int64_t>(i);
+    int64_t rank_i = rank_start + static_cast<int64_t>(i);
     int32_t kk = batch.prime_k[i];
-    for (int32_t j = 0; j < kk; ++j) {
-      ranks.push_back(rank_i);
-    }
+    for (int32_t j = 0; j < kk; ++j) ranks.push_back(rank_i);
   }
   return int64_array(ranks.data(), static_cast<int64_t>(batch.decomp_count));
 }
 
+// Physical primes batch: (p, k, prime_rank). Bucket columns live in the
+// manifest partition tuple and are stripped by the writer.
 std::shared_ptr<arrow::RecordBatch> make_primes_batch(const pp_batch_result& batch,
-                                                      int64_t rank_start_for_batch,
-                                                      int32_t bucket_version,
-                                                      int32_t bucket) {
+                                                      int64_t rank_start) {
   auto schema = arrow::schema({
-      arrow::field("p",                arrow::int64()),
-      arrow::field("k",                arrow::int32()),
-      arrow::field("prime_rank",       arrow::int64()),
-      arrow::field("p_bucket_version", arrow::int32()),
-      arrow::field("p_bucket",         arrow::int32()),
+      arrow::field("p",          arrow::int64()),
+      arrow::field("k",          arrow::int32()),
+      arrow::field("prime_rank", arrow::int64()),
   });
   int64_t rows = static_cast<int64_t>(batch.prime_count);
   return arrow::RecordBatch::Make(
       schema, rows,
       {int64_array(batch.prime_p, rows),
        int32_array(batch.prime_k, rows),
-       dense_int64_range(rank_start_for_batch, rows),
-       const_int32_array(bucket_version, rows),
-       const_int32_array(bucket, rows)});
+       dense_int64_range(rank_start, rows)});
 }
 
+// Physical partitions batch: (p, m_k, n_k, q_k, prime_rank).
 std::shared_ptr<arrow::RecordBatch> make_partitions_batch(const pp_batch_result& batch,
-                                                          int64_t rank_start_for_batch,
-                                                          int32_t bucket_version,
-                                                          int32_t bucket) {
+                                                          int64_t rank_start) {
   auto schema = arrow::schema({
-      arrow::field("p",                arrow::int64()),
-      arrow::field("m_k",              arrow::int32()),
-      arrow::field("n_k",              arrow::int32()),
-      arrow::field("q_k",              arrow::int64()),
-      arrow::field("prime_rank",       arrow::int64()),
-      arrow::field("p_bucket_version", arrow::int32()),
-      arrow::field("p_bucket",         arrow::int32()),
+      arrow::field("p",          arrow::int64()),
+      arrow::field("m_k",        arrow::int32()),
+      arrow::field("n_k",        arrow::int32()),
+      arrow::field("q_k",        arrow::int64()),
+      arrow::field("prime_rank", arrow::int64()),
   });
   int64_t rows = static_cast<int64_t>(batch.decomp_count);
   return arrow::RecordBatch::Make(
@@ -433,63 +379,7 @@ std::shared_ptr<arrow::RecordBatch> make_partitions_batch(const pp_batch_result&
        int32_array(batch.decomp_m, rows),
        int32_array(batch.decomp_n, rows),
        int64_array(batch.decomp_q, rows),
-       partitions_rank_array(batch, rank_start_for_batch),
-       const_int32_array(bucket_version, rows),
-       const_int32_array(bucket, rows)});
-}
-
-bool write_group_table(const fs::path& output_dir, const std::string& table,
-                       const std::shared_ptr<iceberg::Schema>& schema,
-                       const std::vector<BatchHolder>& batches,
-                       const std::vector<int64_t>& rank_starts,
-                       int32_t bucket_version, int32_t bucket,
-                       int32_t starting_file_seq, bool partitions,
-                       std::vector<WrittenFile>* out_files,
-                       std::string* error) {
-  WriterConfig cfg;
-  cfg.output_dir = output_dir;
-  cfg.schema = schema;
-  cfg.table_name = table;
-  cfg.filename_prefix = table;
-  cfg.delta_columns = {"p", "prime_rank", "q_k"};
-  cfg.bucket_version = bucket_version;
-  cfg.bucket = bucket;
-  cfg.starting_file_seq = starting_file_seq;
-  cfg.target_rows_per_file = 0;
-
-  auto writer = BucketParquetWriter::Make(cfg, error);
-  if (!writer) return false;
-
-  for (size_t i = 0; i < batches.size(); ++i) {
-    const auto& holder = batches[i];
-    int64_t rank_start = rank_starts[i];
-    std::shared_ptr<arrow::RecordBatch> batch;
-    if (partitions) {
-      if (holder.batch.decomp_count == 0) continue;
-      batch = make_partitions_batch(holder.batch, rank_start, bucket_version, bucket);
-    } else {
-      if (holder.batch.prime_count == 0) continue;
-      batch = make_primes_batch(holder.batch, rank_start, bucket_version, bucket);
-    }
-    if (!batch) {
-      *error = "failed to build record batch";
-      return false;
-    }
-    BucketParquetWriter::BatchStats st{};
-    if (partitions) {
-      st.p_min = holder.batch.decomp_p[0];
-      st.p_max = holder.batch.decomp_p[holder.batch.decomp_count - 1];
-    } else {
-      st.p_min = holder.batch.prime_p[0];
-      st.p_max = holder.batch.prime_p[holder.batch.prime_count - 1];
-    }
-    st.rank_min = rank_start;
-    st.rank_max = rank_start +
-                  static_cast<int64_t>(holder.batch.prime_count) - 1;
-    if (!writer->Write(*batch, st, error)) return false;
-  }
-
-  return writer->Close(out_files, error);
+       partitions_rank_array(batch, rank_start)});
 }
 
 bool materialize_group(int64_t* next_idx, int64_t end_idx, const Options& options,
@@ -566,29 +456,6 @@ bool materialize_group(int64_t* next_idx, int64_t end_idx, const Options& option
   return true;
 }
 
-void append_manifest_file(std::ofstream& out, const WrittenFile& f) {
-  out << "{\"table\":\"" << json_escape(f.table) << "\","
-      << "\"path\":\"" << json_escape(fs::absolute(f.path).string()) << "\","
-      << "\"rows\":" << f.rows << ","
-      << "\"p_min\":" << f.p_min << ","
-      << "\"p_max\":" << f.p_max << ","
-      << "\"rank_min\":" << f.rank_min << ","
-      << "\"rank_max\":" << f.rank_max << ","
-      << "\"p_bucket_version\":" << f.bucket_version << ","
-      << "\"p_bucket\":" << f.bucket << ","
-      << "\"bytes\":" << f.bytes << "}\n";
-}
-
-void append_manifest_boundary(std::ofstream& out,
-                              int32_t bucket_version, int32_t bucket,
-                              int64_t p_min, int64_t rank_min) {
-  out << "{\"boundary\":true,"
-      << "\"p_bucket_version\":" << bucket_version << ","
-      << "\"p_bucket\":" << bucket << ","
-      << "\"p_min\":" << p_min << ","
-      << "\"rank_min\":" << rank_min << "}\n";
-}
-
 bool parse_args(int argc, char** argv, Options* options) {
   static const option long_options[] = {
       {"start-idx", required_argument, nullptr, 1000},
@@ -596,14 +463,13 @@ bool parse_args(int argc, char** argv, Options* options) {
       {"chunk-primes", required_argument, nullptr, 'c'},
       {"threads", required_argument, nullptr, 1003},
       {"warehouse", required_argument, nullptr, 'w'},
-      {"manifest", required_argument, nullptr, 'm'},
       {"temp", no_argument, nullptr, 1004},
       {"rest-uri", required_argument, nullptr, 1005},
       {"help", no_argument, nullptr, 'h'},
       {nullptr, 0, nullptr, 0},
   };
   int opt;
-  while ((opt = getopt_long(argc, argv, "n:c:w:m:h", long_options, nullptr)) != -1) {
+  while ((opt = getopt_long(argc, argv, "n:c:w:h", long_options, nullptr)) != -1) {
     switch (opt) {
       case 1000:
         if (!parse_i64(optarg, &options->start_idx)) {
@@ -630,7 +496,6 @@ bool parse_args(int argc, char** argv, Options* options) {
         }
         break;
       case 'w': options->warehouse = optarg; break;
-      case 'm': options->manifest = optarg; break;
       case 1004: options->temp = true; break;
       case 1005: options->rest_uri = optarg; break;
       case 'h': usage(stdout); std::exit(0);
@@ -647,19 +512,51 @@ bool parse_args(int argc, char** argv, Options* options) {
       std::fprintf(stderr, "either --warehouse or --temp is required\n");
       return false;
     }
-    fs::path temp_root = default_temp_root();
-    options->warehouse = temp_root / "warehouse";
-    if (options->manifest.empty()) {
-      options->manifest = temp_root / "files.jsonl";
-    }
-  } else if (options->manifest.empty()) {
-    options->manifest = options->warehouse / "files.jsonl";
+    options->warehouse = default_temp_root() / "warehouse";
   }
   if (options->threads == 0) {
     unsigned hw = std::thread::hardware_concurrency();
     options->threads = hw == 0 ? 1 : static_cast<int64_t>(hw);
   }
-  return resolve_bucket_state(options);
+  return resolve_rank_start(options);
+}
+
+// Turn a finished CommitPlan into the atomic commit's per-table specs and hand
+// them to the client's commit path (in-process store, or daemon over rest_uri).
+bool commit_plan(const Options& options, const CommitPlan& plan,
+                 const std::shared_ptr<iceberg::Schema>& p_schema,
+                 const std::shared_ptr<iceberg::Schema>& d_schema,
+                 const std::shared_ptr<iceberg::PartitionSpec>& p_spec,
+                 const std::shared_ptr<iceberg::PartitionSpec>& d_spec,
+                 std::string* error) {
+  std::vector<primeparts::catalog::TableCommitSpec> specs;
+  for (const auto& tf : plan.tables) {
+    primeparts::catalog::TableCommitSpec spec;
+    spec.table_name = tf.name;
+    spec.schema = tf.name == "primes" ? p_schema : d_schema;
+    spec.spec = tf.name == "primes" ? p_spec : d_spec;
+    for (const auto& wf : tf.files) {
+      if (wf.data_file) spec.files.push_back(wf.data_file);
+    }
+    specs.push_back(std::move(spec));
+  }
+
+  std::shared_ptr<iceberg::Catalog> catalog;
+  std::shared_ptr<iceberg::sql::CatalogStore> store;
+  if (!options.rest_uri.empty()) {
+    std::string mode;
+    catalog = primeparts::catalog::OpenCatalog(options.warehouse,
+                                               options.rest_uri, &mode, error);
+    if (!catalog) return false;
+  } else {
+    auto local = primeparts::catalog::MakeLocalCatalogWithStore(options.warehouse,
+                                                                error);
+    if (!local.catalog) return false;
+    catalog = local.catalog;
+    store = local.store;
+  }
+  return primeparts::catalog::CommitFilesAtomic(catalog, store, options.rest_uri,
+                                                options.warehouse, specs, error);
 }
 
 }  // namespace
@@ -681,10 +578,37 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
   auto run_start = std::chrono::steady_clock::now();
   try {
     fs::create_directories(options.warehouse);
-    fs::create_directories(options.manifest.parent_path());
-    std::ofstream manifest(options.manifest, std::ios::out | std::ios::trunc);
-    if (!manifest) {
-      set_last_error("failed to open manifest: " + options.manifest.string());
+
+    auto p_schema = PrimesSchema();
+    auto d_schema = PartitionsSchema();
+    auto p_spec = BucketPartitionSpec(*p_schema, &error);
+    auto d_spec = BucketPartitionSpec(*d_schema, &error);
+    if (!p_spec || !d_spec) {
+      set_last_error("build partition spec: " + error);
+      log_line(callbacks, "%s", g_last_error.c_str());
+      pp_shutdown();
+      return 1;
+    }
+
+    ShapePolicy policy;
+    ResumeState resume;
+    if (!LoadAlignedResume(options.warehouse, {"primes", "partitions"}, "primes",
+                           policy.bucket_version, &resume, &error)) {
+      set_last_error("resume: " + error);
+      log_line(callbacks, "%s", g_last_error.c_str());
+      pp_shutdown();
+      return 1;
+    }
+
+    std::vector<BoundTable> tables;
+    tables.push_back(BoundTable{"primes", p_schema, p_spec,
+                                {"p", "prime_rank"}, /*reference=*/true, nullptr});
+    tables.push_back(BoundTable{"partitions", d_schema, d_spec,
+                                {"p", "prime_rank", "q_k"}, /*reference=*/false, nullptr});
+    auto writer = AlignedBucketWriter::Make(options.warehouse, std::move(tables),
+                                            AtomKey{"p"}, policy, resume, &error);
+    if (!writer) {
+      set_last_error("open writer: " + error);
       log_line(callbacks, "%s", g_last_error.c_str());
       pp_shutdown();
       return 1;
@@ -693,35 +617,16 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
     int64_t next_idx = options.start_idx;
     int64_t end_idx = options.start_idx + options.count;
     int64_t prime_rank_cursor = options.prime_rank_start;
-    const fs::path part_sub =
-        fs::path("p_bucket_version=" + std::to_string(options.bucket_version)) /
-        ("p_bucket=" + std::to_string(options.bucket));
-    const fs::path primes_staging =
-        primeparts::catalog::StagingDataDir(options.warehouse, "primes") / part_sub;
-    const fs::path partitions_staging =
-        primeparts::catalog::StagingDataDir(options.warehouse, "partitions") / part_sub;
-    int32_t primes_file_seq = NextFileSeq(primes_staging, "primes");
-    int32_t partitions_file_seq = NextFileSeq(partitions_staging, "partitions");
     int64_t total_primes = 0;
     int64_t total_partitions = 0;
-    int64_t files_written = 0;
-    int64_t bytes_written = 0;
     int64_t first_p = 0;
     int64_t last_p = 0;
     bool stop_requested = false;
-    bool boundary_pending = options.bucket_is_new;
-
-    auto p_schema = PrimesSchema();
-    auto d_schema = PartitionsSchema();
-
-    std::vector<std::shared_ptr<iceberg::DataFile>> primes_data_files;
-    std::vector<std::shared_ptr<iceberg::DataFile>> partitions_data_files;
 
     int64_t total_chunks =
         (options.count + options.chunk_primes - 1) / options.chunk_primes;
     int64_t group_width = options.threads > 0 ? options.threads : 1;
-    int64_t total_groups =
-        (total_chunks + group_width - 1) / group_width;
+    int64_t total_groups = (total_chunks + group_width - 1) / group_width;
     Progress progress(total_groups, options.count);
     StopMonitor stop_monitor;
     int64_t groups_done = 0;
@@ -730,12 +635,6 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
     struct WriteJob {
       FileGroup group;
       std::vector<int64_t> rank_starts;
-      int64_t group_rank_min = 0;
-      bool emit_boundary = false;
-      int64_t boundary_p_min = 0;
-      int32_t primes_seq = 0;
-      int32_t partitions_seq = 0;
-      bool has_partitions = false;
     };
 
     std::mutex q_mu;
@@ -754,73 +653,36 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
         {
           std::unique_lock<std::mutex> lk(q_mu);
           q_can_pop.wait(lk, [&]() { return !jobs.empty() || producer_done; });
-          if (jobs.empty()) return;  // producer_done and drained
+          if (jobs.empty()) return;
           job = std::move(jobs.front());
           jobs.pop_front();
           q_can_push.notify_one();
         }
 
-        std::string werr;
-        if (job.emit_boundary) {
-          append_manifest_boundary(manifest, options.bucket_version,
-                                   options.bucket, job.boundary_p_min,
-                                   job.group_rank_min);
-        }
-
-        std::vector<WrittenFile> primes_files;
-        if (!write_group_table(primes_staging, "primes", p_schema,
-                               job.group.batches, job.rank_starts,
-                               options.bucket_version, options.bucket,
-                               job.primes_seq, /*partitions=*/false,
-                               &primes_files, &werr)) {
-          std::lock_guard<std::mutex> guard(q_mu);
-          writer_failed = true;
-          writer_error = "write primes failed: " + werr;
-          q_can_push.notify_one();
-          return;
-        }
-        for (const auto& wf : primes_files) {
-          append_manifest_file(manifest, wf);
-          files_written++;
-          bytes_written += wf.bytes;
-          if (wf.data_file) primes_data_files.push_back(wf.data_file);
-        }
-
-        if (job.has_partitions) {
-          std::vector<WrittenFile> partitions_files;
-          if (!write_group_table(partitions_staging, "partitions", d_schema,
-                                 job.group.batches, job.rank_starts,
-                                 options.bucket_version, options.bucket,
-                                 job.partitions_seq, /*partitions=*/true,
-                                 &partitions_files, &werr)) {
+        for (size_t i = 0; i < job.group.batches.size(); ++i) {
+          const auto& holder = job.group.batches[i];
+          if (holder.batch.prime_count == 0) continue;
+          int64_t rank = job.rank_starts[i];
+          auto pb = make_primes_batch(holder.batch, rank);
+          auto db = make_partitions_batch(holder.batch, rank);
+          if (!pb || !db) {
             std::lock_guard<std::mutex> guard(q_mu);
             writer_failed = true;
-            writer_error = "write partitions failed: " + werr;
+            writer_error = "build record batch failed";
             q_can_push.notify_one();
             return;
           }
-          for (const auto& wf : partitions_files) {
-            append_manifest_file(manifest, wf);
-            files_written++;
-            bytes_written += wf.bytes;
-            if (wf.data_file) partitions_data_files.push_back(wf.data_file);
+          std::string werr;
+          if (!writer->Append({pb, db}, &werr)) {
+            std::lock_guard<std::mutex> guard(q_mu);
+            writer_failed = true;
+            writer_error = "append failed: " + werr;
+            q_can_push.notify_one();
+            return;
           }
+          w_primes += static_cast<int64_t>(holder.batch.prime_count);
         }
-
-        w_primes += job.group.prime_rows;
-        log_line(callbacks,
-                 "group written | primes=%" PRId64 " | files=%" PRId64,
-                 w_primes, files_written);
-
-        manifest.flush();
-        if (!manifest) {
-          std::lock_guard<std::mutex> guard(q_mu);
-          writer_failed = true;
-          writer_error =
-              "failed to flush manifest: " + options.manifest.string();
-          q_can_push.notify_one();
-          return;
-        }
+        log_line(callbacks, "group written | primes=%" PRId64, w_primes);
       }
     });
 
@@ -857,21 +719,6 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
       for (size_t i = 0; i < group.batches.size(); ++i) {
         job.rank_starts[i] = prime_rank_cursor + acc;
         acc += static_cast<int64_t>(group.batches[i].batch.prime_count);
-      }
-      job.group_rank_min = prime_rank_cursor;
-
-      if (boundary_pending && group.prime_rows > 0) {
-        job.emit_boundary = true;
-        job.boundary_p_min = group.first_p;
-        boundary_pending = false;
-      }
-
-      job.primes_seq = primes_file_seq;
-      primes_file_seq += 1;
-      if (group.partitions_rows > 0) {
-        job.has_partitions = true;
-        job.partitions_seq = partitions_file_seq;
-        partitions_file_seq += 1;
       }
 
       total_primes += group.prime_rows;
@@ -911,49 +758,32 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
     }
     progress.finish();
 
-    manifest.close();
+    CommitPlan plan;
+    if (!writer->Finish(&plan, &error)) {
+      set_last_error("finish writer: " + error);
+      log_line(callbacks, "%s", g_last_error.c_str());
+      pp_shutdown();
+      return 1;
+    }
+
+    int64_t files_written = 0;
+    int64_t bytes_written = 0;
+    for (const auto& tf : plan.tables) {
+      for (const auto& wf : tf.files) {
+        files_written++;
+        bytes_written += wf.bytes;
+      }
+    }
 
     if (!options.temp) {
-      std::string mode;
-      std::shared_ptr<iceberg::Catalog> catalog =
-          primeparts::catalog::OpenCatalog(options.warehouse, options.rest_uri,
-                                           &mode, &error);
-      if (!catalog) {
-        set_last_error("commit: open catalog: " + error);
+      if (!commit_plan(options, plan, p_schema, d_schema, p_spec, d_spec, &error)) {
+        set_last_error("commit: " + error);
         log_line(callbacks, "%s", g_last_error.c_str());
         pp_shutdown();
         return 1;
       }
-      auto p_spec = BucketPartitionSpec(*p_schema, &error);
-      auto d_spec = BucketPartitionSpec(*d_schema, &error);
-      if (!p_spec || !d_spec) {
-        set_last_error("commit: build partition spec: " + error);
-        log_line(callbacks, "%s", g_last_error.c_str());
-        pp_shutdown();
-        return 1;
-      }
-      std::string meta_loc;
-      if (!partitions_data_files.empty() &&
-          !primeparts::catalog::CommitFiles(
-              catalog, options.warehouse, "partitions", d_schema, d_spec,
-              partitions_data_files, &meta_loc, &error)) {
-        set_last_error("commit partitions: " + error);
-        log_line(callbacks, "%s", g_last_error.c_str());
-        pp_shutdown();
-        return 1;
-      }
-      if (!primeparts::catalog::CommitFiles(
-              catalog, options.warehouse, "primes", p_schema, p_spec,
-              primes_data_files, &meta_loc, &error)) {
-        set_last_error("commit primes: " + error);
-        log_line(callbacks, "%s", g_last_error.c_str());
-        pp_shutdown();
-        return 1;
-      }
-      log_line(callbacks,
-               "committed | partitions_files=%zu | primes_files=%zu | primes=%s",
-               partitions_data_files.size(), primes_data_files.size(),
-               meta_loc.c_str());
+      log_line(callbacks, "committed | files=%" PRId64 " | primes=%" PRId64,
+               files_written, total_primes);
     }
 
     auto run_end = std::chrono::steady_clock::now();
@@ -1000,15 +830,11 @@ int pp_gen_run(const pp_gen_options* options,
   internal.count = options->count;
   internal.chunk_primes = options->chunk_primes > 0 ? options->chunk_primes : kDefaultChunkPrimes;
   internal.threads = options->threads;
-  internal.bucket_version = options->bucket_version > 0 ? options->bucket_version : 1;
-  internal.bucket = options->bucket;
   internal.prime_rank_start = options->prime_rank_start > 0
-                                   ? options->prime_rank_start
-                                   : options->start_idx;
-  internal.bucket_is_new = options->bucket_is_new != 0;
+                                  ? options->prime_rank_start
+                                  : options->start_idx;
   internal.temp = options->temp != 0;
   if (options->warehouse) internal.warehouse = options->warehouse;
-  if (options->manifest) internal.manifest = options->manifest;
   if (options->rest_uri) internal.rest_uri = options->rest_uri;
   if (internal.start_idx <= 0 || internal.count < 0 || internal.chunk_primes <= 0 || internal.threads < 0) {
     set_last_error("invalid pp_gen_options values");
@@ -1019,13 +845,7 @@ int pp_gen_run(const pp_gen_options* options,
       set_last_error("either warehouse or temp mode is required");
       return 1;
     }
-    fs::path temp_root = default_temp_root();
-    internal.warehouse = temp_root / "warehouse";
-    if (internal.manifest.empty()) {
-      internal.manifest = temp_root / "files.jsonl";
-    }
-  } else if (internal.manifest.empty()) {
-    internal.manifest = internal.warehouse / "files.jsonl";
+    internal.warehouse = default_temp_root() / "warehouse";
   }
   if (internal.threads == 0) {
     unsigned hw = std::thread::hardware_concurrency();
@@ -1057,8 +877,6 @@ int main(int argc, char** argv) {
   }
   std::cout << "{"
             << "\"warehouse\":\"" << json_escape(fs::absolute(options.warehouse).string())
-            << "\","
-            << "\"manifest\":\"" << json_escape(fs::absolute(options.manifest).string())
             << "\","
             << "\"start_idx\":" << out.start_idx << ","
             << "\"count\":" << out.count << ","

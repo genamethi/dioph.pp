@@ -50,6 +50,9 @@ struct WrittenFile {
   int64_t rank_min = 0;
   int64_t rank_max = 0;
   int64_t bytes = 0;
+  // Byte offset of each row group's start, in file order. Populated only when
+  // the caller drove explicit CutRowGroup() cuts; empty for auto-cut files.
+  std::vector<int64_t> split_offsets;
   std::shared_ptr<iceberg::DataFile> data_file;
 };
 
@@ -170,6 +173,19 @@ class BucketParquetWriter {
   // false and sets `*error` on parquet error.
   bool Write(const arrow::RecordBatch& batch, BatchStats stats,
              std::string* error);
+
+  // Cut the current row group: record its start offset into the file's
+  // split_offsets, flush it, and begin a new buffered row group. Sets
+  // *flushed_bytes to the closed row group's on-disk size (calibration input).
+  // Requires an open file with at least one written batch. This is the snap
+  // primitive the AlignedBucketWriter facade drives for p-aligned row groups;
+  // callers that rely on max_row_group_rows auto-cutting never call it.
+  bool CutRowGroup(int64_t* flushed_bytes, std::string* error);
+
+  // Close the current file (if any) so the next Write() opens a fresh one.
+  // No-op when no file is open. When a file was closed and closed_file_bytes is
+  // non-null, sets it to that file's on-disk byte size (bucket accounting).
+  bool RollFile(std::string* error, int64_t* closed_file_bytes = nullptr);
 
   // Close the current file (if any). Returns the WrittenFile records
   // for every file produced over the writer's lifetime. After Close()

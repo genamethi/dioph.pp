@@ -89,7 +89,6 @@ int RunRegister(const Args& a) {
   const std::vector<Reg> tables = {
       {"primes", "primeparts/primes/metadata"},
       {"partitions", "primeparts/partitions/metadata"},
-      {"boundaries", "primeparts/boundaries/metadata"},
       // Derived tables under primeparts/ (created through the catalog seam, so
       // normally already registered; listed here so --register is a complete
       // re-registration manifest after a catalog rebuild). Missing ones skip.

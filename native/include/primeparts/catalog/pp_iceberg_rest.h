@@ -21,6 +21,10 @@
 #include "iceberg/table_identifier.h"
 #include "iceberg/type_fwd.h"
 
+namespace iceberg::sql {
+class CatalogStore;
+}
+
 namespace primeparts::catalog {
 
 namespace fs = std::filesystem;
@@ -73,17 +77,30 @@ std::shared_ptr<iceberg::Catalog> MakeCatalog(const RestOptions& opts,
                                               std::string* mode,
                                               std::string* error);
 
+/// The catalog of record plus the LMDB store instance behind it. The store is
+/// the SAME shared instance the SqlCatalog uses, so `store->RunInTransaction`
+/// wraps the write txn that the catalog's `UpdateTable` calls join — the basis
+/// for atomic multi-table commit through catalogd.
+struct LocalCatalog {
+  std::shared_ptr<iceberg::Catalog> catalog;
+  std::shared_ptr<iceberg::sql::CatalogStore> store;
+};
+
 /// Build the local catalog of record: an in-process `iceberg::sql::SqlCatalog`
-/// backed by an LMDB `CatalogStore` at `<warehouse>/catalog.lmdb`. This is the
-/// ground-up replacement for the (removed) HMS REST servlet and the ephemeral
-/// InMemoryCatalog — persistent, single-writer, IRC-spec-compatible. Registers
-/// arrow/avro/parquet factories. Returns nullptr + `*error` on failure.
+/// backed by an LMDB `CatalogStore` at `<warehouse>/catalog.lmdb`. Registers
+/// arrow/avro/parquet factories. `.catalog` is null + `*error` set on failure.
+LocalCatalog MakeLocalCatalogWithStore(const fs::path& warehouse,
+                                       std::string* error);
+
+/// Convenience: `MakeLocalCatalogWithStore(...).catalog` for callers that don't
+/// need the store handle.
 std::shared_ptr<iceberg::Catalog> MakeLocalCatalog(const fs::path& warehouse,
                                                    std::string* error);
 
-/// Unified catalog entry point — REST is the default pathway, the in-process LMDB
-/// catalog of record is the transparent fallback. This is the single seam every
-/// tool should use to obtain a catalog (instead of choosing MakeCatalog vs
+/// Unified catalog entry point — REST (catalogd) is the default pathway; the
+/// in-process LMDB catalog of record is the same engine run in-process (a mirror
+/// of the daemon), used when the daemon is unreachable. This is the single seam
+/// every tool should use to obtain a catalog (instead of choosing MakeCatalog vs
 /// MakeLocalCatalog itself).
 ///
 /// URI resolution: `rest_uri` if non-empty, else `PRIMEPARTS_REST_URI`, else the
@@ -151,6 +168,25 @@ bool PublishTable(const std::shared_ptr<iceberg::Catalog>& catalog,
                   const std::shared_ptr<iceberg::PartitionSpec>& spec,
                   const std::vector<std::shared_ptr<iceberg::DataFile>>& files,
                   std::string* metadata_location, std::string* error);
+
+/// Load `primeparts.<table_name>` if the catalog knows it, else CreateTable it
+/// fresh (zstd/level-3 write props, ensures the namespace). Null + `*error` on
+/// failure. Shared by CommitFiles and the atomic multi-table commit.
+std::shared_ptr<iceberg::Table> EnsureTable(
+    const std::shared_ptr<iceberg::Catalog>& catalog, const fs::path& warehouse,
+    const std::string& table_name,
+    const std::shared_ptr<iceberg::Schema>& schema,
+    const std::shared_ptr<iceberg::PartitionSpec>& spec, std::string* error);
+
+/// Move each staged `DataFile` (written under StagingDataDir) into the table's
+/// committed `<location>/data/` tree, preserving the writer's staging sub-layout,
+/// and rewrite each `file_path` in place to the committed path. Prunes the
+/// emptied staging tree. False + `*error` on failure.
+bool MoveStagedFilesInto(
+    const std::shared_ptr<iceberg::Table>& table, const fs::path& warehouse,
+    const std::string& table_name,
+    const std::vector<std::shared_ptr<iceberg::DataFile>>& files,
+    std::string* error);
 
 /// Commit a batch of `DataFile`s written to a staging dir (see StagingDataDir)
 /// to `primeparts.<table_name>` as a single FastAppend snapshot. This is the

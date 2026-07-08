@@ -108,31 +108,39 @@ std::shared_ptr<iceberg::Catalog> MakeCatalog(const RestOptions& opts,
     *mode = "rest";
     return std::move(cat.value());
   }
+  // DEPRECATED: the ephemeral InMemoryCatalog predates the LMDB catalog of
+  // record and is slated for removal — callers should reach the catalog through
+  // catalogd (REST) or MakeLocalCatalog, never this branch.
   *mode = "in-memory";
   return std::make_shared<iceberg::InMemoryCatalog>(
       "primeparts-staging", LocalIO(), warehouse.string(),
       std::unordered_map<std::string, std::string>{});
 }
 
-std::shared_ptr<iceberg::Catalog> MakeLocalCatalog(const fs::path& warehouse,
-                                                   std::string* error) {
+LocalCatalog MakeLocalCatalogWithStore(const fs::path& warehouse,
+                                       std::string* error) {
   common::EnsureArrowRegistration();
 
   auto store_r = MakeLmdbCatalogStore(warehouse / "catalog.lmdb", "primeparts");
   if (!store_r.has_value()) {
     if (error) *error = "MakeLmdbCatalogStore: " + store_r.error().message;
-    return nullptr;
+    return {};
   }
+  std::shared_ptr<iceberg::sql::CatalogStore> store = store_r.value();
   iceberg::sql::SqlCatalogConfig cfg;
   cfg.name = "primeparts";
   cfg.warehouse_location = warehouse.string();
-  auto cat_r =
-      iceberg::sql::SqlCatalog::Make(cfg, LocalIO(), std::move(store_r.value()));
+  auto cat_r = iceberg::sql::SqlCatalog::Make(cfg, LocalIO(), store);
   if (!cat_r.has_value()) {
     if (error) *error = "SqlCatalog::Make: " + cat_r.error().message;
-    return nullptr;
+    return {};
   }
-  return std::move(cat_r.value());
+  return {std::move(cat_r.value()), std::move(store)};
+}
+
+std::shared_ptr<iceberg::Catalog> MakeLocalCatalog(const fs::path& warehouse,
+                                                   std::string* error) {
+  return MakeLocalCatalogWithStore(warehouse, error).catalog;
 }
 
 bool RestServerReachable(const std::string& rest_uri) {
@@ -280,64 +288,79 @@ bool PublishTable(const std::shared_ptr<iceberg::Catalog>& catalog,
                      metadata_location, error);
 }
 
+std::shared_ptr<iceberg::Table> EnsureTable(
+    const std::shared_ptr<iceberg::Catalog>& catalog, const fs::path& warehouse,
+    const std::string& table_name,
+    const std::shared_ptr<iceberg::Schema>& schema,
+    const std::shared_ptr<iceberg::PartitionSpec>& spec, std::string* error) {
+  iceberg::TableIdentifier ident{
+      .ns = iceberg::Namespace{{"primeparts"}}, .name = table_name};
+  if (!EnsureNamespace(catalog, ident.ns, error)) return nullptr;
+
+  // Load if the catalog knows it (append onto snapshot history); else create
+  // fresh. Probe with LoadTable, not disk state, so this works identically over
+  // a RestCatalog client.
+  auto loaded = catalog->LoadTable(ident);
+  if (loaded.has_value()) return std::move(loaded.value());
+
+  // FileIO does not mkdir parents — pre-create the metadata dir.
+  std::error_code ec;
+  fs::create_directories(warehouse / "primeparts" / table_name / "metadata", ec);
+  auto created = catalog->CreateTable(
+      ident, schema, spec, iceberg::SortOrder::Unsorted(),
+      (warehouse / "primeparts" / table_name).string(),
+      {{"write.parquet.compression-codec", "zstd"},
+       {"write.parquet.compression-level", "3"}});
+  if (!created.has_value()) {
+    if (error)
+      *error = "CreateTable " + table_name + ": " + created.error().message;
+    return nullptr;
+  }
+  return std::move(created.value());
+}
+
+bool MoveStagedFilesInto(
+    const std::shared_ptr<iceberg::Table>& table, const fs::path& warehouse,
+    const std::string& table_name,
+    const std::vector<std::shared_ptr<iceberg::DataFile>>& files,
+    std::string* error) {
+  // Catalog seam: files were written to a staging dir outside the table tree.
+  // Move each into the catalog-chosen <table>/data/ and rewrite its file_path
+  // BEFORE any append, so a manifest only ever records committed in-warehouse
+  // paths and a killed run can't pollute the table dir. The writer's staging
+  // sub-layout (p_bucket_version=N/p_bucket=M/...) is preserved by moving each
+  // file to its path RELATIVE to the staging root; this keeps the commit seam
+  // ignorant of partition semantics.
+  const fs::path data_dir =
+      fs::path(common::StripFileScheme(std::string(table->location()))) / "data";
+  const fs::path staging_root = StagingDataDir(warehouse, table_name);
+  for (const auto& f : files) {
+    const fs::path src = common::StripFileScheme(f->file_path);
+    fs::path rel = src.lexically_relative(staging_root);
+    if (rel.empty() || rel.native().rfind("..", 0) == 0) rel = src.filename();
+    const fs::path dst = data_dir / rel;
+    if (src == dst) continue;  // already in place (idempotent)
+    if (!MoveStagedFile(src, dst, error)) return false;
+    f->file_path = dst.string();
+  }
+  std::error_code ec;
+  fs::remove_all(staging_root, ec);
+  fs::remove(staging_root.parent_path(), ec);  // removes only if empty
+  return true;
+}
+
 bool CommitFiles(const std::shared_ptr<iceberg::Catalog>& catalog,
                  const fs::path& warehouse, const std::string& table_name,
                  const std::shared_ptr<iceberg::Schema>& schema,
                  const std::shared_ptr<iceberg::PartitionSpec>& spec,
                  const std::vector<std::shared_ptr<iceberg::DataFile>>& files,
                  std::string* metadata_location, std::string* error) {
-  iceberg::TableIdentifier ident{
-      .ns = iceberg::Namespace{{"primeparts"}}, .name = table_name};
-  if (!EnsureNamespace(catalog, ident.ns, error)) return false;
-
-  // Load the table if the catalog already knows it (incremental append onto
-  // its snapshot history); otherwise create it fresh. We probe with LoadTable
-  // rather than disk state so this works identically over a RestCatalog client.
-  std::shared_ptr<iceberg::Table> table;
-  auto loaded = catalog->LoadTable(ident);
-  if (loaded.has_value()) {
-    table = std::move(loaded.value());
-  } else {
-    // FileIO does not mkdir parents — pre-create the metadata dir.
-    std::error_code ec;
-    fs::create_directories(warehouse / "primeparts" / table_name / "metadata",
-                           ec);
-    auto created = catalog->CreateTable(
-        ident, schema, spec, iceberg::SortOrder::Unsorted(),
-        (warehouse / "primeparts" / table_name).string(),
-        {{"write.parquet.compression-codec", "zstd"},
-         {"write.parquet.compression-level", "3"}});
-    if (!created.has_value()) {
-      *error = "CreateTable " + table_name + ": " + created.error().message;
-      return false;
-    }
-    table = std::move(created.value());
-  }
+  auto table = EnsureTable(catalog, warehouse, table_name, schema, spec, error);
+  if (!table) return false;
 
   if (!files.empty()) {
-    // Catalog seam: the files were written to a staging dir outside the table
-    // tree. Move each into the catalog-chosen destination (<table>/data/) and
-    // rewrite its file_path BEFORE the append, so the manifest only ever records
-    // committed in-warehouse paths and a killed run can't pollute the table dir.
-    const fs::path data_dir =
-        fs::path(common::StripFileScheme(std::string(table->location()))) / "data";
-    // Preserve whatever sub-layout the writer used under the table's staging root
-    // (e.g. p_bucket_version=N/p_bucket=M/...) by moving each file to its path
-    // RELATIVE to the staging root, reproduced under <table>/data/. This keeps
-    // CommitFiles ignorant of partition semantics: the client owns its own
-    // partitioning (it chose the staging sub-path), the catalog owns the table
-    // location. Files not under the staging root fall back to a flat basename.
-    const fs::path staging_root = StagingDataDir(warehouse, table_name);
-    for (const auto& f : files) {
-      const fs::path src = common::StripFileScheme(f->file_path);
-      fs::path rel = src.lexically_relative(staging_root);
-      if (rel.empty() || rel.native().rfind("..", 0) == 0) rel = src.filename();
-      const fs::path dst = data_dir / rel;
-      if (src == dst) continue;  // already in place (idempotent)
-      if (!MoveStagedFile(src, dst, error)) return false;
-      f->file_path = dst.string();
-    }
-
+    if (!MoveStagedFilesInto(table, warehouse, table_name, files, error))
+      return false;
     auto app_r = table->NewFastAppend();
     if (!app_r.has_value()) {
       *error = "NewFastAppend " + table_name + ": " + app_r.error().message;
@@ -355,11 +378,6 @@ bool CommitFiles(const std::shared_ptr<iceberg::Catalog>& catalog,
       *error = "Refresh " + table_name + ": " + rs.error().message;
       return false;
     }
-    // Best-effort: all committed files have been moved out, so drop this table's
-    // staging tree (and the parent .pp-staging/<warehouse-name> if now empty).
-    std::error_code ec;
-    fs::remove_all(staging_root, ec);
-    fs::remove(staging_root.parent_path(), ec);  // removes only if empty
   }
   *metadata_location = std::string(table->metadata_file_location());
   return true;

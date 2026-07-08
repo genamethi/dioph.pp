@@ -76,17 +76,6 @@ std::shared_ptr<iceberg::Schema> PresenceSchema() {
   return std::make_shared<iceberg::Schema>(std::move(fields), 0);
 }
 
-std::shared_ptr<iceberg::Schema> BoundariesSchema() {
-  return std::make_shared<iceberg::Schema>(
-      std::vector<iceberg::SchemaField>{
-          iceberg::SchemaField::MakeRequired(1, "p_bucket_version", iceberg::int32()),
-          iceberg::SchemaField::MakeRequired(2, "p_bucket",         iceberg::int32()),
-          iceberg::SchemaField::MakeRequired(3, "p_min",            iceberg::int64()),
-          iceberg::SchemaField::MakeRequired(4, "rank_min",         iceberg::int64()),
-      },
-      0);
-}
-
 std::shared_ptr<iceberg::Schema> MersenneFactorsSchema() {
   return std::make_shared<iceberg::Schema>(
       std::vector<iceberg::SchemaField>{

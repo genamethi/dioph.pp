@@ -80,9 +80,11 @@ int main() {
     return 1;
   }
 
+  // 211 - 2^4 = 195 = 3 * 5 * 13. All three divisors are backbone
+  // {3,5,7,11,13,17}, so the term reports no primitive factors.
   auto composite = PrimitiveFactorsForTerm(211, 4, helper);
-  if (!Check(ContainsFactor(composite, 13),
-             "13 should be a primitive factor of 211 - 2^4 = 195")) {
+  if (!Check(!ContainsFactor(composite, 13),
+             "13 is backbone, not reported as a primitive factor of 195")) {
     return 1;
   }
   if (!Check(!ContainsFactor(composite, 3) && !ContainsFactor(composite, 5),

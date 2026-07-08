@@ -60,7 +60,7 @@ Stages: **S1** = cleanup + atomic commit + direct bucketing (current focus).
 | signRequest | `POST .../tables/{t}/sign` | yaml:1398 | missing | N/A | skip |
 | renameTable | `POST /v1/tables/rename` | yaml:1432 | exposed | — | done |
 | reportMetrics | `POST .../tables/{t}/metrics` | yaml:1496 | 204 stub | S3 | stub |
-| commitTransaction | `POST /v1/{prefix}/transactions/commit` | yaml:1540 | missing | S1 | todo |
+| commitTransaction | `POST /v1/{prefix}/transactions/commit` | yaml:1540 | exposed (atomic multi-table via `store->RunInTransaction`) | — | done |
 | listViews | `GET .../{ns}/views` | yaml:1657 | missing | S3 | todo |
 | createView | `POST .../{ns}/views` | yaml:1657 | missing | S3 | todo |
 | loadView | `GET .../views/{view}` | yaml:1743 | missing | S3 | todo |

@@ -27,7 +27,6 @@ namespace primeparts {
 // before the staging metadata is published.
 std::shared_ptr<iceberg::Schema> PrimesSchema();
 std::shared_ptr<iceberg::Schema> PartitionsSchema();
-std::shared_ptr<iceberg::Schema> BoundariesSchema();
 
 // Hit-mask schema for primeparts.mdiff_k{K}: one row per prime with exactly
 // k(p)==K representations. The K sorted hit positions are packed into a single

@@ -24,6 +24,7 @@
 #include "primeparts/catalog/pp_iceberg_rest.h"  // MakeLocalCatalog
 
 #include "iceberg/catalog.h"
+#include "iceberg/catalog/sql/catalog_store.h"
 #include "iceberg/partition_spec.h"
 #include "iceberg/result.h"
 #include "iceberg/sort_order.h"
@@ -119,13 +120,43 @@ iceberg::Namespace ParseNamespace(const std::string& encoded) {
   return ns;
 }
 
-// Parse the request body into a json object; on failure write a 400 and return
-// false. We parse with OUR OWN nlohmann (json::parse) rather than the archive's
-// iceberg::FromJsonString — see the ABI note on SendTableResult: any
-// Result<nlohmann::json> *returned* from the iceberg static archive is miscompiled
-// across this TU boundary, so we never consume one. A json passed BY REFERENCE
-// into the archive (the *FromJson request parsers below) is fine; only by-value
-// Result<json> returns are affected.
+// Build a TableIdentifier from a JSON `{"namespace":[...],"name":"..."}` object.
+// transactions/commit carries identifiers in the body, not the URL path.
+iceberg::TableIdentifier ParseIdentifier(const json& j) {
+  iceberg::TableIdentifier id;
+  if (auto it = j.find("namespace"); it != j.end() && it->is_array()) {
+    for (const auto& lvl : *it) id.ns.levels.push_back(lvl.get<std::string>());
+  }
+  if (auto it = j.find("name"); it != j.end()) id.name = it->get<std::string>();
+  return id;
+}
+
+// Parse a commit body's `requirements[]` / `updates[]` into the engine's
+// polymorphic vectors; false + *error on the first bad element. Shared by
+// updateTable and transactions/commit.
+bool ParseReqsUpdates(
+    const json& body,
+    std::vector<std::unique_ptr<iceberg::TableRequirement>>* reqs,
+    std::vector<std::unique_ptr<iceberg::TableUpdate>>* updates,
+    std::string* error) {
+  if (auto it = body.find("requirements"); it != body.end()) {
+    for (const auto& jr : *it) {
+      auto r = iceberg::TableRequirementFromJson(jr);
+      if (!r.has_value()) { *error = r.error().message; return false; }
+      reqs->push_back(std::move(r.value()));
+    }
+  }
+  if (auto it = body.find("updates"); it != body.end()) {
+    for (const auto& ju : *it) {
+      auto u = iceberg::TableUpdateFromJson(ju);
+      if (!u.has_value()) { *error = u.error().message; return false; }
+      updates->push_back(std::move(u.value()));
+    }
+  }
+  return true;
+}
+
+// Parse the request body as JSON; on failure write a 400 and return false.
 bool ParseBody(const httplib::Request& req, httplib::Response& res, json* out) {
   *out = json::parse(req.body, /*cb=*/nullptr, /*allow_exceptions=*/false);
   if (out->is_discarded()) {
@@ -135,23 +166,9 @@ bool ParseBody(const httplib::Request& req, httplib::Response& res, json* out) {
   return true;
 }
 
-// Serialize a loaded/created/committed table into the IRC
-// LoadTableResult / CommitTableResponse body shape:
-//   { "metadata-location": <str>, "metadata": <obj> [, "config": {}] }
-//
-// ABI WORKAROUND (load-bearing): the iceberg static archive's serde for the
-// metadata-bearing IRC models returns Result<nlohmann::json> by value
-// (ir::ToJson(LoadTableResult/CommitTableResponse), iceberg::ToJson(TableMetadata)).
-// Under the GCC 16 toolchain that builds both the archive and this TU, such a
-// std::expected<nlohmann::json, Error> return value is corrupted across the
-// archive->server boundary — its `has_value()` discriminant reads garbage, so a
-// successful serialization is misread as an error and reporting that bogus error
-// dereferences a wild string -> std::bad_alloc. The string-returning serde
-// (iceberg::ToJsonString -> Result<std::string>) is NOT affected, so we serialize
-// the heavy TableMetadata via that ABI-safe path and assemble the small wrapper
-// object with our own nlohmann here. (A minimal std::expected<json,Error> proxy
-// does not reproduce, so this is a codegen issue specific to the archive's ToJson;
-// revisit if iceberg-cpp / the toolchain is bumped.)
+// Serialize a loaded/created/committed table into the IRC LoadTableResult /
+// CommitTableResponse body: { "metadata-location", "metadata" [, "config"] }.
+// TableMetadata is serialized via ToJsonString; the wrapper is assembled here.
 iceberg::Result<std::string> TableResultBody(
     const std::shared_ptr<iceberg::Table>& table, bool with_config) {
   const auto& meta = table->metadata();
@@ -159,12 +176,14 @@ iceberg::Result<std::string> TableResultBody(
     return std::unexpected(
         iceberg::Error{iceberg::ErrorKind::kInvalid, "table metadata is null"});
   }
-  auto meta_str = iceberg::ToJsonString(*meta);  // Result<std::string> — ABI-safe
+  auto meta_str = iceberg::ToJsonString(*meta);
   if (!meta_str.has_value()) return std::unexpected(meta_str.error());
   json body;
   body["metadata-location"] = std::string(table->metadata_file_location());
   body["metadata"] = json::parse(meta_str.value());
-  if (with_config) body["config"] = json::object();
+  // scan-planning-mode: client — catalogd does no server-side scan planning;
+  // clients read manifests directly (frontier-bucket sizing read).
+  if (with_config) body["config"] = json{{"scan-planning-mode", "client"}};
   return body.dump();
 }
 
@@ -191,11 +210,13 @@ void HandleSignal(int) {
 
 int RunCatalogd(const CatalogdOptions& opts) {
   std::string err;
-  auto catalog = MakeLocalCatalog(opts.warehouse, &err);
-  if (!catalog) {
+  auto local = MakeLocalCatalogWithStore(opts.warehouse, &err);
+  if (!local.catalog) {
     std::fprintf(stderr, "pp-catalogd: open catalog: %s\n", err.c_str());
     return 1;
   }
+  auto catalog = local.catalog;
+  auto store = local.store;
 
   httplib::Server svr;
 
@@ -348,22 +369,9 @@ int RunCatalogd(const CatalogdOptions& opts) {
                                          .name = req.matches[2]};
              std::vector<std::unique_ptr<iceberg::TableRequirement>> requirements;
              std::vector<std::unique_ptr<iceberg::TableUpdate>> updates;
-             if (body.contains("requirements")) {
-               for (const auto& jr : body.at("requirements")) {
-                 auto r = iceberg::TableRequirementFromJson(jr);
-                 if (!r.has_value())
-                   return SendError(res, 400, "BadRequest", r.error().message);
-                 requirements.push_back(std::move(r.value()));
-               }
-             }
-             if (body.contains("updates")) {
-               for (const auto& ju : body.at("updates")) {
-                 auto u = iceberg::TableUpdateFromJson(ju);
-                 if (!u.has_value())
-                   return SendError(res, 400, "BadRequest", u.error().message);
-                 updates.push_back(std::move(u.value()));
-               }
-             }
+             std::string perr;
+             if (!ParseReqsUpdates(body, &requirements, &updates, &perr))
+               return SendError(res, 400, "BadRequest", perr);
              auto r = catalog->UpdateTable(id, requirements, updates);
              if (!r.has_value()) return SendIcebergError(res, r.error());
              // CommitTableResponse shape == {metadata-location, metadata} (no config).
@@ -399,6 +407,43 @@ int RunCatalogd(const CatalogdOptions& opts) {
   // accept and discard (the spec allows a 204).
   svr.Post(R"(/v1/namespaces/([^/]+)/tables/([^/]+)/metrics)",
            [](const httplib::Request&, httplib::Response& res) { res.status = 204; });
+
+  // POST /v1/transactions/commit — atomic multi-table commit. Every table-change
+  // is applied through catalog->UpdateTable inside ONE store write txn; any
+  // requirement failure aborts the whole transaction so no head pointer moves.
+  svr.Post("/v1/transactions/commit",
+           [catalog, store](const httplib::Request& req, httplib::Response& res) {
+             json body;
+             if (!ParseBody(req, res, &body)) return;
+             auto tc = body.find("table-changes");
+             if (tc == body.end() || !tc->is_array())
+               return SendError(res, 400, "BadRequest",
+                                "commit transaction requires table-changes[]");
+             struct Change {
+               iceberg::TableIdentifier id;
+               std::vector<std::unique_ptr<iceberg::TableRequirement>> reqs;
+               std::vector<std::unique_ptr<iceberg::TableUpdate>> updates;
+             };
+             std::vector<Change> changes;
+             for (const auto& ch : *tc) {
+               Change c;
+               if (auto it = ch.find("identifier"); it != ch.end())
+                 c.id = ParseIdentifier(*it);
+               std::string perr;
+               if (!ParseReqsUpdates(ch, &c.reqs, &c.updates, &perr))
+                 return SendError(res, 400, "BadRequest", perr);
+               changes.push_back(std::move(c));
+             }
+             auto st = store->RunInTransaction([&]() -> iceberg::Status {
+               for (auto& c : changes) {
+                 auto r = catalog->UpdateTable(c.id, c.reqs, c.updates);
+                 if (!r.has_value()) return std::unexpected(r.error());
+               }
+               return {};
+             });
+             if (!st.has_value()) return SendIcebergError(res, st.error());
+             res.status = 204;
+           });
 
   svr.set_exception_handler(
       [](const httplib::Request&, httplib::Response& res, std::exception_ptr ep) {

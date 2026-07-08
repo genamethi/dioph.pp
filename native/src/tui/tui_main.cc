@@ -575,7 +575,7 @@ int main(int argc, char** argv) {
         app.gen_running.store(false);
         int ec = app.gen_exit.load();
         app.status_glyph = ec == 0 ? 'k' : '!';
-        app.status_msg = ec == 0 ? "generation complete (manifest written)"
+        app.status_msg = ec == 0 ? "generation complete (committed)"
                                  : ("generation exited " + std::to_string(ec));
       } else {
         size_t ln;

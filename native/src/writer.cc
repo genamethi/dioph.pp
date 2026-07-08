@@ -145,6 +145,18 @@ bool BuildDataFile(const WriterConfig& config,
     }
   }
 
+  const int32_t rank_id = FieldIdByName(*config.schema, "prime_rank");
+  if (rank_id >= 0 && file.rows > 0) {
+    if (!PutBound(&data_file->lower_bounds, rank_id,
+                  iceberg::Literal::Long(file.rank_min), error) ||
+        !PutBound(&data_file->upper_bounds, rank_id,
+                  iceberg::Literal::Long(file.rank_max), error)) {
+      return false;
+    }
+  }
+
+  data_file->split_offsets = file.split_offsets;
+
   *out = std::move(data_file);
   return true;
 }
@@ -234,6 +246,7 @@ struct BucketParquetWriter::Impl {
 
   bool OpenIfNeeded(std::string* error);
   bool CloseCurrent(std::string* error);
+  bool CutRowGroup(int64_t* flushed_bytes, std::string* error);
 };
 
 bool BucketParquetWriter::Impl::OpenIfNeeded(std::string* error) {
@@ -279,8 +292,47 @@ bool BucketParquetWriter::Impl::OpenIfNeeded(std::string* error) {
   return true;
 }
 
+bool BucketParquetWriter::Impl::CutRowGroup(int64_t* flushed_bytes,
+                                            std::string* error) {
+  if (!writer) {
+    if (error) *error = "CutRowGroup with no open row group";
+    return false;
+  }
+  // The current row group's batches are still buffered, so the sink position is
+  // this row group's start offset. Record it, then flush by starting a new one.
+  auto start_r = sink->Tell();
+  if (!start_r.ok()) {
+    if (error) *error = start_r.status().ToString();
+    return false;
+  }
+  const int64_t start = start_r.ValueOrDie();
+  current_record.split_offsets.push_back(start);
+  auto ns = writer->NewBufferedRowGroup();
+  if (!ns.ok()) {
+    if (error) *error = ns.ToString();
+    return false;
+  }
+  auto end_r = sink->Tell();
+  if (!end_r.ok()) {
+    if (error) *error = end_r.status().ToString();
+    return false;
+  }
+  if (flushed_bytes) *flushed_bytes = end_r.ValueOrDie() - start;
+  return true;
+}
+
 bool BucketParquetWriter::Impl::CloseCurrent(std::string* error) {
   if (!writer) return true;
+  // If explicit cuts happened, the final (still-buffered) row group's start is
+  // the current sink position — record it so split_offsets covers every group.
+  if (!current_record.split_offsets.empty()) {
+    auto pos = sink->Tell();
+    if (!pos.ok()) {
+      if (error) *error = pos.status().ToString();
+      return false;
+    }
+    current_record.split_offsets.push_back(pos.ValueOrDie());
+  }
   auto cs = writer->Close();
   if (!cs.ok()) {
     if (error) *error = cs.ToString();
@@ -405,6 +457,29 @@ bool BucketParquetWriter::Write(const arrow::RecordBatch& batch,
     cur.rank_max = std::max(cur.rank_max, stats.rank_max);
   }
   cur.rows += batch.num_rows();
+  return true;
+}
+
+bool BucketParquetWriter::CutRowGroup(int64_t* flushed_bytes,
+                                      std::string* error) {
+  if (impl_->closed) {
+    if (error) *error = "CutRowGroup after Close";
+    return false;
+  }
+  return impl_->CutRowGroup(flushed_bytes, error);
+}
+
+bool BucketParquetWriter::RollFile(std::string* error,
+                                   int64_t* closed_file_bytes) {
+  if (impl_->closed) {
+    if (error) *error = "RollFile after Close";
+    return false;
+  }
+  const bool had_file = impl_->writer != nullptr;
+  if (!impl_->CloseCurrent(error)) return false;
+  if (closed_file_bytes && had_file && !impl_->done.empty()) {
+    *closed_file_bytes = impl_->done.back().bytes;
+  }
   return true;
 }
 

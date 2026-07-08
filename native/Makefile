@@ -43,6 +43,7 @@ BENCH_CORE_OBJ := $(BUILD_DIR)/bench_core.o
 BENCH_MATERIALIZE_OBJ := $(BUILD_DIR)/bench_materialize.o
 GENERATE_OBJ := $(BUILD_DIR)/generate.o
 WRITER_OBJ := $(BUILD_DIR)/writer.o
+ALIGNED_WRITER_OBJ := $(BUILD_DIR)/aligned_writer.o
 SCHEMAS_OBJ := $(BUILD_DIR)/schemas.o
 SOURCE_SCAN_OBJ := $(BUILD_DIR)/source_scan.o
 PRIMITIVE_FACTORS_OBJ := $(BUILD_DIR)/primitive_factors.o
@@ -59,6 +60,7 @@ LMDB_LIB := $(BUILD_DIR)/liblmdb.a
 PP_CATALOG_MAIN_OBJ := $(BUILD_DIR)/pp_catalog_main.o
 PP_CATALOGD_OBJ := $(BUILD_DIR)/pp_catalogd.o
 PP_CATALOGD_MAIN_OBJ := $(BUILD_DIR)/pp_catalogd_main.o
+PP_COMMIT_OBJ := $(BUILD_DIR)/pp_commit.o
 ICEBERG_SRC_CPPFLAGS := -Ivendor/iceberg-cpp/src
 TEST_OBJ := $(BUILD_DIR)/test_core.o
 TEST_ICEBERG_WRITER_OBJ := $(BUILD_DIR)/test_iceberg_writer.o
@@ -121,10 +123,13 @@ $(BENCH_CORE_OBJ): src/bench.c include/primeparts/core.h | $(BUILD_DIR)
 $(BENCH_MATERIALIZE_OBJ): src/materialize_bench.c include/primeparts/core.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
-$(GENERATE_OBJ): src/generate.cc include/primeparts/core.h include/primeparts/writer.h include/primeparts/generate.h include/primeparts/catalog/pp_iceberg_rest.h | $(BUILD_DIR)
+$(GENERATE_OBJ): src/generate.cc include/primeparts/core.h include/primeparts/writer.h include/primeparts/aligned_writer.h include/primeparts/generate.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/catalog/pp_commit.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(WRITER_OBJ): src/writer.cc include/primeparts/writer.h include/primeparts/schemas.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(ALIGNED_WRITER_OBJ): src/aligned_writer.cc include/primeparts/aligned_writer.h include/primeparts/writer.h include/primeparts/catalog/pp_iceberg_rest.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(SCHEMAS_OBJ): src/schemas.cc include/primeparts/schemas.h | $(BUILD_DIR)
@@ -220,6 +225,9 @@ $(PP_CATALOG_MAIN_OBJ): src/catalog/pp_catalog_main.cc include/primeparts/catalo
 $(PP_CATALOGD_OBJ): src/catalog/pp_catalogd.cc include/primeparts/catalog/pp_catalogd.h include/primeparts/catalog/pp_iceberg_rest.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(ICEBERG_SRC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
+$(PP_COMMIT_OBJ): src/catalog/pp_commit.cc include/primeparts/catalog/pp_commit.h include/primeparts/catalog/pp_iceberg_rest.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(ICEBERG_SRC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
 $(PP_CATALOGD_MAIN_OBJ): src/catalog/pp_catalogd_main.cc include/primeparts/catalog/pp_catalogd.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
@@ -227,6 +235,9 @@ $(BUILD_DIR)/pp_catalogd_smoke.o: src/catalog/pp_catalogd_smoke.cc include/prime
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/generate_smoke.o: src/generate_smoke.cc include/primeparts/catalog/pp_catalogd.h include/primeparts/catalog/pp_iceberg_rest.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/pp_commit_smoke.o: src/catalog/pp_commit_smoke.cc include/primeparts/catalog/pp_commit.h include/primeparts/catalog/pp_catalogd.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/writer.h include/primeparts/schemas.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(TEST_OBJ): tests/test_core.c include/primeparts/core.h | $(BUILD_DIR)
@@ -259,7 +270,7 @@ $(BUILD_DIR)/primeparts-bench-core: $(CORE_OBJ) $(BENCH_CORE_OBJ)
 $(BUILD_DIR)/primeparts-bench-materialize: $(CORE_OBJ) $(BENCH_MATERIALIZE_OBJ)
 	$(CC) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) -pthread -o $@
 
-$(BUILD_DIR)/primeparts-generate: $(CORE_OBJ) $(GENERATE_OBJ) $(WRITER_OBJ) $(SCHEMAS_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
+$(BUILD_DIR)/primeparts-generate: $(CORE_OBJ) $(GENERATE_OBJ) $(WRITER_OBJ) $(ALIGNED_WRITER_OBJ) $(SCHEMAS_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_COMMIT_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
 
 $(BUILD_DIR)/pp-catalog: $(PP_CATALOG_MAIN_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_SIEVE_CLONE_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
@@ -269,6 +280,9 @@ $(BUILD_DIR)/primeparts-catalogd: $(PP_CATALOGD_MAIN_OBJ) $(PP_CATALOGD_OBJ) $(P
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
 
 $(BUILD_DIR)/primeparts-catalogd-smoke: $(BUILD_DIR)/pp_catalogd_smoke.o $(PP_CATALOGD_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(WRITER_OBJ) $(SCHEMAS_OBJ) $(LMDB_LIB)
+	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
+
+$(BUILD_DIR)/primeparts-commit-smoke: $(BUILD_DIR)/pp_commit_smoke.o $(PP_COMMIT_OBJ) $(PP_CATALOGD_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(WRITER_OBJ) $(SCHEMAS_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
 
 $(BUILD_DIR)/primeparts-generate-smoke: $(BUILD_DIR)/generate_smoke.o $(PP_CATALOGD_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB) | $(BUILD_DIR)/primeparts-generate
@@ -333,11 +347,13 @@ test: $(BUILD_DIR)/test_core \
 
 smoke: $(BUILD_DIR)/primeparts-lmdb-smoke \
        $(BUILD_DIR)/primeparts-catalogd-smoke \
+       $(BUILD_DIR)/primeparts-commit-smoke \
        $(BUILD_DIR)/primeparts-generate-smoke \
        $(BUILD_DIR)/primeparts-lua-presets-smoke \
        $(BUILD_DIR)/primeparts-lua-query-smoke
 	$(BUILD_DIR)/primeparts-lmdb-smoke
 	$(BUILD_DIR)/primeparts-catalogd-smoke
+	$(BUILD_DIR)/primeparts-commit-smoke
 	$(BUILD_DIR)/primeparts-generate-smoke
 	cd .. && native/$(BUILD_DIR)/primeparts-lua-presets-smoke
 	cd .. && native/$(BUILD_DIR)/primeparts-lua-query-smoke
