@@ -1,0 +1,12 @@
+[Unit]
+Description=Primeparts native Iceberg REST Catalog daemon (primeparts-catalogd)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=@PP_INSTALL_PATH@/primeparts-catalogd
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
