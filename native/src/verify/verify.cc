@@ -155,7 +155,7 @@ class PartitionFormCheck : public Check {
   CheckSpec spec_;
 };
 
-}  // namespace
+}
 
 std::shared_ptr<iceberg::Expression> BuildWindowFilter(const Window& w) {
   std::shared_ptr<iceberg::Expression> filter;
@@ -182,6 +182,7 @@ CheckResult TableVerifier::Run(const std::string& metadata_path,
                                const Check& check,
                                std::shared_ptr<iceberg::Expression> filter,
                                int threads, int64_t limit, int max_examples,
+                               std::optional<int64_t> from_snapshot_exclusive,
                                std::string* error) {
   CheckResult result;
   result.table = check.spec().table;
@@ -192,16 +193,25 @@ CheckResult TableVerifier::Run(const std::string& metadata_path,
   if (n_workers < 1) n_workers = 1;
   (void)primeparts::common::SetupArrowThreadPools(n_workers);
 
+  auto open = [&](std::string* e, int shard, int count) {
+    return from_snapshot_exclusive
+               ? primeparts::SourceTableReader::OpenIncremental(
+                     metadata_path, check.spec().select, filter,
+                     *from_snapshot_exclusive, e, shard, count)
+               : primeparts::SourceTableReader::OpenMetadata(
+                     metadata_path, check.spec().select, filter, e, shard,
+                     count);
+  };
+
   int64_t total_records = 0;
   {
     std::string e;
-    auto probe = primeparts::SourceTableReader::OpenMetadata(
-        metadata_path, check.spec().select, filter, &e);
+    auto probe = open(&e, 0, 1);
     if (!probe) {
       if (error) *error = "open reader: " + e;
       return result;
     }
-    total_records = probe->total_records();
+    for (const auto& sf : probe->source_files()) total_records += sf.record_count;
   }
 
   std::vector<CheckResult> accums(n_workers);
@@ -212,8 +222,7 @@ CheckResult TableVerifier::Run(const std::string& metadata_path,
 
   auto worker = [&](int shard) {
     std::string e;
-    auto reader = primeparts::SourceTableReader::OpenMetadata(
-        metadata_path, check.spec().select, filter, &e, shard, n_workers);
+    auto reader = open(&e, shard, n_workers);
     if (!reader) {
       werr[shard] = "open: " + e;
       failed.store(true);
@@ -284,4 +293,4 @@ CheckResult TableVerifier::Run(const std::string& metadata_path,
   return result;
 }
 
-}  // namespace primeparts::verify
+}

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -63,7 +64,8 @@ class TableVerifier {
   static CheckResult Run(const std::string& metadata_path, const Check& check,
                          std::shared_ptr<iceberg::Expression> filter,
                          int threads, int64_t limit, int max_examples,
+                         std::optional<int64_t> from_snapshot_exclusive,
                          std::string* error);
 };
 
-}  // namespace primeparts::verify
+}

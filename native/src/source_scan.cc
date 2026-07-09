@@ -18,7 +18,7 @@
 #include "primeparts/common/arrow_init.h"
 #include "primeparts/common/uri.h"
 
-#include "iceberg/arrow/arrow_io_util.h"  // iceberg::arrow::MakeLocalFileIO (was arrow_file_io.h pre-v0.3.0)
+#include "iceberg/arrow/arrow_io_util.h"
 #include "iceberg/arrow_c_data.h"
 #include "iceberg/data/file_scan_task_reader.h"
 #include "iceberg/file_io.h"
@@ -38,7 +38,7 @@ namespace primeparts {
 
 namespace {
 
-constexpr int32_t kPColumnFieldId = 1;  // `p` is field_id 1 in both source tables.
+constexpr int32_t kPColumnFieldId = 1;
 
 int64_t decode_int64_le(const std::vector<uint8_t>& bytes) {
   int64_t v = 0;
@@ -52,22 +52,18 @@ int64_t decode_int64_le(const std::vector<uint8_t>& bytes) {
   return v;
 }
 
-}  // namespace
+}
 
 struct SourceTableReader::Impl {
   std::shared_ptr<iceberg::FileIO> io;
   std::shared_ptr<iceberg::TableMetadata> metadata;
   std::shared_ptr<iceberg::Schema> projected_schema;
   std::vector<std::shared_ptr<iceberg::FileScanTask>> tasks;
-  // Built lazily on first OpenTaskAtCursor — needs metadata+schemas to be set.
   std::unique_ptr<iceberg::FileScanTaskReader> task_reader;
   size_t cursor = 0;
 
-  // Active task's RecordBatchReader, if one is mid-read.
   std::shared_ptr<arrow::RecordBatchReader> active;
 
-  // Data file path the active reader is reading from — the file the most
-  // recently returned batch belongs to. Pairs with a projected "_pos".
   std::string current_file_path;
 
   int64_t total_records = 0;
@@ -111,15 +107,15 @@ struct SourceTableReader::Impl {
       return true;
     }
     active.reset();
-    return true;  // EOF, no active reader.
+    return true;
   }
 };
 
-std::unique_ptr<SourceTableReader> SourceTableReader::OpenMetadata(
+std::unique_ptr<SourceTableReader::Impl> SourceTableReader::BuildImpl(
     const fs::path& metadata_path,
     const std::vector<std::string>& select_columns,
     std::shared_ptr<iceberg::Expression> filter,
-    std::string* error,
+    std::optional<int64_t> from_snapshot_id_exclusive, std::string* error,
     int shard_index, int shard_count) {
   primeparts::common::EnsureArrowRegistration();
 
@@ -138,8 +134,6 @@ std::unique_ptr<SourceTableReader> SourceTableReader::OpenMetadata(
   }
   impl->metadata = std::shared_ptr<iceberg::TableMetadata>(std::move(md_r.value()));
 
-  // Manifest-aggregated total row count: needed cheaply by readers to
-  // validate the scan scope without decoding data files.
   auto snap_r = impl->metadata->Snapshot();
   if (snap_r.has_value() && snap_r.value()) {
     auto list_r = iceberg::ManifestListReader::Make(
@@ -159,17 +153,6 @@ std::unique_ptr<SourceTableReader> SourceTableReader::OpenMetadata(
     }
   }
 
-  auto builder_r =
-      iceberg::TableScanBuilder<iceberg::DataTableScan>::Make(impl->metadata,
-                                                              impl->io);
-  if (!builder_r.has_value()) {
-    if (error) *error = "TableScanBuilder::Make: " + builder_r.error().message;
-    return nullptr;
-  }
-  // Split reserved metadata columns ("_pos"/"_file") out of the scan's
-  // projection — they are not table fields, so Schema::Select can't resolve
-  // them. We append them to the projected schema below; the parquet reader
-  // synthesizes their values.
   std::vector<std::string> regular_columns;
   bool want_pos = false, want_file = false;
   for (const auto& c : select_columns) {
@@ -178,47 +161,88 @@ std::unique_ptr<SourceTableReader> SourceTableReader::OpenMetadata(
     else { regular_columns.push_back(c); }
   }
 
-  auto scan_builder = std::move(builder_r.value());
-  scan_builder->Select(regular_columns).IncludeColumnStats({"p"});
-  if (filter) {
-      scan_builder->Filter(filter);
+  std::shared_ptr<iceberg::Schema> scan_schema;
+  std::vector<std::shared_ptr<iceberg::FileScanTask>> planned;
+
+  if (from_snapshot_id_exclusive.has_value()) {
+    if (!snap_r.has_value() || !snap_r.value()) {
+      if (error) *error = "no current snapshot for incremental scan";
+      return nullptr;
+    }
+    auto builder_r =
+        iceberg::TableScanBuilder<iceberg::IncrementalAppendScan>::Make(
+            impl->metadata, impl->io);
+    if (!builder_r.has_value()) {
+      if (error) *error = "TableScanBuilder::Make: " + builder_r.error().message;
+      return nullptr;
+    }
+    auto scan_builder = std::move(builder_r.value());
+    scan_builder->Select(regular_columns).IncludeColumnStats({"p"});
+    if (filter) scan_builder->Filter(filter);
+    scan_builder->FromSnapshot(*from_snapshot_id_exclusive, false)
+        .ToSnapshot(snap_r.value()->snapshot_id);
+    auto scan_r = scan_builder->Build();
+    if (!scan_r.has_value()) {
+      if (error) *error = "TableScanBuilder::Build: " + scan_r.error().message;
+      return nullptr;
+    }
+    auto scan = std::move(scan_r.value());
+    auto schema_r = scan->schema();
+    if (!schema_r.has_value()) {
+      if (error) *error = "scan->schema: " + schema_r.error().message;
+      return nullptr;
+    }
+    scan_schema = schema_r.value();
+    auto tasks_r = scan->PlanFiles();
+    if (!tasks_r.has_value()) {
+      if (error) *error = "scan->PlanFiles: " + tasks_r.error().message;
+      return nullptr;
+    }
+    planned = std::move(tasks_r.value());
+  } else {
+    auto builder_r =
+        iceberg::TableScanBuilder<iceberg::DataTableScan>::Make(impl->metadata,
+                                                                impl->io);
+    if (!builder_r.has_value()) {
+      if (error) *error = "TableScanBuilder::Make: " + builder_r.error().message;
+      return nullptr;
+    }
+    auto scan_builder = std::move(builder_r.value());
+    scan_builder->Select(regular_columns).IncludeColumnStats({"p"});
+    if (filter) scan_builder->Filter(filter);
+    auto scan_r = scan_builder->Build();
+    if (!scan_r.has_value()) {
+      if (error) *error = "TableScanBuilder::Build: " + scan_r.error().message;
+      return nullptr;
+    }
+    auto scan = std::move(scan_r.value());
+    auto schema_r = scan->schema();
+    if (!schema_r.has_value()) {
+      if (error) *error = "scan->schema: " + schema_r.error().message;
+      return nullptr;
+    }
+    scan_schema = schema_r.value();
+    auto tasks_r = scan->PlanFiles();
+    if (!tasks_r.has_value()) {
+      if (error) *error = "scan->PlanFiles: " + tasks_r.error().message;
+      return nullptr;
+    }
+    planned = std::move(tasks_r.value());
   }
 
-  auto scan_r = scan_builder->Build();
-  if (!scan_r.has_value()) {
-    if (error) *error = "TableScanBuilder::Build: " + scan_r.error().message;
-    return nullptr;
-  }
-  auto scan = std::move(scan_r.value());
-
-  auto schema_r = scan->schema();
-  if (!schema_r.has_value()) {
-    if (error) *error = "scan->schema: " + schema_r.error().message;
-    return nullptr;
-  }
   if (want_pos || want_file) {
-    // Append the requested metadata fields to the projected schema. The
-    // FileScanTaskReader does not require the projection to be a subset of
-    // the table schema, and the parquet reader populates _file/_pos.
-    auto base = schema_r.value();
-    std::vector<iceberg::SchemaField> aug(base->fields().begin(),
-                                          base->fields().end());
+    std::vector<iceberg::SchemaField> aug(scan_schema->fields().begin(),
+                                          scan_schema->fields().end());
     if (want_file) aug.push_back(iceberg::MetadataColumns::kFilePath);
     if (want_pos) aug.push_back(iceberg::MetadataColumns::kRowPosition);
     impl->projected_schema =
-        std::make_shared<iceberg::Schema>(std::move(aug), base->schema_id());
+        std::make_shared<iceberg::Schema>(std::move(aug), scan_schema->schema_id());
   } else {
-    impl->projected_schema = schema_r.value();
+    impl->projected_schema = scan_schema;
   }
 
-  auto tasks_r = scan->PlanFiles();
-  if (!tasks_r.has_value()) {
-    if (error) *error = "scan->PlanFiles: " + tasks_r.error().message;
-    return nullptr;
-  }
-  impl->tasks = std::move(tasks_r.value());
+  impl->tasks = std::move(planned);
 
-  // Sort tasks by `p` lower-bound so the producer streams p-ascending.
   std::sort(impl->tasks.begin(), impl->tasks.end(),
             [](const std::shared_ptr<iceberg::FileScanTask>& a,
                const std::shared_ptr<iceberg::FileScanTask>& b) {
@@ -235,10 +259,6 @@ std::unique_ptr<SourceTableReader> SourceTableReader::OpenMetadata(
               return va < vb;
             });
 
-  // Keep only this shard's tasks (modulo over the p-sorted order). Each shard
-  // reader is independently delete-aware via the per-task FileScanTaskReader
-  // path; total_records() above still reflects the whole snapshot (a global
-  // progress denominator). Default shard_count==1 keeps everything.
   if (shard_count > 1) {
     std::vector<std::shared_ptr<iceberg::FileScanTask>> mine;
     mine.reserve(impl->tasks.size() / static_cast<size_t>(shard_count) + 1);
@@ -250,6 +270,33 @@ std::unique_ptr<SourceTableReader> SourceTableReader::OpenMetadata(
     impl->tasks = std::move(mine);
   }
 
+  return impl;
+}
+
+std::unique_ptr<SourceTableReader> SourceTableReader::OpenMetadata(
+    const fs::path& metadata_path,
+    const std::vector<std::string>& select_columns,
+    std::shared_ptr<iceberg::Expression> filter,
+    std::string* error,
+    int shard_index, int shard_count) {
+  auto impl = BuildImpl(metadata_path, select_columns, std::move(filter),
+                        std::nullopt, error, shard_index, shard_count);
+  if (!impl) return nullptr;
+  return std::unique_ptr<SourceTableReader>(
+      new SourceTableReader(std::move(impl)));
+}
+
+std::unique_ptr<SourceTableReader> SourceTableReader::OpenIncremental(
+    const fs::path& metadata_path,
+    const std::vector<std::string>& select_columns,
+    std::shared_ptr<iceberg::Expression> filter,
+    int64_t from_snapshot_id_exclusive,
+    std::string* error,
+    int shard_index, int shard_count) {
+  auto impl = BuildImpl(metadata_path, select_columns, std::move(filter),
+                        from_snapshot_id_exclusive, error, shard_index,
+                        shard_count);
+  if (!impl) return nullptr;
   return std::unique_ptr<SourceTableReader>(
       new SourceTableReader(std::move(impl)));
 }
@@ -274,13 +321,12 @@ bool SourceTableReader::Next(std::shared_ptr<arrow::RecordBatch>* out,
       *out = batch;
       return true;
     }
-    // EOF for this task; advance.
     impl_->active.reset();
     impl_->cursor++;
     if (!impl_->OpenTaskAtCursor(error)) return false;
   }
 
-  *out = nullptr;  // overall EOF
+  *out = nullptr;
   return true;
 }
 
@@ -313,4 +359,4 @@ std::vector<SourceFileInfo> SourceTableReader::source_files() const {
   return out;
 }
 
-}  // namespace primeparts
+}

@@ -8,12 +8,14 @@
 #include "iceberg/table.h"
 #include "iceberg/table_identifier.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
 #include <fstream>
 #include <getopt.h>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -32,6 +34,7 @@ struct Options {
   ppv::Window window;
   int threads = 0;
   int max_examples = 20;
+  int tail = 0;
   std::string log_path;
 };
 
@@ -45,6 +48,7 @@ void Usage(const char* argv0) {
     "  --p-lo N           only rows with p >= N (iceberg pushdown)\n"
     "  --p-hi N           only rows with p <= N (iceberg pushdown)\n"
     "  --limit N          stop after ~N rows total\n"
+    "  --tail N           only rows added in the last N snapshots (incremental scan)\n"
     "  --threads N        shard threads (default: hw concurrency)\n"
     "  --max-examples N   violating rows to record (default 20)\n"
     "  --warehouse DIR    warehouse root (default %s)\n"
@@ -84,9 +88,22 @@ int RunTable(const std::shared_ptr<iceberg::Catalog>& catalog,
                                  : ppv::MakePartitionFormCheck();
   auto filter = ppv::BuildWindowFilter(opts.window);
 
+  std::optional<int64_t> from_snap;
+  if (opts.tail > 0) {
+    auto snaps = tbl->snapshots();
+    std::sort(snaps.begin(), snaps.end(),
+              [](const std::shared_ptr<iceberg::Snapshot>& a,
+                 const std::shared_ptr<iceberg::Snapshot>& b) {
+                return a->sequence_number < b->sequence_number;
+              });
+    const int idx = static_cast<int>(snaps.size()) - 1 - opts.tail;
+    if (idx >= 0) from_snap = snaps[idx]->snapshot_id;
+  }
+
   std::string err;
   auto r = ppv::TableVerifier::Run(meta, *check, filter, opts.threads,
-                                   opts.window.limit, opts.max_examples, &err);
+                                   opts.window.limit, opts.max_examples,
+                                   from_snap, &err);
   if (!err.empty()) {
     log.Line("FAIL " + table + ": " + err);
     return 1;
@@ -95,6 +112,9 @@ int RunTable(const std::shared_ptr<iceberg::Catalog>& catalog,
   log.Line("table      : " + table);
   log.Line("  snapshot : " + std::to_string(LatestSnapshotId(tbl)) +
            " (" + std::to_string(tbl->snapshots().size()) + " total)");
+  if (from_snap)
+    log.Line("  tail     : last " + std::to_string(opts.tail) +
+             " snapshots (from_excl=" + std::to_string(*from_snap) + ")");
   log.Line("  rows     : " + std::to_string(r.rows_checked));
   log.Line("  result   : " +
            std::string(r.ok() ? "PASS" : "FAIL") + " (" +
@@ -104,7 +124,7 @@ int RunTable(const std::shared_ptr<iceberg::Catalog>& catalog,
   return r.ok() ? 0 : 1;
 }
 
-}  // namespace
+}
 
 int main(int argc, char** argv) {
   Options opts;
@@ -113,6 +133,7 @@ int main(int argc, char** argv) {
       {"p-lo", required_argument, nullptr, 'L'},
       {"p-hi", required_argument, nullptr, 'H'},
       {"limit", required_argument, nullptr, 'n'},
+      {"tail", required_argument, nullptr, 'T'},
       {"threads", required_argument, nullptr, 'j'},
       {"max-examples", required_argument, nullptr, 'e'},
       {"warehouse", required_argument, nullptr, 'w'},
@@ -121,13 +142,14 @@ int main(int argc, char** argv) {
       {"help", no_argument, nullptr, 'h'},
       {nullptr, 0, nullptr, 0}};
   int o;
-  while ((o = getopt_long(argc, argv, "t:L:H:n:j:e:w:r:o:h", long_opts,
+  while ((o = getopt_long(argc, argv, "t:L:H:n:T:j:e:w:r:o:h", long_opts,
                           nullptr)) != -1) {
     switch (o) {
       case 't': opts.table = optarg; break;
       case 'L': opts.window.p_lo = std::strtoll(optarg, nullptr, 10); break;
       case 'H': opts.window.p_hi = std::strtoll(optarg, nullptr, 10); break;
       case 'n': opts.window.limit = std::strtoll(optarg, nullptr, 10); break;
+      case 'T': opts.tail = std::atoi(optarg); break;
       case 'j': opts.threads = std::atoi(optarg); break;
       case 'e': opts.max_examples = std::atoi(optarg); break;
       case 'w': opts.warehouse = optarg; break;
