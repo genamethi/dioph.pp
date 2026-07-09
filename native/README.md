@@ -39,8 +39,7 @@ LMDB `CatalogStore` (`MakeLocalCatalog`), optionally fronted by `pp-catalogd`.
 Dependencies are git submodules + a `configure` script that builds the
 fast-moving pieces from source into a profile prefix (`$HOME/.local` by
 default). No system package manager is required; it targets Arch and Debian with
-gcc. See `vendor/README.md` for the version policy and `vendor/PATCHES.md` for
-the iceberg-cpp local patches.
+gcc. See `vendor/README.md` for the version policy.
 
 ```sh
 # 1. populate the small pinned submodule (LMDB); arrow/iceberg are on-demand.
