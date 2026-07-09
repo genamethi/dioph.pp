@@ -11,8 +11,11 @@
 
 #include <atomic>
 #include <csignal>
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -25,8 +28,14 @@
 
 #include "iceberg/catalog.h"
 #include "iceberg/catalog/sql/catalog_store.h"
+#include "iceberg/manifest/manifest_entry.h"
+#include "iceberg/manifest/manifest_list.h"
+#include "iceberg/manifest/manifest_reader.h"
 #include "iceberg/partition_spec.h"
 #include "iceberg/result.h"
+#include "iceberg/schema.h"
+#include "iceberg/schema_field.h"
+#include "iceberg/snapshot.h"
 #include "iceberg/sort_order.h"
 #include "iceberg/table.h"
 #include "iceberg/table_identifier.h"
@@ -206,6 +215,89 @@ void HandleSignal(int) {
   if (auto* s = g_server.load()) s->stop();
 }
 
+// Resolve a schema field id by name; -1 if absent.
+int32_t FieldIdByName(const iceberg::Schema& schema, std::string_view name) {
+  for (const auto& f : schema.fields()) {
+    if (f.name() == name) return f.field_id();
+  }
+  return -1;
+}
+
+// Read the committed upper bound of `field` from the current snapshot's frontier
+// manifest — the manifest this snapshot added (added_snapshot_id == snapshot id),
+// whose last entry carries the max (entries are written ascending). Direct
+// metadata read, no scan. Sets *present=false when there is no snapshot or the
+// bound is absent. Returns false + *error on a load/read failure.
+bool FieldUpperBound(const std::shared_ptr<iceberg::Catalog>& catalog,
+                     const iceberg::TableIdentifier& id, const std::string& field,
+                     int64_t* out, bool* present, std::string* error) {
+  *present = false;
+  auto tbl = catalog->LoadTable(id);
+  if (!tbl.has_value()) {
+    *error = tbl.error().message;
+    return false;
+  }
+  auto table = tbl.value();
+
+  auto snap = table->current_snapshot();
+  if (!snap.has_value() || snap.value() == nullptr) return true;  // fresh table
+
+  auto schema = table->schema();
+  if (!schema.has_value()) {
+    *error = schema.error().message;
+    return false;
+  }
+  const int32_t fid = FieldIdByName(*schema.value(), field);
+  if (fid < 0) {
+    *error = "unknown field: " + field;
+    return false;
+  }
+
+  auto spec = table->spec();
+  if (!spec.has_value()) {
+    *error = spec.error().message;
+    return false;
+  }
+
+  iceberg::SnapshotCache cache(snap.value().get());
+  auto manifests = cache.DataManifests(table->io());
+  if (!manifests.has_value()) {
+    *error = manifests.error().message;
+    return false;
+  }
+  const int64_t snap_id = snap.value()->snapshot_id;
+  const iceberg::ManifestFile* frontier = nullptr;
+  for (const auto& m : manifests.value()) {
+    if (m.added_snapshot_id == snap_id) { frontier = &m; break; }
+  }
+  if (frontier == nullptr) return true;  // nothing added by this snapshot
+
+  auto reader = iceberg::ManifestReader::Make(*frontier, table->io(),
+                                              schema.value(), spec.value());
+  if (!reader.has_value()) {
+    *error = reader.error().message;
+    return false;
+  }
+  auto entries = reader.value()->Select({"upper_bounds"}).LiveEntries();
+  if (!entries.has_value()) {
+    *error = entries.error().message;
+    return false;
+  }
+  if (entries.value().empty()) return true;
+
+  const auto& df = entries.value().back().data_file;
+  if (df == nullptr) return true;
+  auto it = df->upper_bounds.find(fid);
+  if (it == df->upper_bounds.end() || it->second.size() < sizeof(int64_t)) {
+    return true;  // no bound stored for this field
+  }
+  int64_t v = 0;
+  std::memcpy(&v, it->second.data(), sizeof(int64_t));  // iceberg long: 8-byte LE
+  *out = v;
+  *present = true;
+  return true;
+}
+
 }  // namespace
 
 int RunCatalogd(const CatalogdOptions& opts) {
@@ -355,6 +447,28 @@ int RunCatalogd(const CatalogdOptions& opts) {
   // (HEAD /v1/namespaces/{ns}/tables/{table} — exists — is served by the GET
   // load handler above via cpp-httplib's HEAD->GET dispatch: 200 if it loads,
   // 404 if absent.)
+
+  // GET /v1/namespaces/{ns}/tables/{table}/field-upper-bound?field=NAME —
+  // pp-native: the committed max of a column, read from the current snapshot's
+  // frontier manifest metric (no scan). {"field":NAME,"upper_bound":N|null}.
+  // Drives generate's resume-from-frontier (field=prime_rank).
+  svr.Get(R"(/v1/namespaces/([^/]+)/tables/([^/]+)/field-upper-bound)",
+          [catalog](const httplib::Request& req, httplib::Response& res) {
+            if (!req.has_param("field"))
+              return SendError(res, 400, "BadRequest", "missing field param");
+            const std::string field = req.get_param_value("field");
+            iceberg::TableIdentifier id{.ns = ParseNamespace(req.matches[1]),
+                                        .name = req.matches[2]};
+            int64_t ub = 0;
+            bool present = false;
+            std::string err;
+            if (!FieldUpperBound(catalog, id, field, &ub, &present, &err))
+              return SendError(res, 400, "BadRequest", err);
+            json body = {{"field", field}};
+            if (present) body["upper_bound"] = ub;
+            else body["upper_bound"] = nullptr;
+            SendJson(res, 200, body);
+          });
 
   // POST /v1/namespaces/{ns}/tables/{table} — COMMIT (updateTable). The
   // load-bearing route: native FastAppend / RowDelta commits arrive here as

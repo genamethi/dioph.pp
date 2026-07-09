@@ -42,6 +42,7 @@ CORE_OBJ := $(BUILD_DIR)/core.o
 BENCH_CORE_OBJ := $(BUILD_DIR)/bench_core.o
 BENCH_MATERIALIZE_OBJ := $(BUILD_DIR)/bench_materialize.o
 GENERATE_OBJ := $(BUILD_DIR)/generate.o
+CONFIG_OBJ := $(BUILD_DIR)/config.o
 WRITER_OBJ := $(BUILD_DIR)/writer.o
 ALIGNED_WRITER_OBJ := $(BUILD_DIR)/aligned_writer.o
 SCHEMAS_OBJ := $(BUILD_DIR)/schemas.o
@@ -163,8 +164,11 @@ $(BENCH_CORE_OBJ): src/bench.c include/primeparts/core.h | $(BUILD_DIR)
 $(BENCH_MATERIALIZE_OBJ): src/materialize_bench.c include/primeparts/core.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
-$(GENERATE_OBJ): src/generate.cc include/primeparts/core.h include/primeparts/writer.h include/primeparts/aligned_writer.h include/primeparts/generate.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/catalog/pp_commit.h | $(BUILD_DIR)
+$(GENERATE_OBJ): src/generate.cc include/primeparts/core.h include/primeparts/writer.h include/primeparts/aligned_writer.h include/primeparts/generate.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/catalog/pp_commit.h include/primeparts/config.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(CONFIG_OBJ): src/config.cc include/primeparts/config.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(LUA_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(WRITER_OBJ): src/writer.cc include/primeparts/writer.h include/primeparts/schemas.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
@@ -310,8 +314,8 @@ $(BUILD_DIR)/primeparts-bench-core: $(CORE_OBJ) $(BENCH_CORE_OBJ)
 $(BUILD_DIR)/primeparts-bench-materialize: $(CORE_OBJ) $(BENCH_MATERIALIZE_OBJ)
 	$(CC) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) -pthread -o $@
 
-$(BUILD_DIR)/primeparts-generate: $(CORE_OBJ) $(GENERATE_OBJ) $(WRITER_OBJ) $(ALIGNED_WRITER_OBJ) $(SCHEMAS_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_COMMIT_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
-	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
+$(BUILD_DIR)/primeparts-generate: $(CORE_OBJ) $(GENERATE_OBJ) $(CONFIG_OBJ) $(WRITER_OBJ) $(ALIGNED_WRITER_OBJ) $(SCHEMAS_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_COMMIT_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
+	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(LUA_LDLIBS) -lsqlite3 -pthread -o $@
 
 $(BUILD_DIR)/pp-catalog: $(PP_CATALOG_MAIN_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_SIEVE_CLONE_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@

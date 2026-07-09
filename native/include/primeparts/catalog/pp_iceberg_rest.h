@@ -122,6 +122,16 @@ std::shared_ptr<iceberg::Catalog> OpenCatalog(const fs::path& warehouse,
 /// REST-vs-local; exposed for tools that want to report the resolved mode.
 bool RestServerReachable(const std::string& rest_uri);
 
+/// Ask pp-catalogd at `rest_uri` for the committed upper bound of `field` on
+/// namespace `ns` / `table` (GET .../field-upper-bound?field=NAME). On success
+/// returns true: `*present` is false when the table has no snapshot (fresh) or
+/// the field carries no bound, otherwise `*out` holds the max. False + `*error`
+/// on an unreachable server, non-200, or unparseable response. Used by generate
+/// to resume from the frontier (field="prime_rank").
+bool FetchFieldUpperBound(const std::string& rest_uri, const std::string& ns,
+                          const std::string& table, const std::string& field,
+                          int64_t* out, bool* present, std::string* error);
+
 /// Resolve a table's current metadata.json path through the catalog
 /// (LoadTable -> metadata_file_location, file: scheme stripped). Namespace is
 /// "primeparts". Empty path + *error on failure. This is the single seam every

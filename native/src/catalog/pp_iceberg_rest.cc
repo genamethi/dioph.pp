@@ -8,6 +8,7 @@
 #include <utility>
 
 #include <httplib.h>
+#include <nlohmann/json.hpp>
 
 #include "iceberg/arrow/arrow_io_util.h"
 #include "iceberg/catalog/memory/in_memory_catalog.h"
@@ -152,6 +153,41 @@ bool RestServerReachable(const std::string& rest_uri) {
   cli.set_read_timeout(2, 0);        // 2s read
   auto res = cli.Get("/v1/config");
   return res && res->status == 200;
+}
+
+bool FetchFieldUpperBound(const std::string& rest_uri, const std::string& ns,
+                          const std::string& table, const std::string& field,
+                          int64_t* out, bool* present, std::string* error) {
+  *present = false;
+  if (rest_uri.empty()) {
+    if (error) *error = "empty rest_uri";
+    return false;
+  }
+  httplib::Client cli(rest_uri);
+  cli.set_connection_timeout(2, 0);
+  cli.set_read_timeout(10, 0);
+  const std::string path = "/v1/namespaces/" + ns + "/tables/" + table +
+                           "/field-upper-bound?field=" + field;
+  auto res = cli.Get(path);
+  if (!res) {
+    if (error) *error = "no response from " + rest_uri;
+    return false;
+  }
+  if (res->status != 200) {
+    if (error) *error = "HTTP " + std::to_string(res->status) + ": " + res->body;
+    return false;
+  }
+  try {
+    auto body = nlohmann::json::parse(res->body);
+    auto it = body.find("upper_bound");
+    if (it == body.end() || it->is_null()) return true;  // present stays false
+    *out = it->get<int64_t>();
+    *present = true;
+    return true;
+  } catch (const std::exception& e) {
+    if (error) *error = std::string("parse: ") + e.what();
+    return false;
+  }
 }
 
 std::shared_ptr<iceberg::Catalog> OpenCatalog(const fs::path& warehouse,

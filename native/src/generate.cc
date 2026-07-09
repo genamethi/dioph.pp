@@ -1,6 +1,7 @@
 #include "primeparts/aligned_writer.h"
 #include "primeparts/catalog/pp_commit.h"
 #include "primeparts/catalog/pp_iceberg_rest.h"
+#include "primeparts/config.h"
 #include "primeparts/core.h"
 #include "primeparts/generate.h"
 #include "primeparts/schemas.h"
@@ -52,6 +53,15 @@ using primeparts::WrittenFile;
 namespace {
 
 constexpr int64_t kDefaultChunkPrimes = 500000;
+
+// Minimum --count. Smaller runs fragment the byte-aligned buckets and aren't
+// worth a full generate invocation.
+constexpr int64_t kMinCount = 1'000'000'000;
+
+// Fresh/empty warehouse (or --temp) default start index. prime_rank == 1-based
+// prime index; index 1 is p=2, intentionally omitted, so a from-scratch build
+// starts at index 2 (p=3).
+constexpr int64_t kFreshStartIdx = 2;
 
 thread_local std::string g_last_error;
 
@@ -225,25 +235,34 @@ class StopMonitor {
 void usage(FILE* stream) {
   std::fprintf(
       stream,
-      "usage: primeparts-generate --start-idx N --count N [options]\n"
+      "usage: primeparts-generate --count N [options]\n"
       "\n"
       "Streams primes+partitions to the pp REST client, which shapes byte-\n"
       "driven p-aligned buckets (primes >= 1 GiB) and commits both tables in\n"
-      "one atomic transaction.\n"
+      "one atomic transaction. Only --count is required; --start-idx resumes\n"
+      "from the committed frontier by default.\n"
       "\n"
       "Options:\n"
+      "  --count N                 REQUIRED. Number of primes to generate\n"
+      "                            (minimum 1000000000).\n"
+      "  --start-idx N             First prime index to generate. Default: resume\n"
+      "                            from the frontier (catalogd's committed max\n"
+      "                            prime_rank + 1). Applies only to a fresh\n"
+      "                            warehouse or --temp, where it defaults to 2\n"
+      "                            (index 1 is p=2, omitted by convention).\n"
+      "  --warehouse PATH          Warehouse root. Default: config.lua 'warehouse'.\n"
+      "  --rest-uri URL            pp-catalogd base (e.g. http://127.0.0.1:8181).\n"
+      "                            Default: config.lua 'rest_uri' or 127.0.0.1:8181.\n"
       "  --temp                    Write to $FUNBUNS_DATA_DIR/tmp/iceberg_temp_<ts>/\n"
-      "                            warehouse and skip the commit (files-only)\n"
-      "  --rest-uri URL            Commit through pp-catalogd at URL (bare base,\n"
-      "                            e.g. http://127.0.0.1:8181); default in-process\n"
-      "  --warehouse PATH          Warehouse root to write under\n"
-      "  --chunk-primes N          Materialization chunk size (default: 500000)\n"
-      "  --threads N               Materialization threads (default: hw)\n"
+      "                            warehouse and skip the commit (files-only).\n"
+      "  --chunk-primes N          Materialization chunk size (default: 500000).\n"
+      "  --threads N               Materialization threads (default: hw).\n"
       "  --help\n"
       "\n"
       "Environment:\n"
       "  PRIMEPARTS_PRIME_RANK_START prime_rank to stamp on the first prime row.\n"
-      "                              Default: --start-idx.\n");
+      "                              Default: the resolved start index.\n"
+      "  PRIMEPARTS_REST_URI         Overrides --rest-uri / config.lua.\n");
 }
 
 bool parse_i64(const char* text, int64_t* out) {
@@ -263,9 +282,9 @@ bool resolve_rank_start(Options* options) {
       std::fprintf(stderr, "invalid PRIMEPARTS_PRIME_RANK_START: %s\n", rank_env);
       return false;
     }
-  } else {
-    options->prime_rank_start = options->start_idx;
   }
+  // else: leave prime_rank_start = 0; run_generation defaults it to the resolved
+  // start_idx once the frontier is known.
   return true;
 }
 
@@ -502,17 +521,37 @@ bool parse_args(int argc, char** argv, Options* options) {
       default: return false;
     }
   }
-  if (options->start_idx <= 0 || options->count < 0 || options->chunk_primes <= 0 ||
-      options->threads < 0) {
+  if (options->chunk_primes <= 0 || options->threads < 0) {
     usage(stderr);
     return false;
   }
+  if (options->count < kMinCount) {
+    std::fprintf(stderr, "--count must be >= %lld\n", (long long)kMinCount);
+    return false;
+  }
+
+  // Defaults from config.lua when the flags are absent (CLI flag wins).
+  std::string cfg_err;
+  auto cfg = primeparts::config::Load(&cfg_err);
+  if (options->rest_uri.empty()) {
+    if (const char* env = std::getenv("PRIMEPARTS_REST_URI"); env && env[0])
+      options->rest_uri = env;
+    else if (auto it = cfg.find("rest_uri"); it != cfg.end() && !it->second.empty())
+      options->rest_uri = it->second;
+    else
+      options->rest_uri = primeparts::catalog::kDefaultRestUri;
+  }
   if (options->warehouse.empty()) {
-    if (!options->temp) {
-      std::fprintf(stderr, "either --warehouse or --temp is required\n");
+    if (options->temp) {
+      options->warehouse = default_temp_root() / "warehouse";
+    } else if (auto it = cfg.find("warehouse"); it != cfg.end() && !it->second.empty()) {
+      options->warehouse = it->second;
+    } else {
+      std::fprintf(stderr,
+                   "no warehouse: pass --warehouse, set warehouse in %s, or use --temp\n",
+                   primeparts::config::ConfigFilePath().string().c_str());
       return false;
     }
-    options->warehouse = default_temp_root() / "warehouse";
   }
   if (options->threads == 0) {
     unsigned hw = std::thread::hardware_concurrency();
@@ -559,13 +598,66 @@ bool commit_plan(const Options& options, const CommitPlan& plan,
                                                 options.warehouse, specs, error);
 }
 
+// Resolve the first prime index to generate. --temp or an unset start_idx on a
+// fresh warehouse defaults to kFreshStartIdx (p=3). Otherwise ask catalogd for
+// the committed `prime_rank` frontier and continue at frontier+1; an explicit
+// --start-idx is honored only when there is no frontier (fresh) or when catalogd
+// is unreachable (offline override). False + last_error on an unrecoverable
+// failure.
+bool resolve_start_idx(const Options& options, const pp_gen_callbacks* callbacks,
+                       int64_t* out_start) {
+  if (options.temp) {
+    *out_start = options.start_idx > 0 ? options.start_idx : kFreshStartIdx;
+    return true;
+  }
+  int64_t ub = 0;
+  bool present = false;
+  std::string err;
+  if (!primeparts::catalog::FetchFieldUpperBound(options.rest_uri, "primeparts",
+                                                 "primes", "prime_rank", &ub,
+                                                 &present, &err)) {
+    if (options.start_idx > 0) {  // offline override
+      *out_start = options.start_idx;
+      log_line(callbacks,
+               "warning: catalogd unreachable (%s); using --start-idx=%" PRId64,
+               err.c_str(), options.start_idx);
+      return true;
+    }
+    set_last_error("resume: cannot reach catalogd at " + options.rest_uri + " (" +
+                   err + "); pass --start-idx, use --temp, or start pp-catalogd");
+    log_line(callbacks, "%s", g_last_error.c_str());
+    return false;
+  }
+  if (present) {
+    *out_start = ub + 1;
+    if (options.start_idx > 0 && options.start_idx != *out_start) {
+      log_line(callbacks,
+               "note: ignoring --start-idx=%" PRId64 "; resuming from frontier "
+               "prime_rank=%" PRId64 " (start_idx=%" PRId64 ")",
+               options.start_idx, ub, *out_start);
+    } else {
+      log_line(callbacks,
+               "resume: frontier prime_rank=%" PRId64 ", start_idx=%" PRId64, ub,
+               *out_start);
+    }
+  } else {
+    *out_start = options.start_idx > 0 ? options.start_idx : kFreshStartIdx;
+    log_line(callbacks, "fresh warehouse: start_idx=%" PRId64, *out_start);
+  }
+  return true;
+}
+
 }  // namespace
 
 int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp_gen_result* out) {
   std::string error;
+  int64_t start_idx = 0;
+  if (!resolve_start_idx(options, callbacks, &start_idx)) return 1;
+  int64_t prime_rank_start =
+      options.prime_rank_start > 0 ? options.prime_rank_start : start_idx;
   if (out) {
     std::memset(out, 0, sizeof(*out));
-    out->start_idx = options.start_idx;
+    out->start_idx = start_idx;
     out->count = options.count;
   }
   int init_status = pp_init();
@@ -614,9 +706,9 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
       return 1;
     }
 
-    int64_t next_idx = options.start_idx;
-    int64_t end_idx = options.start_idx + options.count;
-    int64_t prime_rank_cursor = options.prime_rank_start;
+    int64_t next_idx = start_idx;
+    int64_t end_idx = start_idx + options.count;
+    int64_t prime_rank_cursor = prime_rank_start;
     int64_t total_primes = 0;
     int64_t total_partitions = 0;
     int64_t first_p = 0;
@@ -830,16 +922,16 @@ int pp_gen_run(const pp_gen_options* options,
   internal.count = options->count;
   internal.chunk_primes = options->chunk_primes > 0 ? options->chunk_primes : kDefaultChunkPrimes;
   internal.threads = options->threads;
-  internal.prime_rank_start = options->prime_rank_start > 0
-                                  ? options->prime_rank_start
-                                  : options->start_idx;
+  internal.prime_rank_start = options->prime_rank_start;  // 0 => derive from start_idx
   internal.temp = options->temp != 0;
   if (options->warehouse) internal.warehouse = options->warehouse;
   if (options->rest_uri) internal.rest_uri = options->rest_uri;
-  if (internal.start_idx <= 0 || internal.count < 0 || internal.chunk_primes <= 0 || internal.threads < 0) {
-    set_last_error("invalid pp_gen_options values");
+  if (internal.count < kMinCount || internal.chunk_primes <= 0 || internal.threads < 0) {
+    set_last_error("invalid pp_gen_options values (count must be >= 1000000000)");
     return 1;
   }
+  if (internal.rest_uri.empty())
+    internal.rest_uri = primeparts::catalog::kDefaultRestUri;
   if (internal.warehouse.empty()) {
     if (!internal.temp) {
       set_last_error("either warehouse or temp mode is required");
