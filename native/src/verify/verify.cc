@@ -112,9 +112,9 @@ class PrimeRankCheck : public Check {
   CheckSpec spec_;
 };
 
-class PartitionFormCheck : public Check {
+class PartitionCheck : public Check {
  public:
-  PartitionFormCheck() {
+  PartitionCheck() {
     spec_.table = "partitions";
     spec_.select = {"p", "m_k", "n_k", "q_k"};
   }
@@ -132,19 +132,29 @@ class PartitionFormCheck : public Check {
 
     for (int64_t i = 0; i < n; ++i) {
       ++out.rows_checked;
-      const u128 lhs = static_cast<u128>(p[i]);
-      const u128 rhs = (static_cast<u128>(1) << m_k[i]) +
-                       IPow128(static_cast<uint64_t>(q_k[i]), n_k[i]);
-      const bool bad_form = lhs != rhs;
-      const bool bad_q = !n_is_prime(static_cast<ulong>(q_k[i]));
-      if (bad_form || bad_q) {
+      const int32_t m = m_k[i];
+      const int32_t nn = n_k[i];
+      const int64_t q = q_k[i];
+      const bool not_allowed = m < 1 || m > 63 || nn < 1 || q < 2;
+      const bool composite_q =
+          !not_allowed && !n_is_prime(static_cast<ulong>(q));
+      const bool unsatisfied =
+          !not_allowed &&
+          static_cast<u128>(p[i]) !=
+              (static_cast<u128>(1) << m) +
+                  IPow128(static_cast<uint64_t>(q), nn);
+      if (not_allowed || composite_q || unsatisfied) {
         ++out.violations;
         if (static_cast<int>(out.examples.size()) < max_examples) {
-          std::string d =
-              bad_form
-                  ? "p != 2^" + std::to_string(m_k[i]) + " + " +
-                        std::to_string(q_k[i]) + "^" + std::to_string(n_k[i])
-                  : "q_k=" + std::to_string(q_k[i]) + " is composite";
+          std::string d;
+          if (not_allowed)
+            d = "not allowed: m_k=" + std::to_string(m) +
+                " n_k=" + std::to_string(nn) + " q_k=" + std::to_string(q);
+          else if (unsatisfied)
+            d = "unsatisfied: p != 2^" + std::to_string(m) + " + " +
+                std::to_string(q) + "^" + std::to_string(nn);
+          else
+            d = "q_k=" + std::to_string(q) + " not prime";
           out.examples.push_back({p[i], std::move(d)});
         }
       }
@@ -174,8 +184,8 @@ std::unique_ptr<Check> MakePrimeRankCheck() {
   return std::make_unique<PrimeRankCheck>();
 }
 
-std::unique_ptr<Check> MakePartitionFormCheck() {
-  return std::make_unique<PartitionFormCheck>();
+std::unique_ptr<Check> MakePartitionCheck() {
+  return std::make_unique<PartitionCheck>();
 }
 
 CheckResult TableVerifier::Run(const std::string& metadata_path,

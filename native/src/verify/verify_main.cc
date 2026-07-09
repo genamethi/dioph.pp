@@ -85,7 +85,7 @@ int RunTable(const std::shared_ptr<iceberg::Catalog>& catalog,
       tbl->metadata_file_location());
 
   auto check = table == "primes" ? ppv::MakePrimeRankCheck()
-                                 : ppv::MakePartitionFormCheck();
+                                 : ppv::MakePartitionCheck();
   auto filter = ppv::BuildWindowFilter(opts.window);
 
   std::optional<int64_t> from_snap;

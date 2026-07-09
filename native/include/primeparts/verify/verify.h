@@ -57,7 +57,7 @@ class Check {
 };
 
 std::unique_ptr<Check> MakePrimeRankCheck();
-std::unique_ptr<Check> MakePartitionFormCheck();
+std::unique_ptr<Check> MakePartitionCheck();
 
 class TableVerifier {
  public:
