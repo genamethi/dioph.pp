@@ -59,6 +59,22 @@ forward-port.
    without it native iceberg-cpp cannot scan any Hive-created table (incl.
    `primes_k0`).
 
+## verify + client planning (2026-07-09)
+
+- `primeparts-verify` (`native/src/verify/`): catalog-seam math checker. `primes`:
+  `pi(p)==prime_rank` and `p` prime, via a per-file FLINT `n_primes_t` iterator
+  warmed on the file's `p`-window with `prime_rank` anchored by one `primecount_pi`
+  (built prime list, vectorized compare — not pairwise). `partitions`: `not allowed`
+  (domain: `m_k<1,n_k<1,q_k<2,m_k>63`) / `unsatisfied` (`p != 2^m_k + q_k^n_k`) /
+  `q_k not prime`. Vectorized, sharded over buckets. Options `--table/--p-lo/--p-hi/
+  --limit/--tail N`; writes a run log; non-zero exit on any violation.
+- `--tail N` uses `SourceTableReader::OpenIncremental` (`IncrementalAppendScan`,
+  `FromSnapshot`/`ToSnapshot`) — rows added in the last N snapshots.
+- Client access, the row-group/zone-map pruning gap (client-side, not
+  iceberg-cpp-blocked), and the server-side planner model (catalogd invokes a
+  planner module, returns the plan as if the catalog produced it):
+  `../data_eng/clients_rest_gap.md`, `../data_eng/catalogd_rest_gap.md`.
+
 ## Remaining work
 
 - Derived read indexes for fast number-theoretic reads (approach open).
