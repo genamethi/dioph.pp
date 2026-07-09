@@ -69,6 +69,8 @@ MERSENNE_SIDECAR_OBJ := $(BUILD_DIR)/mersenne_sidecar.o
 TUPLES_OBJ := $(BUILD_DIR)/tuples.o
 TALLY_MAIN_OBJ := $(BUILD_DIR)/tally_main.o
 CLUSTER_MAIN_OBJ := $(BUILD_DIR)/cluster_main.o
+VERIFY_OBJ := $(BUILD_DIR)/verify.o
+VERIFY_MAIN_OBJ := $(BUILD_DIR)/verify_main.o
 
 .PHONY: all clean test smoke install
 
@@ -92,7 +94,8 @@ INSTALL_BINS := \
      $(BUILD_DIR)/mersenne-sidecar \
      $(BUILD_DIR)/primeparts-tui \
      $(BUILD_DIR)/tally \
-     $(BUILD_DIR)/cluster
+     $(BUILD_DIR)/cluster \
+     $(BUILD_DIR)/primeparts-verify
 
 install: all
 	mkdir -p "$(PP_INSTALL_PATH)"
@@ -145,7 +148,8 @@ all: $(BUILD_DIR)/libprimeparts_core.so \
      $(BUILD_DIR)/mersenne-sidecar \
      $(BUILD_DIR)/primeparts-tui \
      $(BUILD_DIR)/tally \
-     $(BUILD_DIR)/cluster
+     $(BUILD_DIR)/cluster \
+     $(BUILD_DIR)/primeparts-verify
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -341,6 +345,15 @@ $(BUILD_DIR)/tally: $(TALLY_MAIN_OBJ) $(TUPLES_OBJ) $(SOURCE_SCAN_OBJ) $(WRITER_
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
 
 $(BUILD_DIR)/cluster: $(CLUSTER_MAIN_OBJ) $(TUPLES_OBJ) $(SOURCE_SCAN_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
+	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
+
+$(VERIFY_OBJ): src/verify/verify.cc include/primeparts/verify/verify.h include/primeparts/source_scan.h include/primeparts/core.h include/primeparts/common/thread_pool.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(VERIFY_MAIN_OBJ): src/verify/verify_main.cc include/primeparts/verify/verify.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/common/uri.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/primeparts-verify: $(VERIFY_MAIN_OBJ) $(VERIFY_OBJ) $(CORE_OBJ) $(SOURCE_SCAN_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
 
 $(BUILD_DIR)/primeparts-mersenne: $(MERSENNE_MAIN_OBJ) $(WRITER_OBJ) $(SCHEMAS_OBJ) $(PRIMITIVE_FACTORS_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
