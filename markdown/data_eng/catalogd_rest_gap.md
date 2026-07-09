@@ -3,7 +3,8 @@
 Route surface of `native/src/catalog/pp_catalogd.cc` against the OpenAPI spec at
 `native/vendor/iceberg-refs/rest-catalog-open-api.yaml` (anchors are line numbers
 of each `path:` entry). Companion docs: `irc_catalog_design.md`,
-`iceberg_data_setup.md`, `../misc/HANDOFF.md`.
+`clients_rest_gap.md` (the client side of the same seam), `iceberg_data_setup.md`,
+`../misc/HANDOFF.md`.
 
 Routes are bare `/v1/...` with no `{prefix}` segment (legal while `getConfig`
 returns no prefix). HEAD existence checks are served by the GET handlers
@@ -50,13 +51,27 @@ in a single LMDB write txn (atomic-or-abort). The client
 (`CommitFilesAtomic`, `pp_commit.{h,cc}`) writes all parquet + manifests and
 assembles the request; the server only validates requirements and does the CAS.
 
-## Not implemented
+## Scan planning (server-side model, 2026-07-09)
 
-- **Scan planning** (`planTableScan`/`fetchScanTasks`). `loadTable` config
-  advertises `scan-planning-mode: client`; clients plan from the current
-  snapshot's manifests (partition tuples + p/rank stats, `DataFile.split_offsets`).
-  Moving planning server-side would flip that to `server` and let clients drop
-  path parsing entirely.
+`planTableScan`/`fetchScanTasks` are unimplemented; `loadTable` advertises
+`scan-planning-mode: client` and clients plan for themselves (see
+`clients_rest_gap.md`). Target model when they land:
+
+- catalogd implements the **catalog API surface** only. It does not contain the
+  planner. On `planTableScan` it **invokes** a planner module (a specialized
+  consumer — separate logic/binary) and holds the request until a plan is formed,
+  then returns `FileScanTask`s. To the client the plan appears to come from the
+  catalog; the planner is never a party the client addresses.
+- A `FileScanTask` is the plan atom: `{ data-file, delete-files, residual,
+  row-group ranges }`. The same atom the client builds locally today; server-side
+  planning just moves its production behind the API and flips `scan-planning-mode`
+  to `server`, letting clients drop manifest walking + path parsing.
+- Residual → row-group selection (zone-map pruning) is the core of the plan and
+  is **not** iceberg-cpp-blocked — it composes parquet/arrow primitives. Built as
+  the API-shaped scan-plan atom, one implementation serves client-side planning
+  now and server-side `planTableScan` later. Detail: `clients_rest_gap.md`.
+
+## Not implemented
 - **Views.** `QueryService::Materialize`'s MV cache (replace-semantics
   `primeparts.<name>` tables) covers the current need.
 - **`stage-create`, pagination, `?snapshots=`, ETag/If-None-Match, `{prefix}`,
