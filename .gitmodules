@@ -1,21 +1,5 @@
 # Vendored native dependencies.
 #
-# lmdb        — pinned, small, populated by default (`git submodule update
-#               --init native/vendor/lmdb`); its mdb.c/midl.c are compiled
-#               directly by native/Makefile into build/liblmdb.a.
-# iceberg-cpp — on-demand (update = none); native/configure checks out the pinned
-#               tag (ICEBERG_REF, default v0.3.0) BY REF and applies
-#               native/vendor/patches/*.patch.
-# arrow       — on-demand (update = none); native/configure checks out the pinned
-#               release tag (ARROW_REF, default apache-arrow-24.0.0) BY REF,
-#               sparse-checks-out cpp/, and builds it static into the prefix.
-#
-# `ignore = all` keeps the checkout, applied patches, and build trees of the
-# on-demand submodules out of `git status`. A normal clone does NOT populate
-# arrow/iceberg-cpp; run native/configure to materialize them by ref. A plain
-# `git submodule update` cannot — the pinned release commit is not a shallow-
-# fetchable SHA ("not our ref"); configure fetches the tag ref instead.
-
 [submodule "native/vendor/lmdb"]
 	path = native/vendor/lmdb
 	url = https://github.com/LMDB/lmdb
@@ -25,16 +9,14 @@
 [submodule "native/vendor/iceberg-cpp"]
 	path = native/vendor/iceberg-cpp
 	url = https://github.com/apache/iceberg-cpp
-	update = none
 	shallow = true
 	ignore = all
-	fetchRecurseSubmodules = false
 
 [submodule "native/vendor/arrow"]
 	path = native/vendor/arrow
 	url = https://github.com/apache/arrow
-	branch = apache-arrow-24.0.0
-	update = none
 	shallow = true
-	ignore = all
-	fetchRecurseSubmodules = false
+
+[submodule "native/vendor/flint"]
+	path = native/vendor/flint
+	url = https://github.com/flintlib/flint

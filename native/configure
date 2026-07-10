@@ -7,27 +7,127 @@ PREFIX="${PREFIX:-/usr/local}"
 JOBS=$(nproc 2>/dev/null || echo 4)
 CXX="${CXX:-g++}"
 
-command -v yay >/dev/null 2>&1 || { echo "yay required (arch target)"; exit 1; }
+DISTRO=
+if command -v pacman >/dev/null 2>&1; then
+  DISTRO=arch
+  command -v yay >/dev/null 2>&1 || {
+    echo "yay required (arch target)"
+    exit 1
+  }
 
-PKGS="base-devel pkgconf cmake ninja git curl tar boost \
+  PKGS="base-devel pkgconf cmake ninja git curl tar boost \
 gmp mpfr flint pari primesieve primecount notcurses lmdb sqlite openssl \
 nlohmann-json \
 thrift snappy brotli protobuf abseil-cpp re2 utf8proc lz4 zstd zlib bzip2"
 
-missing=
-for p in $PKGS; do
-  pacman -Qq "$p" >/dev/null 2>&1 || pacman -Qg "$p" >/dev/null 2>&1 || missing="$missing $p"
-done
-[ -n "$missing" ] && yay -S --needed $missing || echo "system deps present"
+  missing=
+  for p in $PKGS; do
+    pacman -Qq "$p" >/dev/null 2>&1 || pacman -Qg "$p" >/dev/null 2>&1 || missing="$missing $p"
+  done
+  [ -n "$missing" ] && yay -S --needed $missing || echo "system deps present"
+elif command -v apt-get >/dev/null 2>&1; then
+  DISTRO=debian
+  deb_have() { dpkg-query -W -f '${Status}' "$1" 2>/dev/null | grep -q "install ok installed"; }
+  pkgc() { PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" pkg-config "$@" 2>/dev/null; }
 
-printf '#include <format>\n#include <ranges>\n#include <vector>\n#include <expected>\nint main(){auto v=std::views::iota(0,1)|std::ranges::to<std::vector<int>>();return (int)std::format("{}",v.size()).size();}\n' \
-  | "$CXX" -std=c++23 -x c++ - -o "$(mktemp -u)" 2>/dev/null \
-  || { echo "toolchain lacks c++23 <format>/std::ranges::to/<expected> (need gcc>=14); set CXX="; exit 1; }
+  # debian: only the genuinely-system deps. Everything else is vendored or
+  # bundled and must NOT come from apt:
+  #   lmdb / notcurses / snappy      — vendor/ gitlinks, built here or by make
+  #   thrift protobuf abseil re2 utf8proc lz4 snappy
+  #                                  — arrow bundles what it doesn't find
+  #                                    (libarrow_bundled_dependencies.a)
+  #   nlohmann-json cpr avro croaring sqlpp23
+  #                                  — iceberg-cpp FetchContent, pinned; a
+  #                                    system nlohmann would win unpinned
+  # zlib/zstd/bz2/brotli stay system: the arrow static link pulls them from
+  # the distro (arrow.pc Libs.private). flint is version-gated below.
+  PKGS="build-essential pkgconf cmake ninja-build git curl tar \
+libboost-dev libgmp-dev libmpfr-dev libprimesieve-dev libprimecount-dev \
+libsqlite3-dev libssl-dev libreadline-dev \
+zlib1g-dev libzstd-dev libbz2-dev libbrotli-dev"
+
+  # -lcurl: either TLS flavor works; add one only if neither is installed
+  deb_have libcurl4-openssl-dev || deb_have libcurl4-gnutls-dev || PKGS="$PKGS libcurl4-openssl-dev"
+  # pari: prefer an existing $PREFIX build (e.g. 2.18-dev) over sid's 2.17
+  [ -e "$PREFIX/lib/libpari.so" ] || [ -e "$PREFIX/lib/libpari.a" ] || deb_have libpari-dev || PKGS="$PKGS libpari-dev"
+  # notcurses comes from vendor/ (built below), apt only supplies its build deps
+  pkgc --exists notcurses-core || pkgc --exists notcurses ||
+    PKGS="$PKGS libncurses-dev libunistring-dev libdeflate-dev"
+
+  missing=
+  for p in $PKGS; do deb_have "$p" || missing="$missing $p"; done
+  if [ -n "$missing" ]; then
+    sudo apt-get update
+    sudo apt-get install -y $missing
+  else
+    echo "system deps present"
+  fi
+
+  # flint >= 3.6: sid tops out at 3.5.0; 3.6.0-1~exp1 is in experimental.
+  # Accept a $PREFIX / source build, never silently take 3.5.
+  if pkgc --atleast-version=3.6 flint; then
+    echo "flint $(pkgc --modversion flint) ok"
+  else
+    echo "flint >= 3.6 required; sid's libflint-dev is 3.5.0."
+    echo "either add the experimental suite and:"
+    echo "  sudo apt-get install -t experimental libflint-dev"
+    echo "or build flint 3.6 from source into $PREFIX"
+    exit 1
+  fi
+else
+  echo "unsupported distro: need pacman (arch) or apt-get (debian)"
+  exit 1
+fi
+
+printf '#include <format>\n#include <ranges>\n#include <vector>\n#include <expected>\nint main(){auto v=std::views::iota(0,1)|std::ranges::to<std::vector<int>>();return (int)std::format("{}",v.size()).size();}\n' |
+  "$CXX" -std=c++23 -x c++ - -o "$(mktemp -u)" 2>/dev/null ||
+  {
+    echo "toolchain lacks c++23 <format>/std::ranges::to/<expected> (need gcc>=14); set CXX="
+    exit 1
+  }
 echo "c++23 toolchain ok"
 
 for t in cmake ninja make git curl tar pkg-config; do
-  command -v "$t" >/dev/null 2>&1 || { echo "missing tool: $t"; exit 1; }
+  command -v "$t" >/dev/null 2>&1 || {
+    echo "missing tool: $t"
+    exit 1
+  }
 done
+
+if [ "$DISTRO" = debian ]; then
+  # vendored notcurses (tracked gitlink; sid's libnotcurses-dev unused).
+  # Lean core build — the Makefile links notcurses-core only.
+  if pkgc --exists notcurses-core || pkgc --exists notcurses; then
+    echo "notcurses present"
+  else
+    [ -f "$VENDOR/notcurses/CMakeLists.txt" ] || {
+      echo "vendor/notcurses not populated (gitlink has no .gitmodules entry);"
+      echo "clone https://github.com/dankamongmen/notcurses at the pinned rev there"
+      exit 1
+    }
+    cmake -S "$VENDOR/notcurses" -B "$VENDOR/notcurses/build" -G Ninja \
+      -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+      -DUSE_MULTIMEDIA=none -DUSE_PANDOC=off -DUSE_DOCTEST=off \
+      -DBUILD_TESTING=off -DUSE_QRCODEGEN=off -DUSE_POC=off
+    cmake --build "$VENDOR/notcurses/build" -j "$JOBS"
+    sudo cmake --install "$VENDOR/notcurses/build"
+  fi
+
+  # vendored snappy → static lib in the prefix so arrow's find_package sees it;
+  # an unpopulated gitlink is fine (arrow bundles its own), so warn only.
+  if [ -f "$PREFIX/lib/libsnappy.a" ]; then
+    echo "snappy present"
+  elif [ -f "$VENDOR/snappy/CMakeLists.txt" ]; then
+    cmake -S "$VENDOR/snappy" -B "$VENDOR/snappy/build" -G Ninja \
+      -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+      -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+      -DSNAPPY_BUILD_TESTS=OFF -DSNAPPY_BUILD_BENCHMARKS=OFF
+    cmake --build "$VENDOR/snappy/build" -j "$JOBS"
+    sudo cmake --install "$VENDOR/snappy/build"
+  else
+    echo "warn: vendor/snappy not populated; arrow will bundle snappy"
+  fi
+fi
 
 if [ ! -x /usr/local/bin/lua ] || ! /usr/local/bin/lua -v 2>&1 | grep -q "Lua 5.5"; then
   tmp=$(mktemp -d)
@@ -91,12 +191,12 @@ fi
   echo "# generated by native/configure"
   echo "PREFIX := $PREFIX"
   [ -n "$FALLBACK" ] && echo "ICEBERG_FALLBACK_CPPFLAGS := -I$ICEBERG_SRC"
-} > "$ROOT/config.mk"
+} >"$ROOT/config.mk"
 
 INSTALL_PATH="${PP_INSTALL_PATH:-$HOME/.local/bin}"
 case ":$PATH:" in
-  *":$INSTALL_PATH:"*) ;;
-  *) echo "warn: install dir $INSTALL_PATH not in PATH (installed binaries won't be found until you add it)" ;;
+*":$INSTALL_PATH:"*) ;;
+*) echo "warn: install dir $INSTALL_PATH not in PATH (installed binaries won't be found until you add it)" ;;
 esac
 
 echo "done. build:  make -C $ROOT   install:  make -C $ROOT install"
