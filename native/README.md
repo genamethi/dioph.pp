@@ -188,6 +188,23 @@ native/build/primeparts-generate \
 On this machine, a temp run with `--chunk-primes 500000 --threads 24` produced
 about `109MB` of Parquet and ran around `2.24M primes/s`.
 
+## Catalog on-disk format
+
+The catalog store (`<warehouse>/catalog.lmdb`) is written by the vendored LMDB
+(`native/vendor/lmdb`, on-disk `MDB_DATA_VERSION=3`). To inspect, dump, or
+restore a catalog, build the CLI tools from the vendored tree so they match the
+library the `pp` binaries link:
+
+```
+make lmdb-tools                                        # -> build/mdb_{stat,dump,load,copy,drop}
+build/mdb_stat -ea <warehouse>/catalog.lmdb           # inspect env + all sub-DBs (tables, nsprops)
+build/mdb_dump -a  <warehouse>/catalog.lmdb > cat.dump # portable backup of all sub-DBs
+build/mdb_load -f  cat.dump <fresh-dir>/catalog.lmdb   # restore into a fresh env
+```
+
+`mdb_dump -a` / `mdb_load -f` round-trip the named sub-DBs together and are the
+supported backup/restore path.
+
 ## Recovery and warehouse health
 
 A native process killed after writing Parquet but before committing leaves

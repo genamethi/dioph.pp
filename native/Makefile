@@ -263,6 +263,25 @@ $(PP_LMDB_STORE_OBJ): src/catalog/pp_lmdb_store.cc include/primeparts/catalog/pp
 $(PP_LMDB_SMOKE_OBJ): src/catalog/pp_lmdb_smoke.cc include/primeparts/catalog/pp_lmdb_store.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
+# --- LMDB CLI tools ------------------------------------------------------
+# Build the vendored mdb_* tools so inspection/dump/load use the same library
+# the pp binaries link (on-disk MDB_DATA_VERSION=3):
+#   make lmdb-tools  ->  build/mdb_{stat,dump,load,copy,drop}
+#   build/mdb_stat -ea <warehouse>/catalog.lmdb     # inspect all sub-DBs
+# module.o carries the crypto/checksum module hooks (mdb_modload et al.) the
+# tools reference; the core $(LMDB_LIB) omits it since pp binaries don't.
+LMDB_MODULE_OBJ := $(BUILD_DIR)/lmdb_module.o
+LMDB_TOOLS := $(addprefix $(BUILD_DIR)/,mdb_stat mdb_dump mdb_load mdb_copy mdb_drop)
+
+$(LMDB_MODULE_OBJ): $(LMDB_DIR)/module.c | $(BUILD_DIR)
+	$(CC) $(LMDB_CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/mdb_%: $(LMDB_DIR)/mdb_%.c $(LMDB_LIB) $(LMDB_MODULE_OBJ) | $(BUILD_DIR)
+	$(CC) $(LMDB_CFLAGS) $(LMDB_CPPFLAGS) $< $(LMDB_LIB) $(LMDB_MODULE_OBJ) -ldl -pthread -o $@
+
+.PHONY: lmdb-tools
+lmdb-tools: $(LMDB_TOOLS)
+
 $(PP_CATALOG_MAIN_OBJ): src/catalog/pp_catalog_main.cc include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/catalog/pp_sieve_clone.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
