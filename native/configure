@@ -15,10 +15,14 @@ if command -v pacman >/dev/null 2>&1; then
     exit 1
   }
 
+  # flint/notcurses/snappy/lmdb are vendored (built below into $PREFIX);
+  # ffmpeg/libunistring/libdeflate/doctest/pandoc-cli are notcurses build deps
+  # (full-option build), base-devel covers flint's autotools bootstrap.
   PKGS="base-devel pkgconf cmake ninja git curl tar boost \
-gmp mpfr flint pari primesieve primecount notcurses lmdb sqlite openssl \
+gmp mpfr pari primesieve primecount sqlite openssl \
 nlohmann-json \
-thrift snappy brotli protobuf abseil-cpp re2 utf8proc lz4 zstd zlib bzip2"
+ffmpeg libunistring libdeflate ncurses doctest pandoc-cli \
+thrift brotli protobuf abseil-cpp re2 utf8proc lz4 zstd zlib bzip2"
 
   missing=
   for p in $PKGS; do
@@ -28,11 +32,11 @@ thrift snappy brotli protobuf abseil-cpp re2 utf8proc lz4 zstd zlib bzip2"
 elif command -v apt-get >/dev/null 2>&1; then
   DISTRO=debian
   deb_have() { dpkg-query -W -f '${Status}' "$1" 2>/dev/null | grep -q "install ok installed"; }
-  pkgc() { PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" pkg-config "$@" 2>/dev/null; }
 
   # debian: only the genuinely-system deps. Everything else is vendored or
   # bundled and must NOT come from apt:
-  #   lmdb / notcurses / snappy      — vendor/ gitlinks, built here or by make
+  #   flint / lmdb / notcurses / snappy
+  #                                  — vendor/ submodules, built below or by make
   #   thrift protobuf abseil re2 utf8proc lz4 snappy
   #                                  — arrow bundles what it doesn't find
   #                                    (libarrow_bundled_dependencies.a)
@@ -40,7 +44,7 @@ elif command -v apt-get >/dev/null 2>&1; then
   #                                  — iceberg-cpp FetchContent, pinned; a
   #                                    system nlohmann would win unpinned
   # zlib/zstd/bz2/brotli stay system: the arrow static link pulls them from
-  # the distro (arrow.pc Libs.private). flint is version-gated below.
+  # the distro (arrow.pc Libs.private).
   PKGS="build-essential pkgconf cmake ninja-build git curl tar \
 libboost-dev libgmp-dev libmpfr-dev libprimesieve-dev libprimecount-dev \
 libsqlite3-dev libssl-dev libreadline-dev \
@@ -50,9 +54,13 @@ zlib1g-dev libzstd-dev libbz2-dev libbrotli-dev"
   deb_have libcurl4-openssl-dev || deb_have libcurl4-gnutls-dev || PKGS="$PKGS libcurl4-openssl-dev"
   # pari: prefer an existing $PREFIX build (e.g. 2.18-dev) over sid's 2.17
   [ -e "$PREFIX/lib/libpari.so" ] || [ -e "$PREFIX/lib/libpari.a" ] || deb_have libpari-dev || PKGS="$PKGS libpari-dev"
-  # notcurses comes from vendor/ (built below), apt only supplies its build deps
-  pkgc --exists notcurses-core || pkgc --exists notcurses ||
-    PKGS="$PKGS libncurses-dev libunistring-dev libdeflate-dev"
+  # build deps for the vendored builds below, only when the prefix lacks them:
+  # flint bootstraps with autotools; notcurses is a full-option build
+  # (multimedia/pandoc/doctest on) per upstream INSTALL.md's apt list.
+  [ -f "$PREFIX/lib/pkgconfig/flint.pc" ] || PKGS="$PKGS autoconf automake libtool"
+  [ -f "$PREFIX/lib/pkgconfig/notcurses-core.pc" ] ||
+    PKGS="$PKGS doctest-dev libavdevice-dev libswscale-dev libdeflate-dev \
+libncurses-dev libunistring-dev pandoc"
 
   missing=
   for p in $PKGS; do deb_have "$p" || missing="$missing $p"; done
@@ -61,18 +69,6 @@ zlib1g-dev libzstd-dev libbz2-dev libbrotli-dev"
     sudo apt-get install -y $missing
   else
     echo "system deps present"
-  fi
-
-  # flint >= 3.6: sid tops out at 3.5.0; 3.6.0-1~exp1 is in experimental.
-  # Accept a $PREFIX / source build, never silently take 3.5.
-  if pkgc --atleast-version=3.6 flint; then
-    echo "flint $(pkgc --modversion flint) ok"
-  else
-    echo "flint >= 3.6 required; sid's libflint-dev is 3.5.0."
-    echo "either add the experimental suite and:"
-    echo "  sudo apt-get install -t experimental libflint-dev"
-    echo "or build flint 3.6 from source into $PREFIX"
-    exit 1
   fi
 else
   echo "unsupported distro: need pacman (arch) or apt-get (debian)"
@@ -94,39 +90,51 @@ for t in cmake ninja make git curl tar pkg-config; do
   }
 done
 
-if [ "$DISTRO" = debian ]; then
-  # vendored notcurses (tracked gitlink; sid's libnotcurses-dev unused).
-  # Lean core build — the Makefile links notcurses-core only.
-  if pkgc --exists notcurses-core || pkgc --exists notcurses; then
-    echo "notcurses present"
-  else
-    [ -f "$VENDOR/notcurses/CMakeLists.txt" ] || {
-      echo "vendor/notcurses not populated (gitlink has no .gitmodules entry);"
-      echo "clone https://github.com/dankamongmen/notcurses at the pinned rev there"
-      exit 1
-    }
-    cmake -S "$VENDOR/notcurses" -B "$VENDOR/notcurses/build" -G Ninja \
-      -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-      -DUSE_MULTIMEDIA=none -DUSE_PANDOC=off -DUSE_DOCTEST=off \
-      -DBUILD_TESTING=off -DUSE_QRCODEGEN=off -DUSE_POC=off
-    cmake --build "$VENDOR/notcurses/build" -j "$JOBS"
-    sudo cmake --install "$VENDOR/notcurses/build"
-  fi
+# ---- vendored deps -> $PREFIX ------------------------------------------
+# Policy: no pins. An empty submodule is populated at its upstream branch
+# head; each vendored dep is built and installed into the prefix when the
+# prefix doesn't already provide it (bump = wipe from prefix, rerun).
+REPO=$(cd "$ROOT/.." && pwd -P)
+vendor_sync() {
+  [ -e "$VENDOR/$1/.git" ] ||
+    git -C "$REPO" submodule update --init --remote -- "native/vendor/$1"
+}
 
-  # vendored snappy → static lib in the prefix so arrow's find_package sees it;
-  # an unpopulated gitlink is fine (arrow bundles its own), so warn only.
-  if [ -f "$PREFIX/lib/libsnappy.a" ]; then
-    echo "snappy present"
-  elif [ -f "$VENDOR/snappy/CMakeLists.txt" ]; then
-    cmake -S "$VENDOR/snappy" -B "$VENDOR/snappy/build" -G Ninja \
-      -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-      -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-      -DSNAPPY_BUILD_TESTS=OFF -DSNAPPY_BUILD_BENCHMARKS=OFF
-    cmake --build "$VENDOR/snappy/build" -j "$JOBS"
-    sudo cmake --install "$VENDOR/snappy/build"
-  else
-    echo "warn: vendor/snappy not populated; arrow will bundle snappy"
-  fi
+vendor_sync lmdb # no install: make compiles it into build/liblmdb.a
+
+if [ ! -f "$PREFIX/lib/pkgconfig/flint.pc" ]; then
+  vendor_sync flint
+  cd "$VENDOR/flint"
+  [ -x configure ] || ./bootstrap.sh
+  ./configure --prefix="$PREFIX"
+  make -j "$JOBS"
+  sudo make install
+  cd "$ROOT"
+else
+  echo "flint present"
+fi
+
+if [ ! -f "$PREFIX/lib/pkgconfig/notcurses-core.pc" ]; then
+  vendor_sync notcurses
+  # full-option build: multimedia/pandoc/doctest/executables at upstream defaults
+  cmake -S "$VENDOR/notcurses" -B "$VENDOR/notcurses/build" -G Ninja \
+    -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_INSTALL_PREFIX="$PREFIX"
+  cmake --build "$VENDOR/notcurses/build" -j "$JOBS"
+  sudo cmake --install "$VENDOR/notcurses/build"
+else
+  echo "notcurses present"
+fi
+
+if [ ! -f "$PREFIX/lib/libsnappy.a" ]; then
+  vendor_sync snappy
+  cmake -S "$VENDOR/snappy" -B "$VENDOR/snappy/build" -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+    -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+    -DSNAPPY_BUILD_TESTS=OFF -DSNAPPY_BUILD_BENCHMARKS=OFF
+  cmake --build "$VENDOR/snappy/build" -j "$JOBS"
+  sudo cmake --install "$VENDOR/snappy/build"
+else
+  echo "snappy present"
 fi
 
 if [ ! -x /usr/local/bin/lua ] || ! /usr/local/bin/lua -v 2>&1 | grep -q "Lua 5.5"; then
@@ -144,6 +152,7 @@ else
 fi
 
 if [ ! -f "$PREFIX/lib/libarrow.a" ]; then
+  vendor_sync arrow
   cd "$VENDOR/arrow/cpp"
   mkdir -p build
   cd build
@@ -156,6 +165,7 @@ else
 fi
 
 if [ ! -f "$PREFIX/lib/libiceberg_sql_catalog.a" ]; then
+  vendor_sync iceberg-cpp
   cd "$VENDOR/iceberg-cpp"
   cmake -S . -B build -G Ninja \
     -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_PREFIX_PATH="$PREFIX" \
