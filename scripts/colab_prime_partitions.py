@@ -237,9 +237,6 @@ n_without = int((df["k"] == 0).sum())
 print(f"{n_primes_shown} primes, {len(df)} rows "
       f"({n_without} primes with no partition), columns = {list(df.columns)}")
 
-# Keep a copy alongside the notebook.
-df.to_csv("prime_partitions.csv", index=False)
-
 # %% [markdown]
 # ## Interactive table
 #
@@ -297,3 +294,28 @@ show(
         for i, c in enumerate(df.columns)
     ],
 )
+
+# %% [markdown]
+# ## Export the full table as CSV
+#
+# The whole table (all `N_PRIMES`, every row including the k = 0 primes -- not
+# just the current page of the interactive view). Writes `prime_partitions.csv`,
+# triggers a browser download in Colab, and prints the CSV inline so you can copy
+# it straight out of the output.
+
+# %%
+csv_text = df.to_csv(index=False)
+
+with open("prime_partitions.csv", "w") as f:
+    f.write(csv_text)
+print(f"wrote prime_partitions.csv ({len(df)} rows)")
+
+# In Colab, pop a download of the file to your machine (no-op elsewhere).
+try:
+    from google.colab import files
+    files.download("prime_partitions.csv")
+except Exception:
+    pass
+
+# Full CSV inline -- copy from here if you prefer.
+print(csv_text)
