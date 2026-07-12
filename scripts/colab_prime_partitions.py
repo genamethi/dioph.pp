@@ -33,6 +33,17 @@
 N_PRIMES = 1000       # how many primes to generate (first N)
 PAGE_LENGTH = 25      # rows per page in the interactive table
 
+# Fixed per-column pixel widths so the narrow numeric columns hug their data
+# instead of stretching to fill the page. Tweak any of these to taste.
+COL_WIDTHS = {
+    "prime_rank": "72px",
+    "p":          "72px",
+    "k":          "44px",
+    "m_k":        "52px",
+    "n_k":        "52px",
+    "q_k":        "72px",
+}
+
 # The production dataset omits rank 1 (p = 2) by convention -- a from-scratch
 # build starts at index 2 (p = 3); see `kFreshStartIdx` in native/src/generate.cc.
 # We INCLUDE p = 2 by default so you can see its k = 0 row. Set INCLUDE_P2 = False
@@ -234,6 +245,10 @@ df.to_csv("prime_partitions.csv", index=False)
 #
 # Sort by clicking a column header; type in the box under a header to filter that
 # column; the search box filters across all columns; 25 rows per page.
+#
+# The table uses a fixed layout with the narrow per-column widths from
+# `COL_WIDTHS` above, so it hugs the data instead of stretching to the page
+# width. Adjust `COL_WIDTHS` if you want them wider/narrower.
 
 # %%
 from itables import init_notebook_mode, show
@@ -246,6 +261,12 @@ show(
     pageLength=PAGE_LENGTH,
     lengthMenu=[10, 25, 50, 100, 250],
     column_filters="header",
-    order=[[0, "asc"]],          # default sort by prime_rank
-    scrollX=True,
+    order=[[0, "asc"]],                          # default sort by prime_rank
+    classes="display compact",                   # tighter cell padding
+    style="table-layout:fixed; width:auto; margin:0",  # hug content, don't fill
+    autoWidth=False,
+    columnDefs=[
+        {"targets": i, "width": COL_WIDTHS[c], "className": "dt-center"}
+        for i, c in enumerate(df.columns)
+    ],
 )
