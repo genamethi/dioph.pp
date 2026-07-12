@@ -1,9 +1,19 @@
-Please just excise things once they're done. No need to have running commentary about progress.
+# HANDOFF for agents
 
-Furthermore, don't add high level summaries or try to describe the task. Keep it grounded.
-Don't exposit or narrate. Leave that to the user. A lot of false assertions keep being added,
-in particular the objectives have been rewritten by agents ruining the original message.
-We are NOT primarily concerned with k = 0, nor are we solely concerned with covering systems.
+## Guidance for agents
+
+Please just excise things once they're done. No need to have running commentary
+about progress. No narrating.
+
+Furthermore, don't add high level summaries or try to describe the task. Keep it
+grounded.
+Don't exposit or narrate. Leave that to the user. A lot of false assertions keep
+being added,
+in particular the objectives have been rewritten by agents ruining the original
+message.
+We are NOT primarily concerned with k = 0, nor are we solely concerned with
+covering systems.
+
 These are tools, and they will revolve in and out of the project without me necessarily
 stating as much. The point is: Leave the high level stuff to the user.
 
@@ -33,8 +43,10 @@ stating as much. The point is: Leave the high level stuff to the user.
   `kDefaultRestUri` = `http://127.0.0.1:8181`), uses REST when that server answers
   `GET /v1/config`, else transparently falls back to the in-process LMDB catalog.
 - Data files enter the warehouse only through `CommitFiles` (single table) or
-  `CommitFilesAtomic` (multiple tables, one transaction): clients write parquet to
-  `StagingDataDir` (outside the table tree), the commit moves it in on success. A
+  `CommitFilesAtomic` (multiple tables, one transaction): clients write parquet
+  to
+  `StagingDataDir` (outside the table tree), the commit moves it in on success.
+  A
   build killed before commit can only leave `.pp-staging` debris (safe to `rm`).
 - `primes_k0_sieve` is a metadata-only shallow clone that **shares `primes_k0`'s
   data files** — do not REBUILD or orphan-clean `primes_k0` during a sieve
@@ -42,46 +54,25 @@ stating as much. The point is: Leave the high level stuff to the user.
 - Design detail: `markdown/data_eng/irc_catalog_design.md`,
   `markdown/data_eng/delete_primitive_spike.md`.
 
-## Vendored iceberg-cpp patches (`native/vendor/PATCHES.md`)
+## TODO: Planning (2026-07-09)
 
-Submodule pinned at `v0.3.0`; patches in `native/vendor/patches/`, applied
-idempotently by `scripts/apply_vendor_patches.sh` (run by `native/configure`). On
-a tag bump, a patch that fails to re-apply was upstreamed (retire) or needs a
-forward-port.
-
-1. **`CMakeLists.txt`** — honor `-DCMAKE_COMPILE_WARNING_AS_ERROR` (upstream
-   hard-`set()`s it ON; GCC trips a `-Werror=free-nonheap-object` false positive
-   in `json_serde.cc`).
-2. **`table_metadata.cc`** — `FreshPartitionSpec` starts `last_partition_field_id`
-   at `kLegacyPartitionDataIdStart - 1` (1000-convention) so partition IDs don't
-   collide with reserved manifest_entry IDs.
-3. **`arrow/arrow_io.cc`** — `ResolvePath` accepts `file:/` single-slash URIs;
-   without it native iceberg-cpp cannot scan any Hive-created table (incl.
-   `primes_k0`).
-
-## verify + client planning (2026-07-09)
-
-- `primeparts-verify` (`native/src/verify/`): catalog-seam math checker. `primes`:
-  `pi(p)==prime_rank` and `p` prime, via a per-file FLINT `n_primes_t` iterator
-  warmed on the file's `p`-window with `prime_rank` anchored by one `primecount_pi`
-  (built prime list, vectorized compare — not pairwise). `partitions`: `not allowed`
-  (domain: `m_k<1,n_k<1,q_k<2,m_k>63`) / `unsatisfied` (`p != 2^m_k + q_k^n_k`) /
-  `q_k not prime`. Vectorized, sharded over buckets. Options `--table/--p-lo/--p-hi/
-  --limit/--tail N`; writes a run log; non-zero exit on any violation.
-- `--tail N` uses `SourceTableReader::OpenIncremental` (`IncrementalAppendScan`,
-  `FromSnapshot`/`ToSnapshot`) — rows added in the last N snapshots.
 - Client access, the row-group/zone-map pruning gap (client-side, not
-  iceberg-cpp-blocked), and the server-side planner model (catalogd invokes a
+  iceberg-cpp/libparquet blocked), and the server-side planner model (catalogd
+  invokes a
   planner module, returns the plan as if the catalog produced it):
-  `../data_eng/clients_rest_gap.md`, `../data_eng/catalogd_rest_gap.md`.
+  These are important: `../data_eng/clients_rest_gap.md`, `../data_eng/catalogd_rest_gap.md`.
 
 ## Remaining work
 
 - Derived read indexes for fast number-theoretic reads (approach open).
-- Derived `mdiff` views (gap `d`, anchor coset) as Iceberg view objects; the
+- Redo `mdiff` based with better data representation for hits. hit_mask is not scalable.
+  Implement a view (pending views client/server implementation)
+  Views: (gap `d`, anchor coset) as Iceberg view objects; the
   `representations` list is user-defined (a `lua` type, not SQL-only),
-  "materialized" = a rebuildable derived table. Spec:
-  https://raw.githubusercontent.com/apache/iceberg/refs/heads/main/format/view-spec.md
+  "materialized" = on disk and not rebuilt on every query (format and storage
+  type has not been settled).
+  Spec:
+  `https://raw.githubusercontent.com/apache/iceberg/refs/heads/main/format/view-spec.md`
 - Server-side scan planning (`planTableScan`/`fetchScanTasks`).
 - Optional: a janitor for killed-run `.pp-staging` debris.
 

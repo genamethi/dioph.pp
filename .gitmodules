@@ -35,8 +35,3 @@
 	branch = master
 	shallow = true
 
-[submodule "native/vendor/snappy"]
-	path = native/vendor/snappy
-	url = https://github.com/google/snappy
-	branch = main
-	shallow = true

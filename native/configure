@@ -14,10 +14,6 @@ if command -v pacman >/dev/null 2>&1; then
     echo "yay required (arch target)"
     exit 1
   }
-
-  # flint/notcurses/snappy/lmdb are vendored (built below into $PREFIX);
-  # ffmpeg/libunistring/libdeflate/doctest/pandoc-cli are notcurses build deps
-  # (full-option build), base-devel covers flint's autotools bootstrap.
   PKGS="base-devel pkgconf cmake ninja git curl tar boost \
 gmp mpfr pari primesieve primecount sqlite openssl \
 nlohmann-json \
@@ -33,30 +29,13 @@ elif command -v apt-get >/dev/null 2>&1; then
   DISTRO=debian
   deb_have() { dpkg-query -W -f '${Status}' "$1" 2>/dev/null | grep -q "install ok installed"; }
 
-  # debian: only the genuinely-system deps. Everything else is vendored or
-  # bundled and must NOT come from apt:
-  #   flint / lmdb / notcurses / snappy
-  #                                  — vendor/ submodules, built below or by make
-  #   thrift protobuf abseil re2 utf8proc lz4 snappy
-  #                                  — arrow bundles what it doesn't find
-  #                                    (libarrow_bundled_dependencies.a)
-  #   nlohmann-json cpr avro croaring sqlpp23
-  #                                  — iceberg-cpp FetchContent, pinned; a
-  #                                    system nlohmann would win unpinned
-  # zlib/zstd/bz2/brotli stay system: the arrow static link pulls them from
-  # the distro (arrow.pc Libs.private).
   PKGS="build-essential pkgconf cmake ninja-build git curl tar \
 libboost-dev libgmp-dev libmpfr-dev libprimesieve-dev libprimecount-dev \
 libsqlite3-dev libssl-dev libreadline-dev \
 zlib1g-dev libzstd-dev libbz2-dev libbrotli-dev"
 
-  # -lcurl: either TLS flavor works; add one only if neither is installed
   deb_have libcurl4-openssl-dev || deb_have libcurl4-gnutls-dev || PKGS="$PKGS libcurl4-openssl-dev"
-  # pari: prefer an existing $PREFIX build (e.g. 2.18-dev) over sid's 2.17
   [ -e "$PREFIX/lib/libpari.so" ] || [ -e "$PREFIX/lib/libpari.a" ] || deb_have libpari-dev || PKGS="$PKGS libpari-dev"
-  # build deps for the vendored builds below, only when the prefix lacks them:
-  # flint bootstraps with autotools; notcurses is a full-option build
-  # (multimedia/pandoc/doctest on) per upstream INSTALL.md's apt list.
   [ -f "$PREFIX/lib/pkgconfig/flint.pc" ] || PKGS="$PKGS autoconf automake libtool"
   [ -f "$PREFIX/lib/pkgconfig/notcurses-core.pc" ] ||
     PKGS="$PKGS doctest-dev libavdevice-dev libswscale-dev libdeflate-dev \
@@ -90,10 +69,6 @@ for t in cmake ninja make git curl tar pkg-config; do
   }
 done
 
-# ---- vendored deps -> $PREFIX ------------------------------------------
-# Policy: no pins. An empty submodule is populated at its upstream branch
-# head; each vendored dep is built and installed into the prefix when the
-# prefix doesn't already provide it (bump = wipe from prefix, rerun).
 REPO=$(cd "$ROOT/.." && pwd -P)
 vendor_sync() {
   [ -e "$VENDOR/$1/.git" ] ||
@@ -116,25 +91,12 @@ fi
 
 if [ ! -f "$PREFIX/lib/pkgconfig/notcurses-core.pc" ]; then
   vendor_sync notcurses
-  # full-option build: multimedia/pandoc/doctest/executables at upstream defaults
   cmake -S "$VENDOR/notcurses" -B "$VENDOR/notcurses/build" -G Ninja \
     -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_INSTALL_PREFIX="$PREFIX"
   cmake --build "$VENDOR/notcurses/build" -j "$JOBS"
   sudo cmake --install "$VENDOR/notcurses/build"
 else
   echo "notcurses present"
-fi
-
-if [ ! -f "$PREFIX/lib/libsnappy.a" ]; then
-  vendor_sync snappy
-  cmake -S "$VENDOR/snappy" -B "$VENDOR/snappy/build" -G Ninja \
-    -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-    -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-    -DSNAPPY_BUILD_TESTS=OFF -DSNAPPY_BUILD_BENCHMARKS=OFF
-  cmake --build "$VENDOR/snappy/build" -j "$JOBS"
-  sudo cmake --install "$VENDOR/snappy/build"
-else
-  echo "snappy present"
 fi
 
 if [ ! -x /usr/local/bin/lua ] || ! /usr/local/bin/lua -v 2>&1 | grep -q "Lua 5.5"; then
@@ -156,8 +118,9 @@ if [ ! -f "$PREFIX/lib/libarrow.a" ]; then
   cd "$VENDOR/arrow/cpp"
   mkdir -p build
   cd build
-  cmake .. --preset ninja-release -DARROW_BUILD_STATIC=ON
-  cmake --build . -j "$JOBS"
+  cmake .. --preset ninja-release -DARROW_BUILD_STATIC=ON -DARROW_DEPENDENCY_SOURCE=BUNDLED \
+    -DARROW_WITH_SNAPPY=ON -DARROW_BUILD_UTILITIES=ON
+  ninja -j "$JOBS"
   sudo cmake --install .
   cd "$ROOT"
 else
@@ -177,12 +140,8 @@ else
   echo "iceberg present"
 fi
 
-# iceberg installs headers per-subdir but the base catalog dir (src/iceberg/
-# catalog/CMakeLists.txt) never calls iceberg_install_all_headers, so its own
-# headers (session_catalog.h, session_context.h) are left out of the prefix even
-# though the installed catalog/rest/rest_catalog.h includes them. Fill the prefix
-# from the vendored src; if that install can't complete, emit a last-resort src
-# include for the Makefile.
+# iceberg installs headers per-subdir yet src/iceberg/
+# catalog/CMakeLists.txt never calls iceberg_install_all_headers
 ICEBERG_SRC="$VENDOR/iceberg-cpp/src"
 FALLBACK=
 NEED="iceberg/catalog/session_catalog.h iceberg/catalog/session_context.h"
