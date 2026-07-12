@@ -251,10 +251,37 @@ df.to_csv("prime_partitions.csv", index=False)
 # width. Adjust `COL_WIDTHS` if you want them wider/narrower.
 
 # %%
+from IPython.display import HTML, display
 from itables import init_notebook_mode, show
 
 init_notebook_mode(all_interactive=True)
 
+TOTAL_WIDTH = sum(int(w.removesuffix("px")) for w in COL_WIDTHS.values())
+
+# CSS insurance: DataTables recomputes widths on draw and the header filter
+# <input> boxes carry a large default min-width -- both fight the widths passed
+# to show(). These `!important` rules (itables renders inline in the Colab cell,
+# so a page-level <style> reaches the table) pin the layout regardless.
+_css = [
+    f"table.dataTable {{ table-layout:fixed !important; "
+    f"width:{TOTAL_WIDTH}px !important; }}",
+    "table.dataTable th, table.dataTable td {"
+    " padding:2px 6px !important; overflow:hidden; text-overflow:ellipsis;"
+    " white-space:normal; text-align:center; }",
+    # Let the per-column filter inputs shrink to their column instead of forcing
+    # a wide minimum.
+    "table.dataTable thead input {"
+    " min-width:0 !important; width:100% !important; box-sizing:border-box; }",
+]
+for i, (col, w) in enumerate(COL_WIDTHS.items(), start=1):
+    _css.append(
+        f"table.dataTable th:nth-child({i}), table.dataTable td:nth-child({i})"
+        f" {{ width:{w} !important; }}"
+    )
+display(HTML("<style>\n" + "\n".join(_css) + "\n</style>"))
+
+# Documented itables recipe: columnDefs widths need autoWidth=False AND a
+# concrete total width in `style` (width:auto applies nothing).
 show(
     df,
     paging=True,
@@ -263,7 +290,7 @@ show(
     column_filters="header",
     order=[[0, "asc"]],                          # default sort by prime_rank
     classes="display compact",                   # tighter cell padding
-    style="table-layout:fixed; width:auto; margin:0",  # hug content, don't fill
+    style=f"table-layout:fixed; width:{TOTAL_WIDTH}px; margin:0",
     autoWidth=False,
     columnDefs=[
         {"targets": i, "width": COL_WIDTHS[c], "className": "dt-center"}
