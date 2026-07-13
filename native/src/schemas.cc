@@ -51,43 +51,6 @@ std::shared_ptr<iceberg::Schema> PartitionsSchema() {
       0);
 }
 
-std::shared_ptr<iceberg::Schema> MdiffSchema(int k, std::string* error) {
-  if (k < 2) {
-    if (error) *error = "MdiffSchema: k must be >= 2";
-    return nullptr;
-  }
-  return std::make_shared<iceberg::Schema>(
-      std::vector<iceberg::SchemaField>{
-          iceberg::SchemaField::MakeRequired(1, "p",        iceberg::int64()),
-          iceberg::SchemaField::MakeRequired(2, "hit_mask", iceberg::int64()),
-      },
-      0);
-}
-
-std::shared_ptr<iceberg::Schema> PresenceSchema() {
-  std::vector<iceberg::SchemaField> fields;
-  fields.reserve(41);
-  for (int i = 1; i <= 39; ++i) {
-    fields.push_back(iceberg::SchemaField::MakeRequired(
-        i, "b" + std::to_string(i), iceberg::int32()));
-  }
-  fields.push_back(iceberg::SchemaField::MakeRequired(40, "shift", iceberg::int32()));
-  fields.push_back(iceberg::SchemaField::MakeRequired(41, "count", iceberg::int64()));
-  return std::make_shared<iceberg::Schema>(std::move(fields), 0);
-}
-
-std::shared_ptr<iceberg::Schema> MersenneFactorsSchema() {
-  return std::make_shared<iceberg::Schema>(
-      std::vector<iceberg::SchemaField>{
-          iceberg::SchemaField::MakeRequired(1, "d",            iceberg::int32()),
-          iceberg::SchemaField::MakeRequired(2, "prime",        iceberg::int64()),
-          iceberg::SchemaField::MakeRequired(3, "exponent",     iceberg::int32()),
-          iceberg::SchemaField::MakeRequired(4, "ord2",         iceberg::int32()),
-          iceberg::SchemaField::MakeRequired(5, "is_primitive", iceberg::int32()),
-      },
-      0);
-}
-
 std::shared_ptr<iceberg::PartitionSpec> BucketPartitionSpec(
     const iceberg::Schema& schema, std::string* error) {
   const int32_t bucket_version_id = FieldIdByName(schema, "p_bucket_version");

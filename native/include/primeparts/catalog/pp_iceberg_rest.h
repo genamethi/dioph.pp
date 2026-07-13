@@ -31,15 +31,12 @@ namespace fs = std::filesystem;
 
 /// Default IRC endpoint (bare scheme://host:port, no /v1 suffix), matching
 /// pp-catalogd's default bind (127.0.0.1:8181). OpenCatalog resolves to this when
-/// neither an explicit URI nor PRIMEPARTS_REST_URI is given, so REST is the
-/// default channel everywhere; --rest-uri / the env var only OVERRIDE the URI,
-/// and the in-process LMDB catalog is reached only when this endpoint is
-/// unreachable. Keep in sync with pp_catalogd.h's `port`.
+/// neither an explicit URI nor PRIMEPARTS_REST_URI is given; --rest-uri / the
+/// env var only OVERRIDE the URI. Keep in sync with pp_catalogd.h's `port`.
 inline constexpr char kDefaultRestUri[] = "http://127.0.0.1:8181";
 
-/// Connection settings for an iceberg REST catalog (IRC) client. When
-/// `rest_uri` is empty, callers fall back to an in-memory catalog (on-disk
-/// only) — see MakeCatalog.
+/// Connection settings for an iceberg REST catalog (IRC) client. `rest_uri` is
+/// required — see MakeCatalog.
 struct RestOptions {
   std::string rest_uri;        // e.g. http://localhost:PORT/iceberg (pp-catalogd)
   std::string rest_name = "primeparts";
@@ -47,8 +44,8 @@ struct RestOptions {
   std::string rest_prefix;     // usually empty
 };
 
-/// A FileIO backed by the local filesystem (arrow). Used by the in-memory
-/// catalog fallback and by metadata reads.
+/// A FileIO backed by the local filesystem (arrow). Used by the local catalog
+/// engine and by metadata reads.
 std::shared_ptr<iceberg::FileIO> LocalIO();
 
 /// Staging directory a writer emits parquet into BEFORE it is committed. It lives
@@ -68,10 +65,9 @@ fs::path StagingDataDir(const fs::path& warehouse, const std::string& table_name
 /// order). Empty path on error, with `*error` set when non-null.
 fs::path LatestMetadataJson(const fs::path& metadata_dir, std::string* error);
 
-/// Build a catalog. With a non-empty `opts.rest_uri`, returns a RestCatalog
-/// (registers arrow/avro/parquet readers as a side effect) and sets
-/// `*mode="rest"`. Otherwise returns an InMemoryCatalog rooted at `warehouse`
-/// and sets `*mode="in-memory"`. Returns nullptr with `*error` set on failure.
+/// Build a RestCatalog client for `opts.rest_uri` (registers arrow/avro/parquet
+/// readers as a side effect) and set `*mode="rest"`. `rest_uri` is required.
+/// Returns nullptr with `*error` set on failure.
 std::shared_ptr<iceberg::Catalog> MakeCatalog(const RestOptions& opts,
                                               const fs::path& warehouse,
                                               std::string* mode,
@@ -97,29 +93,22 @@ LocalCatalog MakeLocalCatalogWithStore(const fs::path& warehouse,
 std::shared_ptr<iceberg::Catalog> MakeLocalCatalog(const fs::path& warehouse,
                                                    std::string* error);
 
-/// Unified catalog entry point — REST (catalogd) is the default pathway; the
-/// in-process LMDB catalog of record is the same engine run in-process (a mirror
-/// of the daemon), used when the daemon is unreachable. This is the single seam
-/// every tool should use to obtain a catalog (instead of choosing MakeCatalog vs
-/// MakeLocalCatalog itself).
+/// Unified catalog entry point — catalogd over REST is the ONLY pathway; the
+/// LMDB state is touched exclusively by the daemon. This is the single seam
+/// every tool uses to obtain a catalog.
 ///
 /// URI resolution: `rest_uri` if non-empty, else `PRIMEPARTS_REST_URI`, else the
-/// compiled-in `kDefaultRestUri`. A URI is therefore ALWAYS resolved, so REST is
-/// the default channel — `rest_uri` / the env var only OVERRIDE the endpoint, they
-/// do not toggle REST on. If the resolved server answers `GET /v1/config`, returns
-/// a RestCatalog client (`*mode="rest"`). If it is unreachable, transparently falls
-/// back to `MakeLocalCatalog(warehouse)` (`*mode="local"`), emitting a one-line
-/// note to stderr. Returns nullptr + `*error` only if the local fallback itself
-/// fails. The returned catalog is driven through the same `CommitFiles` /
-/// `LoadTable` seams either way, so the snapshot + read paths are identical across
-/// modes.
+/// compiled-in `kDefaultRestUri` — the arg/env only OVERRIDE the endpoint. If the
+/// resolved server answers `GET /v1/config`, returns a RestCatalog client
+/// (`*mode="rest"`). Otherwise returns nullptr + `*error`: tools do not run
+/// without catalogd.
 std::shared_ptr<iceberg::Catalog> OpenCatalog(const fs::path& warehouse,
                                               const std::string& rest_uri,
                                               std::string* mode, std::string* error);
 
 /// True if an IRC server at `rest_uri` (scheme://host:port, no context path)
-/// answers `GET /v1/config` within a short timeout. Used by OpenCatalog to decide
-/// REST-vs-local; exposed for tools that want to report the resolved mode.
+/// answers `GET /v1/config` within a short timeout. Used by OpenCatalog to fail
+/// fast; exposed for tools that want to report reachability.
 bool RestServerReachable(const std::string& rest_uri);
 
 /// Ask pp-catalogd at `rest_uri` for the committed upper bound of `field` on

@@ -1,4 +1,4 @@
-# Additive Decomposition of Prime Power Remainders
+# Additive Partitions of Prime Power Remainders
 
 ## Motivation
 
@@ -6,13 +6,13 @@ The funbuns project studies the exponential Diophantine equation
 
     p = 2^m + q^n
 
-where p, q are prime and m, n >= 1. Roughly 17% of primes are *obstructed* -- no such decomposition exists. The goal of this note is to reformulate the problem in terms of additive representations and polynomial expressions, making it amenable to tools from algebraic geometry and p-adic analysis.
+where p, q are prime and m, n >= 1. Roughly 17% of primes are *obstructed* -- no such partition exists. The goal of this note is to reformulate the problem in terms of additive representations and polynomial expressions, making it amenable to tools from algebraic geometry and p-adic analysis.
 
 ## From exponential to polynomial
 
 ### The remainder
 
-Fix a prime p and set X = p - 2^m for some m >= 1. The original question "does q^n = X for some prime q?" becomes a question about the arithmetic structure of X. More generally, we ask: how does X decompose as a sum of prime powers?
+Fix a prime p and set X = p - 2^m for some m >= 1. The original question "does q^n = X for some prime q?" becomes a question about the arithmetic structure of X. More generally, we ask: what are the partitions of X into prime powers?
 
 ### The epsilon bound
 
@@ -65,13 +65,13 @@ For X ~ 10^9 (typical for the funbuns dataset):
 
 The total dimension D(X) = sum_{q prime, q <= X} floor(log_q(X)). Most of this comes from the ~pi(X) primes contributing only q^1 (i.e., primes q > sqrt(X) where only the first power fits). The rich structure is concentrated in small primes with multiple usable powers.
 
-## Greedy vs minimal decomposition
+## Greedy vs minimal partition
 
 Two natural algorithms bracket the solution space:
 
 **Greedy** (largest prime power first at each step):
 - Absorbs X quickly; each subsequent prime contributes minimally
-- Gives an upper bound on decomposition length
+- Gives an upper bound on partition length
 - Establishes the *minimal required contribution* from each subsequent prime
 - Converges fast -- most of X is eaten by the first few terms
 
@@ -81,11 +81,11 @@ Two natural algorithms bracket the solution space:
 - Gives insight into the *maximal required contribution* from each subsequent prime
 - Reveals how many primes must participate
 
-Where greedy and minimal agree on a prime's contribution, that contribution is *forced*. Where they diverge, the variety has positive dimension -- there is genuine freedom in the decomposition.
+Where greedy and minimal agree on a prime's contribution, that contribution is *forced*. Where they diverge, the variety has positive dimension -- there is genuine freedom in the partition.
 
 ## Young tableaux structure
 
-The decomposition has a natural tableau representation. Arrange a grid with:
+The partition has a natural tableau representation. Arrange a grid with:
 - Rows indexed by primes (q_1 = 2, q_2 = 3, q_3 = 5, ...)
 - Columns indexed by exponents (e = 1, 2, 3, ...)
 - Cell (q, e) is filled if a_{q,e} = 1 (the term q^e is included)
@@ -100,8 +100,8 @@ q=5:     [ ]  [ ]               sum = 23
 ```
 
 The conjugate tableau swaps the view: for each exponent level e, which primes participate? This distinguishes:
-- **Broad decompositions**: many primes at low exponents (Goldbach-like, many rows of length 1)
-- **Deep decompositions**: few primes at high exponents (close to prime power, few long rows)
+- **Broad partitions**: many primes at low exponents (Goldbach-like, many rows of length 1)
+- **Deep partitions**: few primes at high exponents (close to prime power, few long rows)
 
 The `dominant_share` metric in the existing funbuns analysis measures exactly this depth/breadth tradeoff: dominant_share ~ 1 means one prime absorbs almost all of log(X) (deep); dominant_share ~ 1/k means k primes share equally (broad).
 
@@ -113,11 +113,11 @@ The `dominant_share` metric in the existing funbuns analysis measures exactly th
 - 23 - 8 = 15 = 3 * 5 (not a power of 3)
 - 23 - 16 = 7 (prime, not 3)
 
-But 23 has length-2 decompositions into prime powers:
+But 23 has length-2 partitions into prime powers:
 - 23 = 4 + 19 = 2^2 + 19^1
 - 23 = 16 + 7 = 2^4 + 7^1
 
-And it has the standard decomposition 23 = 16 + 4 + 3 = 2^4 + 2^2 + 3^1 (length 3, reusing base 2).
+And it has the standard partition 23 = 16 + 4 + 3 = 2^4 + 2^2 + 3^1 (length 3, reusing base 2).
 
 The distinct prime powers {2, 3, 4, 5, 7, 8, 9, 11, 13, 16, ...} form a *complete sequence* -- every sufficiently large integer can be represented as a sum of distinct elements. So representations always exist for large X. The interesting questions are:
 1. What is the minimum length?
@@ -132,7 +132,7 @@ Working in the fixed-modulus ring Z/ell^k Z (SageMath: `Zp(ell, prec=k, type='fi
 
     p = 2^m + q^n  (mod ell^k)
 
-For a fixed ell, the sets {2^m mod ell^k : m >= 1} and {q^n mod ell^k : q prime, n >= 1} are finite. Their sumset {2^m + q^n mod ell^k} determines which residue classes of p can possibly admit decompositions. Primes in the complement are *locally obstructed* at ell.
+For a fixed ell, the sets {2^m mod ell^k : m >= 1} and {q^n mod ell^k : q prime, n >= 1} are finite. Their sumset {2^m + q^n mod ell^k} determines which residue classes of p can possibly admit partitions. Primes in the complement are *locally obstructed* at ell.
 
 ### Hensel lifting and obstruction depth
 
@@ -150,8 +150,8 @@ Primes that are obstructed but NOT in any structurally-obstructed CRT class are 
 
 | Existing metric | Connection to this framework |
 |-----------------|------------------------------|
-| `dominant_share` | Depth vs breadth of decomposition (single-term approximation quality) |
-| `omega(r)` | Number of distinct primes in the factorization of X (related to but different from decomposition length) |
+| `dominant_share` | Depth vs breadth of partition (single-term approximation quality) |
+| `omega(r)` | Number of distinct primes in the factorization of X (related to but different from partition length) |
 | `v_ell(r)` | Constrains possible (q, n) pairs: if X = q^n and ell != q, then v_ell(X) = 0 |
 | Zipf on q_k | Distribution of which primes appear as bases -- reflects the "broad" structure |
 | Obstruction spectrum | Fourier analysis of chi(p); fixed-mod analysis may explain the spectral peaks |
@@ -161,8 +161,8 @@ Primes that are obstructed but NOT in any structurally-obstructed CRT class are 
 The block data {p, m_k, n_k, q_k} contains information we aren't fully exploiting:
 
 - **n_k exponents**: The distribution of exponents n in q^n directly constrains the additive framework. Barely analyzed.
-- **Joint (m_k, q_k, n_k)**: For non-obstructed primes, the actual decomposition structure. Which (m, q) pairs co-occur?
-- **Near-unique decompositions**: Primes with exactly one valid (m, q, n) triple. These boundary cases may reveal the obstruction mechanism.
+- **Joint (m_k, q_k, n_k)**: For non-obstructed primes, the actual partition structure. Which (m, q) pairs co-occur?
+- **Near-unique partitions**: Primes with exactly one valid (m, q, n) triple. These boundary cases may reveal the obstruction mechanism.
 - **Residue class correlations**: chi(p) correlated with p mod M for composite M (not just prime moduli).
 - **Divisibility constraints from v_ell**: If r = q^n for some prime q != ell, then v_ell(r) must equal n * v_ell(q). The v_ell columns we already compute encode this constraint but we aren't checking it.
 
@@ -177,5 +177,5 @@ The block data {p, m_k, n_k, q_k} contains information we aren't fully exploitin
 2. Compute obstruction depth distribution across the dataset -- a new invariant complementing dominant_share.
 3. Identify structurally-obstructed CRT classes and measure what fraction of obstructed primes they explain.
 4. Correlate spectral peaks in the obstruction indicator with specific l-adic structures.
-5. Explore the greedy/minimal decomposition bracket for a sample of obstructed primes.
-6. Connect partition counting from factorsums/pppart to the additive decomposition framework.
+5. Explore the greedy/minimal partition bracket for a sample of obstructed primes.
+6. Connect partition counting from factorsums/pppart to the additive partition framework.

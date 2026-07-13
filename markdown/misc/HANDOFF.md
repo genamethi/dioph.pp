@@ -13,7 +13,8 @@ in particular the objectives have been rewritten by agents ruining the original
 message.
 We are NOT primarily concerned with k = 0, nor are we solely concerned with
 covering systems.
-
+I don't want any comments in the code. You can't be trusted to know what's relevant.
+So zero comments. All the time.
 These are tools, and they will revolve in and out of the project without me necessarily
 stating as much. The point is: Leave the high level stuff to the user.
 
@@ -26,60 +27,39 @@ stating as much. The point is: Leave the high level stuff to the user.
 - `primeparts.partitions`: the `(m_k, n_k, q_k)` tuples; most edges are `n=1`.
 - `primeparts.primes_k0`: `k=0` primes; flat/unpartitioned, Iceberg format-version
   2, merge-on-read.
-- `primeparts.mdiff_k{K}` row = `(p int64, hit_mask int64)`: `hit_mask` = OR of
-  `1<<m` over the prime's hit positions (popcount==K), the **sole stored truth**.
-  The d-vector, the translation-invariant `shape = hit_mask>>ctz`, the anchor phase
-  (`m_min mod period`, the coset), and `prime_rank` are all derived on read, never
-  stored. Unpartitioned, physically ordered by `p`; derived groupings (gap `d`,
-  coset) belong in views, not columns.
-- `primeparts.mersenne_factors` = `(d, prime, exponent, ord2, is_primitive)`,
-  `is_primitive = (ord2==d)`.
 
 ## Catalog (operating notes)
 
 - Catalog of record is the native LMDB-backed IRC (`pp-catalogd` serves it over
   `/v1`). Tools obtain a catalog through `OpenCatalog` (`pp_iceberg_rest.{h,cc}`):
-  it always resolves a URI (`--rest-uri` / `PRIMEPARTS_REST_URI` / compiled
-  `kDefaultRestUri` = `http://127.0.0.1:8181`), uses REST when that server answers
-  `GET /v1/config`, else transparently falls back to the in-process LMDB catalog.
+  it resolves a URI (`--rest-uri` / `PRIMEPARTS_REST_URI` / compiled
+  `kDefaultRestUri` = `http://127.0.0.1:8181`) and requires that server to answer
+  `GET /v1/config` — no in-process fallback; nothing touches the LMDB state
+  except catalogd.
 - Data files enter the warehouse only through `CommitFiles` (single table) or
   `CommitFilesAtomic` (multiple tables, one transaction): clients write parquet
-  to
-  `StagingDataDir` (outside the table tree), the commit moves it in on success.
-  A
-  build killed before commit can only leave `.pp-staging` debris (safe to `rm`).
-- `primes_k0_sieve` is a metadata-only shallow clone that **shares `primes_k0`'s
-  data files** — do not REBUILD or orphan-clean `primes_k0` during a sieve
-  campaign; reset with `pp-catalog --clone-sieve`.
-- Design detail: `markdown/data_eng/irc_catalog_design.md`,
-  `markdown/data_eng/delete_primitive_spike.md`.
-
-## TODO: Planning (2026-07-09)
-
-- Client access, the row-group/zone-map pruning gap (client-side, not
-  iceberg-cpp/libparquet blocked), and the server-side planner model (catalogd
-  invokes a
-  planner module, returns the plan as if the catalog produced it):
-  These are important: `../data_eng/clients_rest_gap.md`, `../data_eng/catalogd_rest_gap.md`.
+  to `StagingDataDir` (outside the table tree), the commit moves it in on
+  success. A build killed before commit can only leave `.pp-staging` debris
+  (safe to `rm`).
+- Design detail: `markdown/data_eng/irc_catalog_design.md`.
 
 ## Remaining work
 
+- Client access, the row-group/zone-map pruning gap (client-side, not
+  iceberg-cpp blocked), and the server-side planner model (catalogd invokes a
+  planner module, returns the plan as if the catalog produced it):
+  `../data_eng/clients_rest_gap.md`, `../data_eng/catalogd_rest_gap.md`.
 - Derived read indexes for fast number-theoretic reads (approach open).
-- Redo `mdiff` based with better data representation for hits. hit_mask is not scalable.
-  Implement a view (pending views client/server implementation)
-  Views: (gap `d`, anchor coset) as Iceberg view objects; the
-  `representations` list is user-defined (a `lua` type, not SQL-only),
-  "materialized" = on disk and not rebuilt on every query (format and storage
-  type has not been settled).
-  Spec:
-  `https://raw.githubusercontent.com/apache/iceberg/refs/heads/main/format/view-spec.md`
+- Implement views
+- `https://raw.githubusercontent.com/apache/iceberg/refs/heads/main/format/view-spec.md`
 - Server-side scan planning (`planTableScan`/`fetchScanTasks`).
+- `LoadAlignedResume` still derives bucket fill + per-table file seq by fs-glob;
+  replace with a read of the current snapshot's manifests.
 - Optional: a janitor for killed-run `.pp-staging` debris.
 
 ## Terminology
 
-- Call the `(m_k, n_k, q_k)` tuples **"partitions"** in prose; the iceberg table
-  name `decompositions` is a code identifier only.
+- Call the `(m_k, n_k, q_k)` tuples **"partitions"** in prose.
 - **`prime_rank`** = the prime-counting function $\pi(p)$ (library-agnostic).
 - **"Snap"** = physically re-sort on-disk data to match a declared `sort_order`;
   sort violations get fixed by re-snapping, not by relaxing the check.

@@ -175,7 +175,7 @@ SnapshotUpdate ABI migration **and** of the in-progress vendor merge (installed
 ### Schemas (from `writer.cc`)
 - `primes`: `(1 p:long, 2 k:int, 3 prime_rank:long, 4 p_bucket_version:int,
   5 p_bucket:int)` — verified against live metadata.
-- `partitions` (a.k.a. `decompositions`): `(1 p:long, 2 m_k:int, 3 n_k:int,
+- `partitions`: `(1 p:long, 2 m_k:int, 3 n_k:int,
   4 q_k:long, 5 prime_rank:long, 6 p_bucket_version:int, 7 p_bucket:int)`.
 - Cross-table invariant: `sum(k) == rows(partitions)`; no partition rows for k=0.
 

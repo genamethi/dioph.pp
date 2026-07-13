@@ -21,15 +21,15 @@ enum {
 typedef struct pp_batch_result {
     int64_t *prime_p;
     int32_t *prime_k;
-    int64_t *decomp_p;
-    int32_t *decomp_m;
-    int32_t *decomp_n;
-    int64_t *decomp_q;
+    int64_t *partition_p;
+    int32_t *partition_m;
+    int32_t *partition_n;
+    int64_t *partition_q;
 
     size_t prime_count;
-    size_t decomp_count;
+    size_t partition_count;
     size_t prime_capacity;
-    size_t decomp_capacity;
+    size_t partition_capacity;
 
     int64_t processed_count;
     int64_t start_idx;
@@ -41,7 +41,7 @@ typedef struct pp_batch_result {
 
 typedef struct pp_count_result {
     int64_t processed_count;
-    int64_t decomp_count;
+    int64_t partition_count;
     int64_t start_idx;
     int64_t requested_count;
 } pp_count_result;

@@ -11,7 +11,6 @@
 #include <nlohmann/json.hpp>
 
 #include "iceberg/arrow/arrow_io_util.h"
-#include "iceberg/catalog/memory/in_memory_catalog.h"
 #include "iceberg/catalog/rest/catalog_properties.h"
 #include "iceberg/catalog/rest/rest_catalog.h"
 #include "iceberg/catalog/sql/sql_catalog.h"
@@ -88,34 +87,29 @@ std::shared_ptr<iceberg::Catalog> MakeCatalog(const RestOptions& opts,
                                               const fs::path& warehouse,
                                               std::string* mode,
                                               std::string* error) {
-  if (!opts.rest_uri.empty()) {
-    common::EnsureArrowRegistration();
-    auto config = iceberg::rest::RestCatalogProperties::default_properties();
-    config.Set(iceberg::rest::RestCatalogProperties::kUri, opts.rest_uri)
-        .Set(iceberg::rest::RestCatalogProperties::kName, opts.rest_name)
-        .Set(iceberg::rest::RestCatalogProperties::kWarehouse,
-             opts.rest_warehouse.empty() ? warehouse.string()
-                                         : opts.rest_warehouse);
-    if (!opts.rest_prefix.empty()) {
-      config.Set(iceberg::rest::RestCatalogProperties::kPrefix,
-                 opts.rest_prefix);
-    }
-    auto r = iceberg::rest::RestCatalog::Make(config);
-    if (!r.has_value()) { *error = r.error().message; return nullptr; }
-    // RestCatalog is a SessionCatalog root, not a Catalog; bind its default
-    // session to get the standard Catalog view the rest of the project uses.
-    auto cat = r.value()->AsCatalog();
-    if (!cat.has_value()) { *error = cat.error().message; return nullptr; }
-    *mode = "rest";
-    return std::move(cat.value());
+  if (opts.rest_uri.empty()) {
+    if (error) *error = "MakeCatalog: rest_uri is required";
+    return nullptr;
   }
-  // DEPRECATED: the ephemeral InMemoryCatalog predates the LMDB catalog of
-  // record and is slated for removal — callers should reach the catalog through
-  // catalogd (REST) or MakeLocalCatalog, never this branch.
-  *mode = "in-memory";
-  return std::make_shared<iceberg::InMemoryCatalog>(
-      "primeparts-staging", LocalIO(), warehouse.string(),
-      std::unordered_map<std::string, std::string>{});
+  common::EnsureArrowRegistration();
+  auto config = iceberg::rest::RestCatalogProperties::default_properties();
+  config.Set(iceberg::rest::RestCatalogProperties::kUri, opts.rest_uri)
+      .Set(iceberg::rest::RestCatalogProperties::kName, opts.rest_name)
+      .Set(iceberg::rest::RestCatalogProperties::kWarehouse,
+           opts.rest_warehouse.empty() ? warehouse.string()
+                                       : opts.rest_warehouse);
+  if (!opts.rest_prefix.empty()) {
+    config.Set(iceberg::rest::RestCatalogProperties::kPrefix,
+               opts.rest_prefix);
+  }
+  auto r = iceberg::rest::RestCatalog::Make(config);
+  if (!r.has_value()) { *error = r.error().message; return nullptr; }
+  // RestCatalog is a SessionCatalog root, not a Catalog; bind its default
+  // session to get the standard Catalog view the rest of the project uses.
+  auto cat = r.value()->AsCatalog();
+  if (!cat.has_value()) { *error = cat.error().message; return nullptr; }
+  *mode = "rest";
+  return std::move(cat.value());
 }
 
 LocalCatalog MakeLocalCatalogWithStore(const fs::path& warehouse,
@@ -198,33 +192,22 @@ std::shared_ptr<iceberg::Catalog> OpenCatalog(const fs::path& warehouse,
   if (uri.empty()) {
     if (const char* env = std::getenv("PRIMEPARTS_REST_URI")) uri = env;
   }
-  if (uri.empty()) uri = kDefaultRestUri;  // REST is the default channel; the
-                                           // arg/env only OVERRIDE the endpoint.
-                                           // LMDB is the unreachable-fallback below.
-  std::string m;  // local mode sink so `mode` may be null
-  if (!uri.empty()) {
-    if (RestServerReachable(uri)) {
-      RestOptions opts;
-      opts.rest_uri = uri;
-      std::string rest_err;
-      auto cat = MakeCatalog(opts, warehouse, &m, &rest_err);  // sets m="rest"
-      if (cat) {
-        if (mode) *mode = m;
-        return cat;
-      }
-      // A live server whose client init failed: report, then fall back to local.
-      std::fprintf(stderr,
-                   "pp: REST catalog %s init failed (%s); using local catalog\n",
-                   uri.c_str(), rest_err.c_str());
-    } else {
-      std::fprintf(stderr,
-                   "pp: REST catalog %s unreachable; using local catalog of record\n",
-                   uri.c_str());
-    }
+  if (uri.empty()) uri = kDefaultRestUri;
+  if (!RestServerReachable(uri)) {
+    if (error) *error = "catalogd unreachable at " + uri + " (start pp-catalogd)";
+    return nullptr;
   }
-  auto local = MakeLocalCatalog(warehouse, error);
-  if (local && mode) *mode = "local";
-  return local;
+  RestOptions opts;
+  opts.rest_uri = uri;
+  std::string m;
+  std::string rest_err;
+  auto cat = MakeCatalog(opts, warehouse, &m, &rest_err);
+  if (!cat) {
+    if (error) *error = "REST catalog " + uri + " init failed: " + rest_err;
+    return nullptr;
+  }
+  if (mode) *mode = m;
+  return cat;
 }
 
 fs::path TableMetadataPath(const std::shared_ptr<iceberg::Catalog>& catalog,

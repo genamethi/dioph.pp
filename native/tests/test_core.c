@@ -10,14 +10,14 @@
     } \
 } while (0)
 
-static void check_decomp(const pp_batch_result *r, size_t i,
+static void check_partition(const pp_batch_result *r, size_t i,
                          int64_t p, int32_t m, int32_t n, int64_t q)
 {
-    CHECK(i < r->decomp_count);
-    CHECK(r->decomp_p[i] == p);
-    CHECK(r->decomp_m[i] == m);
-    CHECK(r->decomp_n[i] == n);
-    CHECK(r->decomp_q[i] == q);
+    CHECK(i < r->partition_count);
+    CHECK(r->partition_p[i] == p);
+    CHECK(r->partition_m[i] == m);
+    CHECK(r->partition_n[i] == n);
+    CHECK(r->partition_q[i] == q);
 }
 
 int main(void)
@@ -50,27 +50,27 @@ int main(void)
     CHECK(status == PP_OK);
     CHECK(result.processed_count == 10);
     CHECK(result.prime_count == 10);
-    CHECK(result.decomp_count == 19);
+    CHECK(result.partition_count == 19);
 
     for (i = 0; i < 10; i++) {
         CHECK(result.prime_p[i] == expected_p[i]);
         CHECK(result.prime_k[i] == expected_k[i]);
     }
 
-    check_decomp(&result, 0, 5, 1, 1, 3);
-    check_decomp(&result, 1, 7, 1, 1, 5);
-    check_decomp(&result, 2, 7, 2, 1, 3);
-    check_decomp(&result, 3, 11, 1, 2, 3);
-    check_decomp(&result, 4, 11, 2, 1, 7);
-    check_decomp(&result, 5, 11, 3, 1, 3);
-    check_decomp(&result, 18, 29, 4, 1, 13);
+    check_partition(&result, 0, 5, 1, 1, 3);
+    check_partition(&result, 1, 7, 1, 1, 5);
+    check_partition(&result, 2, 7, 2, 1, 3);
+    check_partition(&result, 3, 11, 1, 2, 3);
+    check_partition(&result, 4, 11, 2, 1, 7);
+    check_partition(&result, 5, 11, 3, 1, 3);
+    check_partition(&result, 18, 29, 4, 1, 13);
 
     pp_batch_result_clear(&result);
     {
         pp_count_result counts;
         CHECK(pp_count_rank_batch(1, 10, &counts) == PP_OK);
         CHECK(counts.processed_count == 10);
-        CHECK(counts.decomp_count == 19);
+        CHECK(counts.partition_count == 19);
     }
     pp_shutdown();
     return 0;

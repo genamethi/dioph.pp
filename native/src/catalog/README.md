@@ -9,9 +9,6 @@ filesystem, read/written through iceberg-cpp FileIO.
 |---|---|
 | `pp_lmdb_store.{h,cc}` | `LmdbCatalogStore : iceberg::sql::CatalogStore` over vendored `liblmdb`. Two named sub-DBs (`tables`, `nsprops`); single-writer under one recursive mutex. `MakeLmdbCatalogStore(path, name, map_size)`. |
 | `pp_iceberg_rest.{h,cc}` | Catalog construction + shared helpers: `MakeLocalCatalog` (SqlCatalog over the LMDB store — the catalog of record), `MakeCatalog` (a RestCatalog/IRC client), `EnsureNamespace`, `PublishTable` (register-or-create + FastAppend), `LatestMetadataJson`, `LocalIO`. |
-| `pp_row_delta.{h,cc}` | Committable position-delete `SnapshotUpdate` (merge-on-read v2). Underpins the covering-sieve's progress persistence. |
-| `pp_sieve_clone.{h,cc}` | `--clone-sieve`: stand up `primes_k0_sieve` as a v2 MOR shallow clone of `primes_k0` (native CreateTable + FastAppend of its data files, zero row-copy). |
-| `pp_catalog_main.cc` | `pp-catalog` binary: `--register` (cutover: register on-disk base tables into the LMDB catalog) and `--clone-sieve`. |
 | `pp_lmdb_smoke.cc` | `make smoke` — store-contract + SqlCatalog round-trip over the LMDB store. |
 
 ## The catalog seam

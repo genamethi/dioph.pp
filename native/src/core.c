@@ -52,10 +52,10 @@ void pp_batch_result_clear(pp_batch_result *result)
     }
     free(result->prime_p);
     free(result->prime_k);
-    free(result->decomp_p);
-    free(result->decomp_m);
-    free(result->decomp_n);
-    free(result->decomp_q);
+    free(result->partition_p);
+    free(result->partition_m);
+    free(result->partition_n);
+    free(result->partition_q);
     memset(result, 0, sizeof(*result));
 }
 
@@ -65,11 +65,11 @@ size_t pp_batch_result_used_bytes(const pp_batch_result *result)
         return 0;
     }
     return result->prime_count * (sizeof(*result->prime_p) + sizeof(*result->prime_k))
-        + result->decomp_count * (
-            sizeof(*result->decomp_p)
-            + sizeof(*result->decomp_m)
-            + sizeof(*result->decomp_n)
-            + sizeof(*result->decomp_q));
+        + result->partition_count * (
+            sizeof(*result->partition_p)
+            + sizeof(*result->partition_m)
+            + sizeof(*result->partition_n)
+            + sizeof(*result->partition_q));
 }
 
 size_t pp_batch_result_allocated_bytes(const pp_batch_result *result)
@@ -78,11 +78,11 @@ size_t pp_batch_result_allocated_bytes(const pp_batch_result *result)
         return 0;
     }
     return result->prime_capacity * (sizeof(*result->prime_p) + sizeof(*result->prime_k))
-        + result->decomp_capacity * (
-            sizeof(*result->decomp_p)
-            + sizeof(*result->decomp_m)
-            + sizeof(*result->decomp_n)
-            + sizeof(*result->decomp_q));
+        + result->partition_capacity * (
+            sizeof(*result->partition_p)
+            + sizeof(*result->partition_m)
+            + sizeof(*result->partition_n)
+            + sizeof(*result->partition_q));
 }
 
 int64_t pp_prime_pi(int64_t n)
@@ -274,7 +274,7 @@ static int reserve_prime_rows(pp_batch_result *result, size_t needed)
     return PP_OK;
 }
 
-static int reserve_decomp_rows(pp_batch_result *result, size_t needed)
+static int reserve_partition_rows(pp_batch_result *result, size_t needed)
 {
     int64_t *new_p;
     int32_t *new_m;
@@ -282,10 +282,10 @@ static int reserve_decomp_rows(pp_batch_result *result, size_t needed)
     int64_t *new_q;
     size_t new_capacity;
 
-    if (needed <= result->decomp_capacity) {
+    if (needed <= result->partition_capacity) {
         return PP_OK;
     }
-    new_capacity = result->decomp_capacity == 0 ? 1 : result->decomp_capacity;
+    new_capacity = result->partition_capacity == 0 ? 1 : result->partition_capacity;
     while (new_capacity < needed) {
         if (new_capacity > SIZE_MAX / 2) {
             return PP_ERR_OVERFLOW;
@@ -293,30 +293,30 @@ static int reserve_decomp_rows(pp_batch_result *result, size_t needed)
         new_capacity *= 2;
     }
 
-    new_p = (int64_t *)realloc(result->decomp_p, new_capacity * sizeof(*new_p));
+    new_p = (int64_t *)realloc(result->partition_p, new_capacity * sizeof(*new_p));
     if (new_p == NULL) {
         return PP_ERR_ALLOC;
     }
-    result->decomp_p = new_p;
+    result->partition_p = new_p;
 
-    new_m = (int32_t *)realloc(result->decomp_m, new_capacity * sizeof(*new_m));
+    new_m = (int32_t *)realloc(result->partition_m, new_capacity * sizeof(*new_m));
     if (new_m == NULL) {
         return PP_ERR_ALLOC;
     }
-    result->decomp_m = new_m;
+    result->partition_m = new_m;
 
-    new_n = (int32_t *)realloc(result->decomp_n, new_capacity * sizeof(*new_n));
+    new_n = (int32_t *)realloc(result->partition_n, new_capacity * sizeof(*new_n));
     if (new_n == NULL) {
         return PP_ERR_ALLOC;
     }
-    result->decomp_n = new_n;
+    result->partition_n = new_n;
 
-    new_q = (int64_t *)realloc(result->decomp_q, new_capacity * sizeof(*new_q));
+    new_q = (int64_t *)realloc(result->partition_q, new_capacity * sizeof(*new_q));
     if (new_q == NULL) {
         return PP_ERR_ALLOC;
     }
-    result->decomp_q = new_q;
-    result->decomp_capacity = new_capacity;
+    result->partition_q = new_q;
+    result->partition_capacity = new_capacity;
     return PP_OK;
 }
 
@@ -342,22 +342,22 @@ static int write_prime(pp_batch_result *result, uint64_t p, int32_t k)
     return PP_OK;
 }
 
-static int write_decomp(pp_batch_result *result, uint64_t p, int32_t m, int32_t n, uint64_t q)
+static int write_partition(pp_batch_result *result, uint64_t p, int32_t m, int32_t n, uint64_t q)
 {
     int status;
 
     if (p > (uint64_t)INT64_MAX || q > (uint64_t)INT64_MAX) {
         return PP_ERR_OVERFLOW;
     }
-    status = reserve_decomp_rows(result, result->decomp_count + 1);
+    status = reserve_partition_rows(result, result->partition_count + 1);
     if (status != PP_OK) {
         return status;
     }
-    result->decomp_p[result->decomp_count] = (int64_t)p;
-    result->decomp_m[result->decomp_count] = m;
-    result->decomp_n[result->decomp_count] = n;
-    result->decomp_q[result->decomp_count] = (int64_t)q;
-    result->decomp_count++;
+    result->partition_p[result->partition_count] = (int64_t)p;
+    result->partition_m[result->partition_count] = m;
+    result->partition_n[result->partition_count] = n;
+    result->partition_q[result->partition_count] = (int64_t)q;
+    result->partition_count++;
     return PP_OK;
 }
 
@@ -421,7 +421,7 @@ static int process_prime(pp_batch_result *result, uint64_t p)
     int m;
     int status;
     int killed_parity;
-    size_t decomp_start;
+    size_t partition_start;
     uint64_t power;
     uint64_t hit_base[64];
     unsigned char hit_count[64];
@@ -435,7 +435,7 @@ static int process_prime(pp_batch_result *result, uint64_t p)
 
     max_m = floor_log2_u64(p);
     killed_parity = (p % 3 == 2);
-    decomp_start = result->decomp_count;
+    partition_start = result->partition_count;
     power = 2;
     memset(hit_base, 0, sizeof(hit_base));
     memset(hit_count, 0, sizeof(hit_count));
@@ -459,7 +459,7 @@ static int process_prime(pp_batch_result *result, uint64_t p)
                 }
             }
             if (exponent > 0) {
-                status = write_decomp(result, p, (int32_t)m, exponent, base);
+                status = write_partition(result, p, (int32_t)m, exponent, base);
                 if (status != PP_OK) {
                     return status;
                 }
@@ -469,16 +469,16 @@ static int process_prime(pp_batch_result *result, uint64_t p)
         power <<= 1;
     }
 
-    return write_prime(result, p, (int32_t)(result->decomp_count - decomp_start));
+    return write_prime(result, p, (int32_t)(result->partition_count - partition_start));
 }
 
-static int count_prime(uint64_t p, int64_t *decomp_count)
+static int count_prime(uint64_t p, int64_t *partition_count)
 {
     int max_m;
     int m;
     int status;
     int killed_parity;
-    int64_t local_decomps = 0;
+    int64_t local_partitions = 0;
     uint64_t power;
     uint64_t hit_base[64];
     unsigned char hit_count[64];
@@ -515,20 +515,20 @@ static int count_prime(uint64_t p, int64_t *decomp_count)
                 }
             }
             if (exponent > 0) {
-                local_decomps++;
+                local_partitions++;
                 increment_hit(base, hit_base, hit_count, &n_hits, exhausted, &n_exhausted);
             }
         }
         power <<= 1;
     }
 
-    *decomp_count += local_decomps;
+    *partition_count += local_partitions;
     return PP_OK;
 }
 
 static int prepare_result(pp_batch_result *out, int64_t start_idx, int64_t requested_count, size_t expected_count)
 {
-    size_t decomp_capacity;
+    size_t partition_capacity;
     int status;
 
     pp_batch_result_clear(out);
@@ -543,8 +543,8 @@ static int prepare_result(pp_batch_result *out, int64_t start_idx, int64_t reque
     if (expected_count > (SIZE_MAX - 1) / 183) {
         return PP_ERR_OVERFLOW;
     }
-    decomp_capacity = (expected_count * 183) / 100 + 1;
-    status = reserve_decomp_rows(out, decomp_capacity == 0 ? 1 : decomp_capacity);
+    partition_capacity = (expected_count * 183) / 100 + 1;
+    status = reserve_partition_rows(out, partition_capacity == 0 ? 1 : partition_capacity);
     if (status != PP_OK) {
         return status;
     }
@@ -677,7 +677,7 @@ int pp_count_rank_batch(int64_t start_idx, int64_t count, pp_count_result *out)
         if (p >= (uint64_t)end_prime) {
             break;
         }
-        status = count_prime(p, &out->decomp_count);
+        status = count_prime(p, &out->partition_count);
         if (status != PP_OK) {
             primesieve_free_iterator(&it);
             return status;

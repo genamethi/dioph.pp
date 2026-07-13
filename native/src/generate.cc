@@ -355,13 +355,13 @@ std::shared_ptr<arrow::Array> dense_int64_range(int64_t start, int64_t length) {
 std::shared_ptr<arrow::Array> partitions_rank_array(const pp_batch_result& batch,
                                                     int64_t rank_start) {
   std::vector<int64_t> ranks;
-  ranks.reserve(batch.decomp_count);
+  ranks.reserve(batch.partition_count);
   for (size_t i = 0; i < batch.prime_count; ++i) {
     int64_t rank_i = rank_start + static_cast<int64_t>(i);
     int32_t kk = batch.prime_k[i];
     for (int32_t j = 0; j < kk; ++j) ranks.push_back(rank_i);
   }
-  return int64_array(ranks.data(), static_cast<int64_t>(batch.decomp_count));
+  return int64_array(ranks.data(), static_cast<int64_t>(batch.partition_count));
 }
 
 // Physical primes batch: (p, k, prime_rank). Bucket columns live in the
@@ -391,13 +391,13 @@ std::shared_ptr<arrow::RecordBatch> make_partitions_batch(const pp_batch_result&
       arrow::field("q_k",        arrow::int64()),
       arrow::field("prime_rank", arrow::int64()),
   });
-  int64_t rows = static_cast<int64_t>(batch.decomp_count);
+  int64_t rows = static_cast<int64_t>(batch.partition_count);
   return arrow::RecordBatch::Make(
       schema, rows,
-      {int64_array(batch.decomp_p, rows),
-       int32_array(batch.decomp_m, rows),
-       int32_array(batch.decomp_n, rows),
-       int64_array(batch.decomp_q, rows),
+      {int64_array(batch.partition_p, rows),
+       int32_array(batch.partition_m, rows),
+       int32_array(batch.partition_n, rows),
+       int64_array(batch.partition_q, rows),
        partitions_rank_array(batch, rank_start)});
 }
 
@@ -467,7 +467,7 @@ bool materialize_group(int64_t* next_idx, int64_t end_idx, const Options& option
       group->last_p = holder.batch.last_p;
     }
     group->prime_rows += static_cast<int64_t>(holder.batch.prime_count);
-    group->partitions_rows += static_cast<int64_t>(holder.batch.decomp_count);
+    group->partitions_rows += static_cast<int64_t>(holder.batch.partition_count);
     group->processed_count += holder.batch.processed_count;
   }
 
@@ -561,7 +561,7 @@ bool parse_args(int argc, char** argv, Options* options) {
 }
 
 // Turn a finished CommitPlan into the atomic commit's per-table specs and hand
-// them to the client's commit path (in-process store, or daemon over rest_uri).
+// them to the daemon over rest_uri.
 bool commit_plan(const Options& options, const CommitPlan& plan,
                  const std::shared_ptr<iceberg::Schema>& p_schema,
                  const std::shared_ptr<iceberg::Schema>& d_schema,
@@ -580,21 +580,11 @@ bool commit_plan(const Options& options, const CommitPlan& plan,
     specs.push_back(std::move(spec));
   }
 
-  std::shared_ptr<iceberg::Catalog> catalog;
-  std::shared_ptr<iceberg::sql::CatalogStore> store;
-  if (!options.rest_uri.empty()) {
-    std::string mode;
-    catalog = primeparts::catalog::OpenCatalog(options.warehouse,
-                                               options.rest_uri, &mode, error);
-    if (!catalog) return false;
-  } else {
-    auto local = primeparts::catalog::MakeLocalCatalogWithStore(options.warehouse,
-                                                                error);
-    if (!local.catalog) return false;
-    catalog = local.catalog;
-    store = local.store;
-  }
-  return primeparts::catalog::CommitFilesAtomic(catalog, store, options.rest_uri,
+  std::string mode;
+  auto catalog = primeparts::catalog::OpenCatalog(options.warehouse,
+                                                  options.rest_uri, &mode, error);
+  if (!catalog) return false;
+  return primeparts::catalog::CommitFilesAtomic(catalog, nullptr, options.rest_uri,
                                                 options.warehouse, specs, error);
 }
 

@@ -35,11 +35,8 @@ subset, is a derived base table the covering sieve consumes.)
 | `primeparts.partitions` | `identity(p_bucket_version, p_bucket)` |
 
 Every prime `p` appears in `primes` exactly once. Obstructed primes (`k=0`, no
-decomposition) are present with `k=0` and have no rows in `partitions`. The
+partition) are present with `k=0` and have no rows in `partitions`. The
 cross-table invariant is `sum(primes.k) == rows(partitions)`.
-
-`partitions` was previously named `decompositions`; the prose terminology
-"partitions of p" / "(m_k, n_k, q_k) tuple" is unchanged.
 
 ## Schemas
 
@@ -51,7 +48,7 @@ fields required; field IDs contiguous.
 | field_id | name | type | notes |
 |---|---|---|---|
 | 1 | `p` | Long | the prime |
-| 2 | `k` | Int | # decompositions; 0 = obstructed |
+| 2 | `k` | Int | # partitions; 0 = obstructed |
 | 3 | `prime_rank` | Long | π(p) |
 | 4 | `p_bucket_version` | Int | partition coord |
 | 5 | `p_bucket` | Int | partition coord |

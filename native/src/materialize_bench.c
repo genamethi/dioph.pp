@@ -23,7 +23,7 @@ typedef struct materialize_shared {
     int first_status;
     int64_t chunks_completed;
     int64_t processed;
-    int64_t decompositions;
+    int64_t partitions;
     int64_t first_p;
     int64_t last_p;
     size_t used_bytes_total;
@@ -74,7 +74,7 @@ static void update_stats(materialize_shared *shared, const pp_batch_result *batc
 
     shared->chunks_completed++;
     shared->processed += batch->processed_count;
-    shared->decompositions += (int64_t)batch->decomp_count;
+    shared->partitions += (int64_t)batch->partition_count;
     shared->used_bytes_total += used_bytes;
     shared->allocated_bytes_total += allocated_bytes;
     if (used_bytes > shared->max_chunk_used_bytes) {
@@ -261,11 +261,11 @@ int main(int argc, char **argv)
         shared.max_chunk_allocated_bytes
         * (size_t)(shared.chunks_completed < threads ? shared.chunks_completed : threads);
     printf("threads=%d chunk_primes=%" PRId64 " chunks=%" PRId64
-           " processed=%" PRId64 " decompositions=%" PRId64
+           " processed=%" PRId64 " partitions=%" PRId64
            " first_p=%" PRId64 " last_p=%" PRId64
            " elapsed_s=%.6f primes_per_s=%.0f\n",
            threads, chunk_primes, shared.chunks_completed, shared.processed,
-           shared.decompositions, shared.first_p, shared.last_p, elapsed,
+           shared.partitions, shared.first_p, shared.last_p, elapsed,
            elapsed > 0.0 ? (double)shared.processed / elapsed : 0.0);
     printf("used_bytes_total=%zu allocated_bytes_total=%zu"
            " max_chunk_used_bytes=%zu max_chunk_allocated_bytes=%zu"

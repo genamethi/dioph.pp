@@ -129,7 +129,7 @@ std::shared_ptr<arrow::Schema> IcebergToArrowSchemaWithFieldIds(
     const iceberg::Schema& schema, std::string* error,
     const iceberg::PartitionSpec* partition_spec = nullptr);
 
-// Concrete primeparts schemas (PrimesSchema/PartitionsSchema/MdiffSchema/...)
+// Concrete primeparts schemas (PrimesSchema/PartitionsSchema)
 // and the p_bucket partition spec live in "primeparts/schemas.h" — the writer
 // is schema-agnostic and only consumes a schema via WriterConfig. The client
 // chooses its own on-disk sub-layout under the staging root (StagingDataDir);

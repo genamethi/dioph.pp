@@ -73,7 +73,7 @@ int main(int argc, char **argv)
     int64_t rem;
     int64_t next_start;
     int64_t processed = 0;
-    int64_t decomps = 0;
+    int64_t partitions = 0;
     double t0;
     double elapsed;
     int i;
@@ -160,13 +160,13 @@ int main(int argc, char **argv)
             return 1;
         }
         processed += args[i].result.processed_count;
-        decomps += args[i].result.decomp_count;
+        partitions += args[i].result.partition_count;
     }
     elapsed = monotonic_seconds() - t0;
 
-    printf("threads=%d processed=%" PRId64 " decompositions=%" PRId64
+    printf("threads=%d processed=%" PRId64 " partitions=%" PRId64
            " elapsed_s=%.6f primes_per_s=%.0f\n",
-           threads, processed, decomps, elapsed,
+           threads, processed, partitions, elapsed,
            elapsed > 0.0 ? (double)processed / elapsed : 0.0);
 
     free(thread_ids);

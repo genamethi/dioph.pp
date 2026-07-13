@@ -16,7 +16,7 @@ if command -v pacman >/dev/null 2>&1; then
   }
   PKGS="base-devel pkgconf cmake ninja git curl tar boost \
 gmp mpfr pari primesieve primecount sqlite openssl \
-nlohmann-json \
+nlohmann-json3.12-dev \
 ffmpeg libunistring libdeflate ncurses doctest pandoc-cli \
 thrift brotli protobuf abseil-cpp re2 utf8proc lz4 zstd zlib bzip2"
 
@@ -111,6 +111,37 @@ if [ ! -x /usr/local/bin/lua ] || ! /usr/local/bin/lua -v 2>&1 | grep -q "Lua 5.
   rm -rf "$tmp"
 else
   echo "lua 5.5 present"
+fi
+
+# Distros ship a *split* httplib.h (impl in libcpp-httplib.so); we compile
+# header-only. First httplib.h on the include path decides, so a header-only
+# copy in $PREFIX/include shadows a split one in /usr/include. If none is
+# header-only, fetch the latest release (unpinned) into the prefix.
+httplib_ok=
+for f in "$PREFIX/include/httplib.h" /usr/local/include/httplib.h /usr/include/httplib.h; do
+  [ -f "$f" ] || continue
+  grep -q 'inline Server::Server' "$f" && httplib_ok=1
+  break
+done
+if [ -z "$httplib_ok" ]; then
+  tag=$(curl -fsSL https://api.github.com/repos/yhirose/cpp-httplib/releases/latest |
+    sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')
+  [ -n "$tag" ] || {
+    echo "could not resolve latest cpp-httplib release"
+    exit 1
+  }
+  tmp=$(mktemp)
+  curl -fsSL "https://raw.githubusercontent.com/yhirose/cpp-httplib/$tag/httplib.h" -o "$tmp"
+  grep -q 'inline Server::Server' "$tmp" || {
+    echo "fetched cpp-httplib $tag is not header-only"
+    exit 1
+  }
+  sudo mkdir -p "$PREFIX/include"
+  sudo cp "$tmp" "$PREFIX/include/httplib.h"
+  rm -f "$tmp"
+  echo "cpp-httplib $tag (header-only) installed to $PREFIX/include"
+else
+  echo "cpp-httplib header-only present"
 fi
 
 if [ ! -f "$PREFIX/lib/libarrow.a" ]; then

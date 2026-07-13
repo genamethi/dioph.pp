@@ -1,0 +1,5 @@
+Learn about ASAN/UBSAN and see about how to make iceberg-cpp build with those flags on.
+Building harness for codebase for ASAN.
+Replace the smoke binaries with unit tests not bound to user entrypoints; use the gtest already vendored via iceberg-cpp. Stop maintaining smokes.
+End-to-end tests, lower priority.
+generate-smoke is broken as of 916563a (kMinCount 1e9 vs the smoke's --count 1000); retires with the smokes.
