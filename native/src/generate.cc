@@ -684,9 +684,13 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
 
     std::vector<BoundTable> tables;
     tables.push_back(BoundTable{"primes", p_schema, p_spec,
-                                {"p", "prime_rank"}, /*reference=*/true, nullptr});
+                                {"p", "prime_rank"},
+                                {{"p", true}, {"prime_rank", true}},
+                                true, nullptr});
     tables.push_back(BoundTable{"partitions", d_schema, d_spec,
-                                {"p", "prime_rank", "q_k"}, /*reference=*/false, nullptr});
+                                {"p", "prime_rank", "q_k"},
+                                {{"p", true}, {"prime_rank", true}, {"q_k", false}},
+                                false, nullptr});
     auto writer = AlignedBucketWriter::Make(options.warehouse, std::move(tables),
                                             AtomKey{"p"}, policy, resume, &error);
     if (!writer) {

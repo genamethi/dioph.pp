@@ -8,7 +8,7 @@ Branch `planner-prep` (off `tui-query`). One commit per phase, message = phase f
 
 | file | scope | deps | status |
 |---|---|---|---|
-| 01_writer | stat-column descriptors, BatchStats removal, partition-fallback deletion | — | todo |
+| 01_writer | stat-column descriptors, BatchStats removal, partition-fallback deletion | — | done |
 | 02_scan_plan | TableReadTraits, spec-shaped plan types, planner, column_binder | — | todo |
 | 03_scan_exec | SourceTableReader over ScanPlan, row-group read path, key slicing | 02 | todo |
 | 04_query_verify | QueryService + verify on new seams, GroupKey, check registry | 03 | todo |

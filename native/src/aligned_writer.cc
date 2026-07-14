@@ -10,10 +10,12 @@
 
 #include <arrow/api.h>
 
+#include "iceberg/expression/literal.h"
 #include "iceberg/partition_spec.h"
+#include "iceberg/row/partition_values.h"
 #include "iceberg/schema.h"
 
-#include "primeparts/catalog/pp_iceberg_rest.h"  // StagingDataDir
+#include "primeparts/catalog/pp_iceberg_rest.h"
 #include "primeparts/writer.h"
 
 namespace primeparts {
@@ -22,14 +24,12 @@ namespace {
 
 constexpr double kEwmaAlpha = 0.3;
 
-// Raw ascending int64 column pointer, or nullptr if absent / not int64.
 const int64_t* Int64Col(const arrow::RecordBatch& batch, const std::string& name) {
   auto col = batch.GetColumnByName(name);
   if (!col || col->type_id() != arrow::Type::INT64) return nullptr;
   return static_cast<const arrow::Int64Array&>(*col).raw_values();
 }
 
-// First row whose key > cut_key (sorted-ascending key column).
 int64_t UpperBoundByKey(const arrow::RecordBatch& batch, const std::string& key,
                         int64_t cut_key) {
   const int64_t* p = Int64Col(batch, key);
@@ -55,9 +55,9 @@ struct AlignedBucketWriter::Impl {
   int64_t rg_ref_bytes_est = 0;
   int64_t ref_atoms_in_rg = 0;
 
-  std::vector<std::unique_ptr<BucketParquetWriter>> writers;  // per table, current bucket
-  std::vector<std::vector<WrittenFile>> all_files;            // per table, across buckets
-  std::vector<int32_t> next_seq;                              // per table, current bucket
+  std::vector<std::unique_ptr<BucketParquetWriter>> writers;
+  std::vector<std::vector<WrittenFile>> all_files;
+  std::vector<int32_t> next_seq;
 
   bool OpenBucketWriters(std::string* error);
   bool CloseBucketWriters(std::string* error);
@@ -72,6 +72,9 @@ bool AlignedBucketWriter::Impl::OpenBucketWriters(std::string* error) {
   const std::string vdir =
       "p_bucket_version=" + std::to_string(policy.bucket_version);
   const std::string bdir = "p_bucket=" + std::to_string(bucket);
+  auto partition_values = std::make_shared<iceberg::PartitionValues>(
+      std::vector<iceberg::Literal>{iceberg::Literal::Int(policy.bucket_version),
+                                    iceberg::Literal::Int(bucket)});
   for (size_t t = 0; t < tables.size(); ++t) {
     const auto& bt = tables[t];
     WriterConfig cfg;
@@ -80,11 +83,13 @@ bool AlignedBucketWriter::Impl::OpenBucketWriters(std::string* error) {
     cfg.table_name = bt.name;
     cfg.filename_prefix = bt.name;
     cfg.delta_columns = bt.delta_columns;
+    cfg.stat_columns = bt.stat_columns;
     cfg.partition_spec = bt.spec;
+    cfg.partition_values = partition_values;
     cfg.bucket_version = policy.bucket_version;
     cfg.bucket = bucket;
-    cfg.target_rows_per_file = 0;         // facade rolls files explicitly
-    cfg.max_row_group_rows = INT64_MAX;   // facade cuts row groups explicitly
+    cfg.target_rows_per_file = 0;
+    cfg.max_row_group_rows = INT64_MAX;
     cfg.starting_file_seq = next_seq[t];
     auto w = BucketParquetWriter::Make(std::move(cfg), error);
     if (!w) return false;
@@ -110,14 +115,7 @@ bool AlignedBucketWriter::Impl::WriteSlice(size_t t,
                                            std::string* error) {
   if (end <= start) return true;
   auto slice = batch.Slice(start, end - start);
-  const int64_t* p = Int64Col(batch, atom.column);
-  const int64_t* rank = Int64Col(batch, "prime_rank");
-  BucketParquetWriter::BatchStats stats{};
-  stats.p_min = p ? p[start] : 0;
-  stats.p_max = p ? p[end - 1] : 0;
-  stats.rank_min = rank ? rank[start] : 0;
-  stats.rank_max = rank ? rank[end - 1] : 0;
-  return writers[t]->Write(*slice, stats, error);
+  return writers[t]->Write(*slice, error);
 }
 
 bool AlignedBucketWriter::Impl::RgFill(std::string* error) {
@@ -145,7 +143,7 @@ bool AlignedBucketWriter::Impl::RgFill(std::string* error) {
       if (!CloseBucketWriters(error)) return false;
       ++bucket;
       bucket_ref_bytes = 0;
-      next_seq.assign(tables.size(), 0);  // fresh bucket dir starts at seq 0
+      next_seq.assign(tables.size(), 0);
       if (!OpenBucketWriters(error)) return false;
     }
   }
@@ -211,7 +209,7 @@ bool AlignedBucketWriter::Append(
     return false;
   }
 
-  std::vector<int64_t> cursor(I.tables.size(), 0);  // per-table write cursor
+  std::vector<int64_t> cursor(I.tables.size(), 0);
   const int64_t rg_target = I.policy.rg_target_bytes();
   int64_t a = 0;
   while (a < R) {

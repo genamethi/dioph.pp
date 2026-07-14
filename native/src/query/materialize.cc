@@ -77,8 +77,7 @@ bool MaterializeIntColumns(
 
   auto writer = primeparts::BucketParquetWriter::Make(cfg, error);
   if (!writer) return false;
-  primeparts::BucketParquetWriter::BatchStats st{};  // no p column -> zeros
-  if (!writer->Write(*batch, st, error)) return false;
+  if (!writer->Write(*batch, error)) return false;
   std::vector<primeparts::WrittenFile> written;
   if (!writer->Close(&written, error)) return false;
 
