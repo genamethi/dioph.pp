@@ -164,8 +164,22 @@ int q_hist(lua_State* L) {
   lua_newtable(L);  // result array (empty if qs null)
   if (qs == nullptr) return 1;
 
+  auto bits = [](int64_t p) {
+    return static_cast<int64_t>(
+        63 - __builtin_clzll(static_cast<unsigned long long>(p)));
+  };
+  GroupKey key;
+  if (col == "bits") {
+    key = GroupKey::Derived({"p"}, [bits](const int64_t* v) { return bits(v[0]); });
+  } else if (col == "r") {
+    key = GroupKey::Derived(
+        {"p", "k"}, [bits](const int64_t* v) { return bits(v[0]) - v[1]; });
+  } else {
+    key = GroupKey::Column(col);
+  }
+
   std::string e;
-  auto rows = qs->GroupCount(table, col, lo, hi, static_cast<int>(threads), &e);
+  auto rows = qs->GroupCount(table, key, lo, hi, static_cast<int>(threads), &e);
   if (!e.empty()) return luaL_error(L, "query.hist: %s", e.c_str());
   int idx = 1;
   for (const auto& r : rows) {

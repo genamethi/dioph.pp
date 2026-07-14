@@ -2,6 +2,7 @@
 
 #include "primeparts/common/thread_pool.h"
 #include "primeparts/core.h"
+#include "primeparts/scan/column_binder.h"
 #include "primeparts/source_scan.h"
 
 #include <arrow/api.h>
@@ -23,16 +24,6 @@
 namespace primeparts::verify {
 
 namespace {
-
-const int64_t* I64(const arrow::RecordBatch& b, const char* name) {
-  return std::static_pointer_cast<arrow::Int64Array>(b.GetColumnByName(name))
-      ->raw_values();
-}
-
-const int32_t* I32(const arrow::RecordBatch& b, const char* name) {
-  return std::static_pointer_cast<arrow::Int32Array>(b.GetColumnByName(name))
-      ->raw_values();
-}
 
 __extension__ typedef unsigned __int128 u128;
 
@@ -59,19 +50,21 @@ class PrimeRankCheck : public Check {
   PrimeRankCheck() {
     spec_.table = "primes";
     spec_.select = {"p", "prime_rank"};
+    spec_.requires_ascending = "p";
   }
   const CheckSpec& spec() const override { return spec_; }
   std::unique_ptr<ShardState> NewShard() const override {
     return std::make_unique<PrimeShard>();
   }
-  void Eval(const arrow::RecordBatch& batch, const std::string& data_file,
-            ShardState& state, CheckResult& out,
-            int max_examples) const override {
+  bool Eval(const arrow::RecordBatch& batch, const std::string& data_file,
+            ShardState& state, CheckResult& out, int max_examples,
+            std::string* error) const override {
     auto& st = static_cast<PrimeShard&>(state);
-    const int64_t* p = I64(batch, "p");
-    const int64_t* rank = I64(batch, "prime_rank");
+    const int64_t* p = scan::BindInt64(batch, "p", error);
+    const int64_t* rank = scan::BindInt64(batch, "prime_rank", error);
+    if (!p || !rank) return false;
     const int64_t n = batch.num_rows();
-    if (n == 0) return;
+    if (n == 0) return true;
 
     if (!st.have_file || data_file != st.file) {
       st.file = data_file;
@@ -106,6 +99,7 @@ class PrimeRankCheck : public Check {
       }
     }
     st.index += n;
+    return true;
   }
 
  private:
@@ -122,12 +116,14 @@ class PartitionCheck : public Check {
   std::unique_ptr<ShardState> NewShard() const override {
     return std::make_unique<ShardState>();
   }
-  void Eval(const arrow::RecordBatch& batch, const std::string&,
-            ShardState&, CheckResult& out, int max_examples) const override {
-    const int64_t* p = I64(batch, "p");
-    const int32_t* m_k = I32(batch, "m_k");
-    const int32_t* n_k = I32(batch, "n_k");
-    const int64_t* q_k = I64(batch, "q_k");
+  bool Eval(const arrow::RecordBatch& batch, const std::string&, ShardState&,
+            CheckResult& out, int max_examples,
+            std::string* error) const override {
+    const int64_t* p = scan::BindInt64(batch, "p", error);
+    const int32_t* m_k = scan::BindInt32(batch, "m_k", error);
+    const int32_t* n_k = scan::BindInt32(batch, "n_k", error);
+    const int64_t* q_k = scan::BindInt64(batch, "q_k", error);
+    if (!p || !m_k || !n_k || !q_k) return false;
     const int64_t n = batch.num_rows();
 
     for (int64_t i = 0; i < n; ++i) {
@@ -159,13 +155,14 @@ class PartitionCheck : public Check {
         }
       }
     }
+    return true;
   }
 
  private:
   CheckSpec spec_;
 };
 
-}
+}  // namespace
 
 std::shared_ptr<iceberg::Expression> BuildWindowFilter(const Window& w) {
   std::shared_ptr<iceberg::Expression> filter;
@@ -180,12 +177,11 @@ std::shared_ptr<iceberg::Expression> BuildWindowFilter(const Window& w) {
   return filter;
 }
 
-std::unique_ptr<Check> MakePrimeRankCheck() {
-  return std::make_unique<PrimeRankCheck>();
-}
-
-std::unique_ptr<Check> MakePartitionCheck() {
-  return std::make_unique<PartitionCheck>();
+std::vector<std::unique_ptr<Check>> AllChecks() {
+  std::vector<std::unique_ptr<Check>> checks;
+  checks.push_back(std::make_unique<PrimeRankCheck>());
+  checks.push_back(std::make_unique<PartitionCheck>());
+  return checks;
 }
 
 CheckResult TableVerifier::Run(const std::string& metadata_path,
@@ -249,8 +245,12 @@ CheckResult TableVerifier::Run(const std::string& metadata_path,
         return;
       }
       if (!batch) break;
-      check.Eval(*batch, reader->current_data_file_path(), *st, acc,
-                 max_examples);
+      if (!check.Eval(*batch, reader->current_data_file_path(), *st, acc,
+                      max_examples, &e)) {
+        werr[shard] = "eval: " + e;
+        failed.store(true);
+        return;
+      }
       scanned.fetch_add(batch->num_rows(), std::memory_order_relaxed);
     }
   };
@@ -303,4 +303,4 @@ CheckResult TableVerifier::Run(const std::string& metadata_path,
   return result;
 }
 
-}
+}  // namespace primeparts::verify

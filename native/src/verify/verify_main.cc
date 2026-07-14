@@ -2,11 +2,13 @@
 
 #include "primeparts/catalog/pp_iceberg_rest.h"
 #include "primeparts/common/uri.h"
+#include "primeparts/scan/table_traits.h"
 
 #include "iceberg/catalog.h"
 #include "iceberg/snapshot.h"
 #include "iceberg/table.h"
 #include "iceberg/table_identifier.h"
+#include "iceberg/table_metadata.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -72,7 +74,8 @@ int64_t LatestSnapshotId(const std::shared_ptr<iceberg::Table>& tbl) {
 }
 
 int RunTable(const std::shared_ptr<iceberg::Catalog>& catalog,
-             const std::string& table, const Options& opts, Logger& log) {
+             const ppv::Check& check, const Options& opts, Logger& log) {
+  const std::string& table = check.spec().table;
   iceberg::TableIdentifier ident{.ns = iceberg::Namespace{{"primeparts"}},
                                  .name = table};
   auto loaded = catalog->LoadTable(ident);
@@ -84,8 +87,28 @@ int RunTable(const std::shared_ptr<iceberg::Catalog>& catalog,
   const std::string meta = primeparts::common::StripFileScheme(
       tbl->metadata_file_location());
 
-  auto check = table == "primes" ? ppv::MakePrimeRankCheck()
-                                 : ppv::MakePartitionCheck();
+  if (!check.spec().requires_ascending.empty()) {
+    primeparts::scan::TableReadTraits traits;
+    std::string terr;
+    const auto& metadata = tbl->metadata();
+    if (!metadata ||
+        !primeparts::scan::TableReadTraits::FromMetadata(*metadata, &traits,
+                                                         &terr)) {
+      log.Line("FAIL " + table + ": traits: " + terr);
+      return 1;
+    }
+    const auto& req = check.spec().requires_ascending;
+    const bool declared = traits.sorted() &&
+                          traits.sort_keys.front().ascending &&
+                          traits.sort_keys.front().name == req;
+    if (!declared) {
+      log.Line("FAIL " + table + ": check requires an ascending sort order on '" +
+               req + "' declared in the catalog; run pp-declare-sort --table " +
+               table + " --field " + req);
+      return 1;
+    }
+  }
+
   auto filter = ppv::BuildWindowFilter(opts.window);
 
   std::optional<int64_t> from_snap;
@@ -101,7 +124,7 @@ int RunTable(const std::shared_ptr<iceberg::Catalog>& catalog,
   }
 
   std::string err;
-  auto r = ppv::TableVerifier::Run(meta, *check, filter, opts.threads,
+  auto r = ppv::TableVerifier::Run(meta, check, filter, opts.threads,
                                    opts.window.limit, opts.max_examples,
                                    from_snap, &err);
   if (!err.empty()) {
@@ -124,7 +147,7 @@ int RunTable(const std::shared_ptr<iceberg::Catalog>& catalog,
   return r.ok() ? 0 : 1;
 }
 
-}
+}  // namespace
 
 int main(int argc, char** argv) {
   Options opts;
@@ -159,10 +182,21 @@ int main(int argc, char** argv) {
       default: Usage(argv[0]); return 2;
     }
   }
-  if (opts.table != "primes" && opts.table != "partitions" &&
-      opts.table != "both") {
-    std::fprintf(stderr, "error: --table must be primes|partitions|both\n");
-    return 2;
+
+  auto checks = ppv::AllChecks();
+  if (opts.table != "both") {
+    bool known = false;
+    for (const auto& c : checks)
+      if (c->spec().table == opts.table) known = true;
+    if (!known) {
+      std::string tables;
+      for (const auto& c : checks) {
+        if (!tables.empty()) tables += "|";
+        tables += c->spec().table;
+      }
+      std::fprintf(stderr, "error: --table must be %s|both\n", tables.c_str());
+      return 2;
+    }
   }
 
   if (opts.log_path.empty())
@@ -185,11 +219,9 @@ int main(int argc, char** argv) {
              " limit=" + std::to_string(opts.window.limit));
 
   int rc = 0;
-  if (opts.table == "both") {
-    rc |= RunTable(catalog, "primes", opts, log);
-    rc |= RunTable(catalog, "partitions", opts, log);
-  } else {
-    rc = RunTable(catalog, opts.table, opts, log);
+  for (const auto& check : checks) {
+    if (opts.table != "both" && check->spec().table != opts.table) continue;
+    rc |= RunTable(catalog, *check, opts, log);
   }
   log.Line(rc == 0 ? "OVERALL: PASS" : "OVERALL: FAIL");
   std::fprintf(stderr, "log written to %s\n", opts.log_path.c_str());

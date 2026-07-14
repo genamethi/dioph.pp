@@ -369,6 +369,10 @@ const std::shared_ptr<iceberg::Expression>& SourceTableReader::residual() const 
   return impl_->plan.residual;
 }
 
+const scan::TableReadTraits& SourceTableReader::traits() const {
+  return impl_->plan.traits;
+}
+
 void SourceTableReader::set_total_records(int64_t total) {
   impl_->total_records = total;
 }

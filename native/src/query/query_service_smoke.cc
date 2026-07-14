@@ -109,8 +109,6 @@ int main(int argc, char** argv) {
     if (dt > 5.0) { std::printf("    [!] cancel too slow (>5s)\n"); ++failures; }
   }
 
-  // 5) warehouse status (the Status-tab seam): ListTables + Extent. Summary
-  // facts are zero-scan; max_p on `primes` is a manifest aggregate.
   {
     auto tables = qs->ListTables(&err);
     std::printf("\n[status] %zu tables: ", tables.size());
@@ -128,13 +126,13 @@ int main(int argc, char** argv) {
       std::printf("    %-18s rows=%-13lld files=%-6lld bytes=%-13lld snaps=%lld snap_id=%lld",
                   e.table.c_str(), (long long)e.row_count, (long long)e.data_files,
                   (long long)e.file_bytes, (long long)e.snapshots, (long long)e.snapshot_id);
-      if (e.max_p >= 0) std::printf(" max_p=%lld", (long long)e.max_p);
+      if (e.key_max >= 0)
+        std::printf(" %s_max=%lld", e.key_name.c_str(), (long long)e.key_max);
       std::printf("  (%.2fs)\n", dt);
       if (want_p) {
         saw_primes = true;
-        // Known dataset basics: ~21.7B rows, max_p ~5.6e11 (project memory).
         if (e.row_count < 1'000'000'000LL) { std::printf("    [!] primes row_count implausibly small\n"); ++failures; }
-        if (e.max_p < 1'000'000'000LL) { std::printf("    [!] primes max_p missing/implausible\n"); ++failures; }
+        if (e.key_max < 1'000'000'000LL) { std::printf("    [!] primes key_max missing/implausible\n"); ++failures; }
       }
     }
     if (!saw_primes) { std::printf("    [!] primes table not listed\n"); ++failures; }

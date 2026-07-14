@@ -60,6 +60,8 @@ class SourceTableReader {
 
   const std::shared_ptr<iceberg::Expression>& residual() const;
 
+  const scan::TableReadTraits& traits() const;
+
  private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
