@@ -15,7 +15,7 @@ Branch `planner-prep` (off `tui-query`). One commit per phase, message = phase f
 | 05_resume | LoadAlignedResume via snapshot manifests | 01 | done |
 | 06_declare | sort_order/properties in commit path, pp-declare-sort tool | — | done |
 | 07_namespace | namespace-as-argument threading | — | todo |
-| 08_catalogd | 406 stubs for plan routes | — | todo |
+| 08_catalogd | 406 stubs for plan routes | — | done |
 | 09_merge | grep gates, tests, smokes, hole audit, merge to tui-query | all | todo |
 
 ## invariants
@@ -28,6 +28,7 @@ Branch `planner-prep` (off `tui-query`). One commit per phase, message = phase f
 ## holes registry
 
 - `SourceTableReader::Impl::OpenRowGroupTask` — selected field not physical in file (identity-partition column) → NotImplemented error — filed-by 03 — by design (MOR path serves those selects); revisit if a consumer ever selects bucket columns with a residual
+- `pp_catalogd.cc` plan routes (planTableScan / fetchPlanningResult / cancelPlanning / fetchScanTasks) — 406 UnsupportedOperationException — filed-by 08 — owner: future server-side lift invoking the 02 planner module
 
 ## session protocol
 

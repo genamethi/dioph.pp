@@ -1,12 +1,12 @@
 # 08_catalogd
 
-deps: none | status: todo
+deps: none | status: done
 
-- [ ] `pp_catalogd.cc` — 406 `UnsupportedOperationException` handlers: `POST .../tables/{t}/plan`, `GET/DELETE .../tables/{t}/plan/{plan-id}`, `POST .../tables/{t}/tasks`; keep `scan-planning-mode: client`
-- [ ] register routes in 00 holes registry (future impl invokes 02 planner server-side)
-- [ ] `markdown/data_eng/catalogd_rest_gap.md` route table — update statuses (allowed: plan tracker owns markdown/plans; gap docs record route reality)
-- [ ] build green
+done: pp_catalogd.cc serves 406 `UnsupportedOperationException` on `POST .../tables/{t}/plan`, `GET/DELETE .../tables/{t}/plan/{plan-id}`, `POST .../tables/{t}/tasks`; `scan-planning-mode: client` still advertised. Verified live against a scratch catalogd: all four routes → 406 with IcebergErrorResponse body.
 
-grep gate: `curl -s -o /dev/null -w '%{http_code}' -X POST localhost:8181/v1/namespaces/primeparts/tables/primes/plan` → 406
+grep gate: `curl -s -o /dev/null -w '%{http_code}' -X POST <catalogd>/v1/namespaces/primeparts/tables/primes/plan` → 406
 
 ## notes
+
+- Registered in 00 holes: the future implementation invokes the 02 planner module server-side.
+- `markdown/data_eng/catalogd_rest_gap.md` route table NOT updated (markdown/ untouchable per brief; the four rows should read "406 stub" — user's call).

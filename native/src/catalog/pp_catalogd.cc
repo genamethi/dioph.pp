@@ -470,6 +470,19 @@ int RunCatalogd(const CatalogdOptions& opts) {
             SendJson(res, 200, body);
           });
 
+  auto planning_unsupported = [](const httplib::Request&,
+                                 httplib::Response& res) {
+    SendError(res, 406, "UnsupportedOperationException",
+              "server-side scan planning is not implemented; "
+              "scan-planning-mode is 'client'");
+  };
+  svr.Post(R"(/v1/namespaces/([^/]+)/tables/([^/]+)/plan)", planning_unsupported);
+  svr.Get(R"(/v1/namespaces/([^/]+)/tables/([^/]+)/plan/([^/]+))",
+          planning_unsupported);
+  svr.Delete(R"(/v1/namespaces/([^/]+)/tables/([^/]+)/plan/([^/]+))",
+             planning_unsupported);
+  svr.Post(R"(/v1/namespaces/([^/]+)/tables/([^/]+)/tasks)", planning_unsupported);
+
   // POST /v1/namespaces/{ns}/tables/{table} — COMMIT (updateTable). The
   // load-bearing route: native FastAppend / RowDelta commits arrive here as
   // {requirements, updates}. Deletion vectors are forward-compatible — the
