@@ -68,8 +68,6 @@ std::shared_ptr<arrow::Schema> IcebergToArrowSchemaWithFieldIds(
     const iceberg::Schema& schema, std::string* error,
     const iceberg::PartitionSpec* partition_spec = nullptr);
 
-int32_t NextFileSeq(const fs::path& output_dir, std::string_view prefix);
-
 class BucketParquetWriter {
  public:
   static std::unique_ptr<BucketParquetWriter> Make(WriterConfig config,

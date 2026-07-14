@@ -198,29 +198,6 @@ std::shared_ptr<arrow::Schema> IcebergToArrowSchemaWithFieldIds(
   return arrow::schema(fields);
 }
 
-int32_t NextFileSeq(const fs::path& output_dir, std::string_view prefix) {
-  std::error_code ec;
-  if (!fs::exists(output_dir, ec)) return 0;
-  int32_t max_seq = -1;
-  for (auto& entry : fs::directory_iterator(output_dir, ec)) {
-    if (ec || !entry.is_regular_file()) continue;
-    auto name = entry.path().filename().string();
-    if (name.size() <= prefix.size() ||
-        name.compare(0, prefix.size(), prefix) != 0) {
-      continue;
-    }
-    auto pos = name.rfind('_');
-    auto dot = name.find('.', pos == std::string::npos ? 0 : pos);
-    if (pos == std::string::npos || dot == std::string::npos) continue;
-    try {
-      int32_t seq = static_cast<int32_t>(
-          std::stoi(name.substr(pos + 1, dot - pos - 1)));
-      if (seq > max_seq) max_seq = seq;
-    } catch (...) {}
-  }
-  return max_seq + 1;
-}
-
 struct BucketParquetWriter::Impl {
   WriterConfig config;
   std::shared_ptr<arrow::Schema> arrow_schema;

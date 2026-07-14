@@ -560,9 +560,9 @@ bool parse_args(int argc, char** argv, Options* options) {
   return resolve_rank_start(options);
 }
 
-// Turn a finished CommitPlan into the atomic commit's per-table specs and hand
-// them to the daemon over rest_uri.
-bool commit_plan(const Options& options, const CommitPlan& plan,
+bool commit_plan(const Options& options,
+                 const std::shared_ptr<iceberg::Catalog>& catalog,
+                 const CommitPlan& plan,
                  const std::shared_ptr<iceberg::Schema>& p_schema,
                  const std::shared_ptr<iceberg::Schema>& d_schema,
                  const std::shared_ptr<iceberg::PartitionSpec>& p_spec,
@@ -579,11 +579,6 @@ bool commit_plan(const Options& options, const CommitPlan& plan,
     }
     specs.push_back(std::move(spec));
   }
-
-  std::string mode;
-  auto catalog = primeparts::catalog::OpenCatalog(options.warehouse,
-                                                  options.rest_uri, &mode, error);
-  if (!catalog) return false;
   return primeparts::catalog::CommitFilesAtomic(catalog, nullptr, options.rest_uri,
                                                 options.warehouse, specs, error);
 }
@@ -672,9 +667,26 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
       return 1;
     }
 
+    std::shared_ptr<iceberg::Catalog> catalog;
+    if (!options.temp) {
+      std::string mode;
+      catalog = primeparts::catalog::OpenCatalog(options.warehouse,
+                                                 options.rest_uri, &mode, &error);
+      if (!catalog) {
+        set_last_error("open catalog: " + error);
+        log_line(callbacks, "%s", g_last_error.c_str());
+        pp_shutdown();
+        return 1;
+      }
+    }
+
     ShapePolicy policy;
     ResumeState resume;
-    if (!LoadAlignedResume(options.warehouse, {"primes", "partitions"}, "primes",
+    if (catalog &&
+        !LoadAlignedResume(catalog, iceberg::Namespace{{"primeparts"}},
+                           {"primes", "partitions"}, "primes",
+                           primeparts::BucketFields{"p_bucket_version",
+                                                    "p_bucket"},
                            policy.bucket_version, &resume, &error)) {
       set_last_error("resume: " + error);
       log_line(callbacks, "%s", g_last_error.c_str());
@@ -862,7 +874,8 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
     }
 
     if (!options.temp) {
-      if (!commit_plan(options, plan, p_schema, d_schema, p_spec, d_spec, &error)) {
+      if (!commit_plan(options, catalog, plan, p_schema, d_schema, p_spec, d_spec,
+                       &error)) {
         set_last_error("commit: " + error);
         log_line(callbacks, "%s", g_last_error.c_str());
         pp_shutdown();

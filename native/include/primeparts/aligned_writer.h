@@ -14,8 +14,10 @@ namespace arrow {
 class RecordBatch;
 }
 namespace iceberg {
+class Catalog;
 class Schema;
 class PartitionSpec;
+struct Namespace;
 }
 
 namespace primeparts {
@@ -87,9 +89,17 @@ class AlignedBucketWriter {
   explicit AlignedBucketWriter(std::unique_ptr<Impl> impl);
 };
 
-bool LoadAlignedResume(const fs::path& warehouse,
+struct BucketFields {
+  std::string version_field;
+  std::string bucket_field;
+};
+
+bool LoadAlignedResume(const std::shared_ptr<iceberg::Catalog>& catalog,
+                       const iceberg::Namespace& ns,
                        const std::vector<std::string>& table_names,
-                       const std::string& reference_table, int32_t bucket_version,
-                       ResumeState* out, std::string* error);
+                       const std::string& reference_table,
+                       const BucketFields& bucket_fields,
+                       int32_t bucket_version, ResumeState* out,
+                       std::string* error);
 
 }  // namespace primeparts
