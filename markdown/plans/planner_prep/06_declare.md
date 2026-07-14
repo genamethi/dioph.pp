@@ -1,16 +1,15 @@
 # 06_declare
 
-deps: none | status: done
+deps: none | status: done (create path); existing-table surface = open hole in 00
 
-correction applied (user, 2026-07-13): partitions is physically sorted on (p, m_k), not just p. `schemas.cc:AscendingSortOrder(schema, fields, error)` replaces PAscendingSortOrder; generate declares primes `(p)`, partitions `(p, m_k)`; `pp-declare-sort` takes repeated `--field` in order (bounds guard on first field only); unit-covered in test_iceberg_writer. Machinery unaffected — consumers use `sort_keys.front()`; TableReadTraits already parses multi-field orders.
+done: `TableDeclaration{sort_order, properties}` descriptor in pp_iceberg_rest.h; `TableCommitSpec.declare` threads through AssembleChange/EnsureTable/CommitFiles into CreateTable (hard-coded `SortOrder::Unsorted()` gone; properties merge over zstd write defaults). `schemas.cc:AscendingSortOrder(schema, fields, error)`; generate declares primes `(p)`, partitions `(p, m_k)` + `pp.buckets.self-contained=true` at CREATE. Unit-covered (test_iceberg_writer). Retired: PublishTable + LatestMetadataJson (dead since pp-catalog gut).
 
-done: `TableDeclaration{sort_order, properties}` descriptor in pp_iceberg_rest.h; `TableCommitSpec.declare` threads it through AssembleChange/EnsureTable/CommitFiles into CreateTable (hard-coded `SortOrder::Unsorted()` gone — null declaration defaults to unsorted, properties merge over zstd write defaults). `schemas.cc:PAscendingSortOrder`. generate declares p-asc + `pp.buckets.self-contained=true` for both tables. New `build/pp-declare-sort --table T --field F [--ns/--rest-uri/--warehouse]`: assert-table-uuid-guarded updateTable POST of add-sort-order + set-default-sort-order via internal serde; idempotent no-op when already declared; REFUSES if any committed file lacks manifest bounds for the field, or if a different default order exists. E2E-proven against a scratch catalogd: declare → metadata carries default-sort-order-id=1 identity-asc; re-run no-ops; bounds guard refuses an MV without key bounds. Retired: PublishTable + LatestMetadataJson (dead since pp-catalog gut).
+NOT done (deliberate): any surface for declaring on EXISTING tables — see 00 holes registry. A pp-declare-sort binary was built, e2e-proven against scratch catalogd (updateTable add-sort-order/set-default works end-to-end, AddSortOrder::ApplyTo confirmed live), then DELETED: single-purpose binary was an unauthorized packaging guess; user direction leans a config.lua `tables` section + Lua interface, undecided. Recover the deleted implementation from git history (`git show 8dd8cf0` / `f08b729^..HEAD~1`) when the surface is designed.
 
-grep gate: `grep -n 'SortOrder::Unsorted()' native/src/catalog/pp_iceberg_rest.cc` → 1 hit, the declared-nothing default only (not a per-call hard-code)
-
-Declaration run is USER-ONLY (live warehouse, one-time metadata update, no data touched): `pp-declare-sort --table primes --field p` then `--table partitions --field p --field m_k`.
+grep gate: `grep -n 'SortOrder::Unsorted()' native/src/catalog/pp_iceberg_rest.cc` → 1 hit (declared-nothing default only)
 
 ## notes
 
-- Found via e2e: a table with a declared sort order whose files lack key bounds is unplannable (SortTasksByLowerBound loud error on every scan). The declaration seam now checks the physical precondition instead — the tool refuses. Live primes/partitions files all carry p bounds, so the live migration is unaffected.
+- E2E finding preserved: a declared-sorted table whose files lack primary-key bounds is unplannable (loud SortTasksByLowerBound error on every scan) — the future declaration surface must check bounds before declaring (the deleted tool did).
+- Live primes/partitions files all carry p bounds; whenever the surface lands, declaring is safe there.
 - pp_commit.h now includes pp_iceberg_rest.h (TableDeclaration).
