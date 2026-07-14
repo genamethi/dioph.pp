@@ -13,6 +13,8 @@
 #include "iceberg/manifest/manifest_entry.h"
 #include "iceberg/partition_spec.h"
 #include "iceberg/row/partition_values.h"
+#include "iceberg/sort_field.h"
+#include "iceberg/sort_order.h"
 #include "iceberg/type.h"
 
 namespace {
@@ -249,6 +251,26 @@ int main() {
   if (!Check(file.data_file->lower_bounds.at(2).size() == 4,
              "expected int32 bound serialized as 4 bytes")) {
     return 1;
+  }
+
+  {
+    auto parts = primeparts::PartitionsSchema();
+    auto order = primeparts::AscendingSortOrder(*parts, {"p", "m_k"}, &error);
+    if (!Check(order != nullptr, "AscendingSortOrder(p, m_k): " + error)) {
+      return 1;
+    }
+    auto fields = order->fields();
+    if (!Check(order->order_id() == 1 && fields.size() == 2 &&
+                   fields[0].source_id() == 1 && fields[1].source_id() == 2 &&
+                   fields[0].direction() == iceberg::SortDirection::kAscending &&
+                   fields[1].direction() == iceberg::SortDirection::kAscending,
+               "expected two-field ascending order (p=1, m_k=2)")) {
+      return 1;
+    }
+    auto bad = primeparts::AscendingSortOrder(*parts, {"p", "nope"}, &error);
+    if (!Check(bad == nullptr, "expected unknown sort field to error")) {
+      return 1;
+    }
   }
 
   std::filesystem::remove_all(out, ec);

@@ -35,19 +35,29 @@ using json = nlohmann::json;
 
 struct Options {
   std::string table;
-  std::string field;
+  std::vector<std::string> fields;
   std::string ns = "primeparts";
   std::string rest_uri;
   std::string warehouse;
 };
 
+std::string JoinFields(const std::vector<std::string>& fields) {
+  std::string out;
+  for (const auto& f : fields) {
+    if (!out.empty()) out += ", ";
+    out += f;
+  }
+  return out;
+}
+
 void Usage(const char* argv0) {
   std::fprintf(stderr,
-    "usage: %s --table T --field F [options]\n"
-    "  Declare an ascending identity sort order on F as table T's default,\n"
-    "  via catalogd's updateTable route (assert-table-uuid guarded).\n"
+    "usage: %s --table T --field F [--field F2 ...] [options]\n"
+    "  Declare an ascending identity sort order on the given fields (in the\n"
+    "  order passed) as table T's default, via catalogd's updateTable route\n"
+    "  (assert-table-uuid guarded).\n"
     "  --table T          table name (required)\n"
-    "  --field F          sort column (required)\n"
+    "  --field F          sort column; repeat for a multi-field order\n"
     "  --ns NS            namespace (default primeparts)\n"
     "  --rest-uri URI     catalogd base (default config.lua / %s)\n"
     "  --warehouse DIR    warehouse root (default config.lua)\n",
@@ -70,7 +80,7 @@ int main(int argc, char** argv) {
   while ((o = getopt_long(argc, argv, "t:f:N:r:w:h", long_opts, nullptr)) != -1) {
     switch (o) {
       case 't': opts.table = optarg; break;
-      case 'f': opts.field = optarg; break;
+      case 'f': opts.fields.emplace_back(optarg); break;
       case 'N': opts.ns = optarg; break;
       case 'r': opts.rest_uri = optarg; break;
       case 'w': opts.warehouse = optarg; break;
@@ -78,7 +88,7 @@ int main(int argc, char** argv) {
       default: Usage(argv[0]); return 2;
     }
   }
-  if (opts.table.empty() || opts.field.empty()) {
+  if (opts.table.empty() || opts.fields.empty()) {
     Usage(argv[0]);
     return 2;
   }
@@ -127,27 +137,37 @@ int main(int argc, char** argv) {
     return 1;
   }
   const auto& schema = schema_r.value();
-  int32_t field_id = -1;
-  for (const auto& f : schema->fields()) {
-    if (f.name() == opts.field) {
-      field_id = f.field_id();
-      break;
+  std::vector<int32_t> field_ids;
+  field_ids.reserve(opts.fields.size());
+  for (const auto& name : opts.fields) {
+    int32_t field_id = -1;
+    for (const auto& f : schema->fields()) {
+      if (f.name() == name) {
+        field_id = f.field_id();
+        break;
+      }
     }
-  }
-  if (field_id < 0) {
-    std::fprintf(stderr, "error: field '%s' not in %s schema\n",
-                 opts.field.c_str(), opts.table.c_str());
-    return 1;
+    if (field_id < 0) {
+      std::fprintf(stderr, "error: field '%s' not in %s schema\n",
+                   name.c_str(), opts.table.c_str());
+      return 1;
+    }
+    field_ids.push_back(field_id);
   }
 
   auto current = metadata->SortOrder();
   if (current.has_value() && current.value() && current.value()->is_sorted()) {
     const auto fields = current.value()->fields();
-    if (fields.size() == 1 && fields[0].source_id() == field_id &&
-        fields[0].direction() == iceberg::SortDirection::kAscending) {
-      std::printf("%s.%s: ascending sort on '%s' already declared (order %d)\n",
-                  opts.ns.c_str(), opts.table.c_str(), opts.field.c_str(),
-                  current.value()->order_id());
+    bool same = fields.size() == field_ids.size();
+    for (size_t i = 0; same && i < field_ids.size(); ++i) {
+      same = fields[i].source_id() == field_ids[i] &&
+             fields[i].direction() == iceberg::SortDirection::kAscending;
+    }
+    if (same) {
+      std::printf(
+          "%s.%s: ascending sort on (%s) already declared (order %d)\n",
+          opts.ns.c_str(), opts.table.c_str(), JoinFields(opts.fields).c_str(),
+          current.value()->order_id());
       return 0;
     }
     std::fprintf(stderr,
@@ -188,23 +208,28 @@ int main(int argc, char** argv) {
       }
       for (const auto& entry : entries.value()) {
         if (!entry.data_file) continue;
-        if (!entry.data_file->lower_bounds.contains(field_id)) {
+        if (!entry.data_file->lower_bounds.contains(field_ids.front())) {
           std::fprintf(stderr,
                        "error: refusing to declare: committed file %s carries "
                        "no manifest bounds for '%s'; a declared sort order "
-                       "requires key bounds on every data file\n",
-                       entry.data_file->file_path.c_str(), opts.field.c_str());
+                       "requires primary-key bounds on every data file\n",
+                       entry.data_file->file_path.c_str(),
+                       opts.fields.front().c_str());
           return 1;
         }
       }
     }
   }
 
+  std::vector<iceberg::SortField> sort_fields;
+  sort_fields.reserve(field_ids.size());
+  for (const int32_t field_id : field_ids) {
+    sort_fields.emplace_back(field_id, iceberg::Transform::Identity(),
+                             iceberg::SortDirection::kAscending,
+                             iceberg::NullOrder::kFirst);
+  }
   auto order_r = iceberg::SortOrder::Make(
-      *schema, iceberg::SortOrder::kInitialSortOrderId,
-      {iceberg::SortField(field_id, iceberg::Transform::Identity(),
-                          iceberg::SortDirection::kAscending,
-                          iceberg::NullOrder::kFirst)});
+      *schema, iceberg::SortOrder::kInitialSortOrderId, std::move(sort_fields));
   if (!order_r.has_value()) {
     std::fprintf(stderr, "error: SortOrder::Make: %s\n",
                  order_r.error().message.c_str());
@@ -245,8 +270,8 @@ int main(int argc, char** argv) {
                  res->status, res->body.c_str());
     return 1;
   }
-  std::printf("%s.%s: declared ascending sort on '%s' (order %d)\n",
-              opts.ns.c_str(), opts.table.c_str(), opts.field.c_str(),
-              order->order_id());
+  std::printf("%s.%s: declared ascending sort on (%s) (order %d)\n",
+              opts.ns.c_str(), opts.table.c_str(),
+              JoinFields(opts.fields).c_str(), order->order_id());
   return 0;
 }
