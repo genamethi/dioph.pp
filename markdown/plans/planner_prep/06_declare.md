@@ -1,6 +1,8 @@
 # 06_declare
 
-deps: none | status: done
+deps: none | status: done, one correction pending
+
+- [ ] CORRECTION (user, 2026-07-13): partitions is physically sorted on (p, m_k), not just p — declare the full truth. Generalize `schemas.cc:PAscendingSortOrder` → `AscendingSortOrder(schema, fields, error)`; generate declares primes `(p)`, partitions `(p, m_k)`; `pp-declare-sort` takes repeated `--field` in order, bounds guard on FIRST field only. Do this BEFORE anyone runs pp-declare-sort on the live tables (the tool refuses to replace an existing default order). No machinery change needed — everything consumes `sort_keys.front()` and TableReadTraits already parses multi-field orders.
 
 done: `TableDeclaration{sort_order, properties}` descriptor in pp_iceberg_rest.h; `TableCommitSpec.declare` threads it through AssembleChange/EnsureTable/CommitFiles into CreateTable (hard-coded `SortOrder::Unsorted()` gone — null declaration defaults to unsorted, properties merge over zstd write defaults). `schemas.cc:PAscendingSortOrder`. generate declares p-asc + `pp.buckets.self-contained=true` for both tables. New `build/pp-declare-sort --table T --field F [--ns/--rest-uri/--warehouse]`: assert-table-uuid-guarded updateTable POST of add-sort-order + set-default-sort-order via internal serde; idempotent no-op when already declared; REFUSES if any committed file lacks manifest bounds for the field, or if a different default order exists. E2E-proven against a scratch catalogd: declare → metadata carries default-sort-order-id=1 identity-asc; re-run no-ops; bounds guard refuses an MV without key bounds. Retired: PublishTable + LatestMetadataJson (dead since pp-catalog gut).
 
