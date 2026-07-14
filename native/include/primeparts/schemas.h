@@ -13,6 +13,7 @@
 namespace iceberg {
 class Schema;
 class PartitionSpec;
+class SortOrder;
 }
 
 namespace primeparts {
@@ -31,6 +32,9 @@ std::shared_ptr<iceberg::Schema> PartitionsSchema();
 // Identity partition spec over (p_bucket_version, p_bucket) for a schema that
 // carries those columns. Returns nullptr + *error if either field is missing.
 std::shared_ptr<iceberg::PartitionSpec> BucketPartitionSpec(
+    const iceberg::Schema& schema, std::string* error);
+
+std::shared_ptr<iceberg::SortOrder> PAscendingSortOrder(
     const iceberg::Schema& schema, std::string* error);
 
 }  // namespace primeparts

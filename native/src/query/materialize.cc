@@ -86,6 +86,7 @@ bool MaterializeIntColumns(
     if (wf.data_file) files.push_back(wf.data_file);
 
   return primeparts::catalog::CommitFiles(catalog, warehouse, name, schema, spec,
+                                          primeparts::catalog::TableDeclaration{},
                                           files, metadata_location, error);
 }
 

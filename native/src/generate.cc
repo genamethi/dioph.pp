@@ -45,6 +45,7 @@ using primeparts::BucketPartitionSpec;
 using primeparts::CommitPlan;
 using primeparts::LoadAlignedResume;
 using primeparts::PartitionsSchema;
+using primeparts::PAscendingSortOrder;
 using primeparts::PrimesSchema;
 using primeparts::ResumeState;
 using primeparts::ShapePolicy;
@@ -574,6 +575,9 @@ bool commit_plan(const Options& options,
     spec.table_name = tf.name;
     spec.schema = tf.name == "primes" ? p_schema : d_schema;
     spec.spec = tf.name == "primes" ? p_spec : d_spec;
+    spec.declare.sort_order = PAscendingSortOrder(*spec.schema, error);
+    if (!spec.declare.sort_order) return false;
+    spec.declare.properties = {{"pp.buckets.self-contained", "true"}};
     for (const auto& wf : tf.files) {
       if (wf.data_file) spec.files.push_back(wf.data_file);
     }

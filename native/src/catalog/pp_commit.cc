@@ -45,8 +45,8 @@ struct TableChange {
 bool AssembleChange(const std::shared_ptr<iceberg::Catalog>& catalog,
                     const fs::path& warehouse, TableCommitSpec& spec,
                     TableChange* out, std::string* error) {
-  auto table =
-      EnsureTable(catalog, warehouse, spec.table_name, spec.schema, spec.spec, error);
+  auto table = EnsureTable(catalog, warehouse, spec.table_name, spec.schema,
+                           spec.spec, spec.declare, error);
   if (!table) return false;
   out->id = table->name();
   if (spec.files.empty()) return true;

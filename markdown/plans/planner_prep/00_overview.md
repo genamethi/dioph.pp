@@ -13,7 +13,7 @@ Branch `planner-prep` (off `tui-query`). One commit per phase, message = phase f
 | 03_scan_exec | SourceTableReader over ScanPlan, row-group read path, key slicing | 02 | done |
 | 04_query_verify | QueryService + verify on new seams, GroupKey, check registry | 03 | done |
 | 05_resume | LoadAlignedResume via snapshot manifests | 01 | done |
-| 06_declare | sort_order/properties in commit path, pp-declare-sort tool | — | todo |
+| 06_declare | sort_order/properties in commit path, pp-declare-sort tool | — | done |
 | 07_namespace | namespace-as-argument threading | — | todo |
 | 08_catalogd | 406 stubs for plan routes | — | todo |
 | 09_merge | grep gates, tests, smokes, hole audit, merge to tui-query | all | todo |

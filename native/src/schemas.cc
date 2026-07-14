@@ -9,6 +9,8 @@
 #include "iceberg/partition_spec.h"
 #include "iceberg/schema.h"
 #include "iceberg/schema_field.h"
+#include "iceberg/sort_field.h"
+#include "iceberg/sort_order.h"
 #include "iceberg/transform.h"
 #include "iceberg/type.h"
 
@@ -71,6 +73,25 @@ std::shared_ptr<iceberg::PartitionSpec> BucketPartitionSpec(
     return nullptr;
   }
   return std::shared_ptr<iceberg::PartitionSpec>(std::move(spec_result.value()));
+}
+
+std::shared_ptr<iceberg::SortOrder> PAscendingSortOrder(
+    const iceberg::Schema& schema, std::string* error) {
+  const int32_t p_id = FieldIdByName(schema, "p");
+  if (p_id < 0) {
+    if (error) *error = "schema is missing p";
+    return nullptr;
+  }
+  auto order_result = iceberg::SortOrder::Make(
+      schema, iceberg::SortOrder::kInitialSortOrderId,
+      {iceberg::SortField(p_id, iceberg::Transform::Identity(),
+                          iceberg::SortDirection::kAscending,
+                          iceberg::NullOrder::kFirst)});
+  if (!order_result.has_value()) {
+    if (error) *error = order_result.error().message;
+    return nullptr;
+  }
+  return std::shared_ptr<iceberg::SortOrder>(std::move(order_result.value()));
 }
 
 }  // namespace primeparts

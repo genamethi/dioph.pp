@@ -19,6 +19,8 @@
 #include <string>
 #include <vector>
 
+#include "primeparts/catalog/pp_iceberg_rest.h"
+
 namespace iceberg {
 class Catalog;
 class Schema;
@@ -41,6 +43,7 @@ struct TableCommitSpec {
   std::string table_name;
   std::shared_ptr<iceberg::Schema> schema;
   std::shared_ptr<iceberg::PartitionSpec> spec;
+  TableDeclaration declare;
   std::vector<std::shared_ptr<iceberg::DataFile>> files;
 };
 

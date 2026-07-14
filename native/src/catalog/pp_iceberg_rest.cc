@@ -60,29 +60,6 @@ fs::path StagingDataDir(const fs::path& warehouse, const std::string& table_name
   return parent / ".pp-staging" / tag / table_name;
 }
 
-fs::path LatestMetadataJson(const fs::path& metadata_dir, std::string* error) {
-  if (!fs::exists(metadata_dir)) {
-    if (error) *error = "metadata dir not found: " + metadata_dir.string();
-    return {};
-  }
-  fs::path best;
-  std::string best_name;
-  for (auto& entry : fs::directory_iterator(metadata_dir)) {
-    auto name = entry.path().filename().string();
-    if (name.size() < 6 || name.find(".metadata.json") == std::string::npos) {
-      continue;
-    }
-    if (name > best_name) {
-      best_name = name;
-      best = entry.path();
-    }
-  }
-  if (best.empty()) {
-    if (error) *error = "no *.metadata.json under " + metadata_dir.string();
-  }
-  return best;
-}
-
 std::shared_ptr<iceberg::Catalog> MakeCatalog(const RestOptions& opts,
                                               const fs::path& warehouse,
                                               std::string* mode,
@@ -271,65 +248,29 @@ bool DropTable(const std::shared_ptr<iceberg::Catalog>& catalog,
   return true;
 }
 
-bool PublishTable(const std::shared_ptr<iceberg::Catalog>& catalog,
-                  const fs::path& warehouse, const std::string& table_name,
-                  const std::shared_ptr<iceberg::Schema>& schema,
-                  const std::shared_ptr<iceberg::PartitionSpec>& spec,
-                  const std::vector<std::shared_ptr<iceberg::DataFile>>& files,
-                  std::string* metadata_location, std::string* error) {
-  fs::path md_dir = warehouse / "primeparts" / table_name / "metadata";
-  iceberg::TableIdentifier ident{
-      .ns = iceberg::Namespace{{"primeparts"}}, .name = table_name};
-
-  std::string find_err;
-  fs::path existing = LatestMetadataJson(md_dir, &find_err);
-  if (!existing.empty()) {
-    auto loaded = catalog->LoadTable(ident);
-    if (loaded.has_value() &&
-        std::string(loaded.value()->metadata_file_location()) ==
-            existing.string()) {
-      *metadata_location = std::string(loaded.value()->metadata_file_location());
-      return true;
-    }
-    auto del = catalog->DropTable(ident, false);
-    (void)del;  // NotFound is fine — fresh table path.
-    auto reg = catalog->RegisterTable(ident, existing.string());
-    if (!reg.has_value()) {
-      *error = "RegisterTable " + table_name + ": " + reg.error().message;
-      return false;
-    }
-    *metadata_location = std::string(reg.value()->metadata_file_location());
-    return true;
-  }
-
-  // No on-disk metadata.json: fresh create + append. Shared with CommitFiles.
-  return CommitFiles(catalog, warehouse, table_name, schema, spec, files,
-                     metadata_location, error);
-}
-
 std::shared_ptr<iceberg::Table> EnsureTable(
     const std::shared_ptr<iceberg::Catalog>& catalog, const fs::path& warehouse,
     const std::string& table_name,
     const std::shared_ptr<iceberg::Schema>& schema,
-    const std::shared_ptr<iceberg::PartitionSpec>& spec, std::string* error) {
+    const std::shared_ptr<iceberg::PartitionSpec>& spec,
+    const TableDeclaration& declare, std::string* error) {
   iceberg::TableIdentifier ident{
       .ns = iceberg::Namespace{{"primeparts"}}, .name = table_name};
   if (!EnsureNamespace(catalog, ident.ns, error)) return nullptr;
 
-  // Load if the catalog knows it (append onto snapshot history); else create
-  // fresh. Probe with LoadTable, not disk state, so this works identically over
-  // a RestCatalog client.
   auto loaded = catalog->LoadTable(ident);
   if (loaded.has_value()) return std::move(loaded.value());
 
-  // FileIO does not mkdir parents — pre-create the metadata dir.
   std::error_code ec;
   fs::create_directories(warehouse / "primeparts" / table_name / "metadata", ec);
+  std::unordered_map<std::string, std::string> properties{
+      {"write.parquet.compression-codec", "zstd"},
+      {"write.parquet.compression-level", "3"}};
+  for (const auto& [k, v] : declare.properties) properties[k] = v;
   auto created = catalog->CreateTable(
-      ident, schema, spec, iceberg::SortOrder::Unsorted(),
-      (warehouse / "primeparts" / table_name).string(),
-      {{"write.parquet.compression-codec", "zstd"},
-       {"write.parquet.compression-level", "3"}});
+      ident, schema, spec,
+      declare.sort_order ? declare.sort_order : iceberg::SortOrder::Unsorted(),
+      (warehouse / "primeparts" / table_name).string(), properties);
   if (!created.has_value()) {
     if (error)
       *error = "CreateTable " + table_name + ": " + created.error().message;
@@ -372,9 +313,11 @@ bool CommitFiles(const std::shared_ptr<iceberg::Catalog>& catalog,
                  const fs::path& warehouse, const std::string& table_name,
                  const std::shared_ptr<iceberg::Schema>& schema,
                  const std::shared_ptr<iceberg::PartitionSpec>& spec,
+                 const TableDeclaration& declare,
                  const std::vector<std::shared_ptr<iceberg::DataFile>>& files,
                  std::string* metadata_location, std::string* error) {
-  auto table = EnsureTable(catalog, warehouse, table_name, schema, spec, error);
+  auto table =
+      EnsureTable(catalog, warehouse, table_name, schema, spec, declare, error);
   if (!table) return false;
 
   if (!files.empty()) {
