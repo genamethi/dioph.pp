@@ -1,19 +1,15 @@
 # 03_scan_exec
 
-deps: 02 | status: todo
+deps: 02 | status: done
 
-Rework `source_scan.{h,cc}` over ScanPlan; SourceTableReader stays the reader every consumer uses.
-
-- [ ] `OpenMetadata`/`OpenIncremental` keep signatures → read TableMetadata, `TableReadTraits::FromMetadata`, `PlanTableScan`, open; add `Open(ScanPlan, io, ...)` for callers planning separately
-- [ ] sharding = modulo over plan's ordered tasks; delete hand-rolled sort + `decode_int64_le`
-- [ ] per-task open: deletes present or `row_groups` empty → vendored `FileScanTaskReader`; row-group selection + no deletes → `parquet::arrow::FileReader::GetRecordBatchReader(row_groups, column_indices)` projected by field id
-- [ ] arrow path: selected field absent from physical file (identity-partition col) → named NotImplemented (register in 00 holes)
-- [ ] residual: executor slices each batch to the sort-key range conjuncts via binary search (zero-copy Slice); remaining residual exposed as `reader->residual()`; unsorted → no slicing, full residual exposed
-- [ ] drop `SourceFileInfo`/`source_files()`; add `planned_records()`; keep `total_records()`, `_file`/`_pos` metadata columns, `current_data_file_path()`
-- [ ] `verify.cc:224` — switch source_files() sum to `planned_records()`
-- [ ] delete `kPColumnFieldId`, `IncludeColumnStats({"p"})`
-- [ ] build green + smokes that don't need warehouse
+done: source_scan.{h,cc} rebuilt over ScanPlan. OpenMetadata/OpenIncremental = read metadata → PlanTableScan → Open(plan, io); Open(ScanPlan,...) public for separate planners. Shard = modulo over plan-ordered tasks. Per-task open: deletes or no row-group selection → FileScanTaskReader (MOR), else parquet::arrow GetRecordBatchReader(row_groups, column_indices by PARQUET:field_id). Planner extracts sort-key window (ascending primary key only) from the filter's And-conjuncts into ScanPlan.key_lo/key_hi + non-key `residual`; executor slices each batch to the window by binary search (zero-copy Slice); `reader->residual()` exposes the remainder for consumers. SourceFileInfo/source_files() deleted → planned_records(); verify probe switched. kPColumnFieldId / decode_int64_le / IncludeColumnStats({"p"}) deleted. Verified: make all+test green, lmdb/lua-presets/lua-query smokes pass (generate-smoke fails on pre-existing kMinCount issue).
 
 grep gate: `grep -rn 'kPColumnFieldId\|SourceFileInfo\|decode_int64_le' native` → 0
 
 ## notes
+
+- `_pos`/`_file` metadata-column support deleted — no consumers existed.
+- HOLE (registered in 00): row-group read path errors NotImplemented when a selected field is not physical in the file (identity-partition columns); MOR path still serves those selects.
+- Transient until 04+06: base tables declare no sort order yet → traits unsorted → no task ordering, no window slicing, full filter exposed as residual; consumers' own row checks (removed in 04) still cover correctness, but ScanByK's early-stop rests on manifest order until 04 adds the loud traits check.
+- `set_total_records` accessor: factory paths report manifest totals, Open(plan) path reports planned rows.
+- Live-warehouse read validation deferred to 09 (catalogd inactive on this machine).

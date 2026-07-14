@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <parquet/file_reader.h>
@@ -14,8 +15,11 @@
 #include <parquet/types.h>
 
 #include "iceberg/expression/expression.h"
+#include "iceberg/expression/expressions.h"
 #include "iceberg/expression/inclusive_metrics_evaluator.h"
 #include "iceberg/expression/literal.h"
+#include "iceberg/expression/predicate.h"
+#include "iceberg/expression/term.h"
 #include "iceberg/manifest/manifest_entry.h"
 #include "iceberg/schema.h"
 #include "iceberg/schema_field.h"
@@ -73,6 +77,81 @@ bool StatsNames(const iceberg::TableMetadata& metadata,
     }
   }
   return !out->empty();
+}
+
+void TightenLo(std::optional<int64_t>* lo, int64_t v) {
+  *lo = lo->has_value() ? std::max(**lo, v) : v;
+}
+
+void TightenHi(std::optional<int64_t>* hi, int64_t v) {
+  *hi = hi->has_value() ? std::min(**hi, v) : v;
+}
+
+bool FoldKeyConjunct(const std::shared_ptr<iceberg::Expression>& expr,
+                     const std::string& key_name, std::optional<int64_t>* lo,
+                     std::optional<int64_t>* hi) {
+  auto pred = std::dynamic_pointer_cast<iceberg::UnboundPredicate>(expr);
+  if (!pred) return false;
+  auto ref = pred->reference();
+  if (!ref || ref->name() != key_name) return false;
+  auto lits = pred->literals();
+  if (lits.size() != 1) return false;
+  const auto& val = lits[0].value();
+  int64_t v = 0;
+  if (std::holds_alternative<int64_t>(val)) {
+    v = std::get<int64_t>(val);
+  } else if (std::holds_alternative<int32_t>(val)) {
+    v = std::get<int32_t>(val);
+  } else {
+    return false;
+  }
+  switch (pred->op()) {
+    case iceberg::Expression::Operation::kGtEq:
+      TightenLo(lo, v);
+      return true;
+    case iceberg::Expression::Operation::kGt:
+      TightenLo(lo, v + 1);
+      return true;
+    case iceberg::Expression::Operation::kLtEq:
+      TightenHi(hi, v);
+      return true;
+    case iceberg::Expression::Operation::kLt:
+      TightenHi(hi, v - 1);
+      return true;
+    case iceberg::Expression::Operation::kEq:
+      TightenLo(lo, v);
+      TightenHi(hi, v);
+      return true;
+    default:
+      return false;
+  }
+}
+
+void ExtractKeyWindow(const std::shared_ptr<iceberg::Expression>& filter,
+                      const std::string& key_name, std::optional<int64_t>* lo,
+                      std::optional<int64_t>* hi,
+                      std::shared_ptr<iceberg::Expression>* residual) {
+  *residual = nullptr;
+  if (!filter) return;
+  std::vector<std::shared_ptr<iceberg::Expression>> pending{filter};
+  std::vector<std::shared_ptr<iceberg::Expression>> leftover;
+  while (!pending.empty()) {
+    auto expr = std::move(pending.back());
+    pending.pop_back();
+    if (expr->op() == iceberg::Expression::Operation::kAnd) {
+      auto conj = std::static_pointer_cast<iceberg::And>(expr);
+      pending.push_back(conj->left());
+      pending.push_back(conj->right());
+      continue;
+    }
+    if (!FoldKeyConjunct(expr, key_name, lo, hi)) {
+      leftover.push_back(std::move(expr));
+    }
+  }
+  for (auto& expr : leftover) {
+    *residual = *residual ? iceberg::Expressions::And(*residual, expr)
+                          : std::move(expr);
+  }
 }
 
 template <typename ScanType>
@@ -276,6 +355,22 @@ bool PlanTableScan(const std::shared_ptr<iceberg::TableMetadata>& metadata,
     return false;
   }
 
+  {
+    auto schema_r = metadata->Schema();
+    if (!schema_r.has_value()) {
+      if (error) *error = "TableMetadata::Schema: " + schema_r.error().message;
+      return false;
+    }
+    out->table_schema = schema_r.value();
+  }
+
+  if (out->traits.sorted() && out->traits.sort_keys.front().ascending) {
+    ExtractKeyWindow(request.filter, out->traits.sort_keys.front().name,
+                     &out->key_lo, &out->key_hi, &out->residual);
+  } else {
+    out->residual = request.filter;
+  }
+
   std::vector<std::string> stats_names;
   StatsNames(*metadata, request, out->traits, &stats_names);
 
@@ -295,12 +390,7 @@ bool PlanTableScan(const std::shared_ptr<iceberg::TableMetadata>& metadata,
     }
   }
 
-  auto schema_r = metadata->Schema();
-  if (!schema_r.has_value()) {
-    if (error) *error = "TableMetadata::Schema: " + schema_r.error().message;
-    return false;
-  }
-  const auto& table_schema = schema_r.value();
+  const auto& table_schema = out->table_schema;
 
   if (out->traits.sorted() && !tasks.empty()) {
     if (!SortTasksByLowerBound(&tasks, *table_schema,

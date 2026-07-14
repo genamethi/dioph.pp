@@ -221,7 +221,7 @@ CheckResult TableVerifier::Run(const std::string& metadata_path,
       if (error) *error = "open reader: " + e;
       return result;
     }
-    for (const auto& sf : probe->source_files()) total_records += sf.record_count;
+    total_records = probe->planned_records();
   }
 
   std::vector<CheckResult> accums(n_workers);

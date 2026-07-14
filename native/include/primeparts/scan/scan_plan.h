@@ -33,10 +33,14 @@ struct FileScanTask {
 };
 
 struct ScanPlan {
+  std::shared_ptr<iceberg::Schema> table_schema;
   std::shared_ptr<iceberg::Schema> projected_schema;
   TableReadTraits traits;
   std::vector<FileScanTask> tasks;
   int64_t planned_rows = 0;
+  std::optional<int64_t> key_lo;
+  std::optional<int64_t> key_hi;
+  std::shared_ptr<iceberg::Expression> residual;
 };
 
 }  // namespace primeparts::scan
