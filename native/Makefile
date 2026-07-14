@@ -50,6 +50,10 @@ WRITER_OBJ := $(BUILD_DIR)/writer.o
 ALIGNED_WRITER_OBJ := $(BUILD_DIR)/aligned_writer.o
 SCHEMAS_OBJ := $(BUILD_DIR)/schemas.o
 SOURCE_SCAN_OBJ := $(BUILD_DIR)/source_scan.o
+TABLE_TRAITS_OBJ := $(BUILD_DIR)/table_traits.o
+SCAN_PLANNER_OBJ := $(BUILD_DIR)/scan_planner.o
+SCAN_OBJS := $(TABLE_TRAITS_OBJ) $(SCAN_PLANNER_OBJ)
+TEST_SCAN_PLANNER_OBJ := $(BUILD_DIR)/test_scan_planner.o
 PP_ICEBERG_REST_OBJ := $(BUILD_DIR)/pp_iceberg_rest.o
 PP_LMDB_STORE_OBJ := $(BUILD_DIR)/pp_lmdb_store.o
 PP_LMDB_SMOKE_OBJ := $(BUILD_DIR)/pp_lmdb_smoke.o
@@ -250,6 +254,15 @@ $(TEST_OBJ): tests/test_core.c include/primeparts/core.h | $(BUILD_DIR)
 $(TEST_ICEBERG_WRITER_OBJ): tests/test_iceberg_writer.cc include/primeparts/writer.h include/primeparts/schemas.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
+$(TABLE_TRAITS_OBJ): src/scan/table_traits.cc include/primeparts/scan/table_traits.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(SCAN_PLANNER_OBJ): src/scan/scan_planner.cc include/primeparts/scan/scan_planner.h include/primeparts/scan/scan_plan.h include/primeparts/scan/table_traits.h include/primeparts/common/uri.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(TEST_SCAN_PLANNER_OBJ): tests/test_scan_planner.cc include/primeparts/scan/scan_planner.h include/primeparts/writer.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
 $(BUILD_DIR)/libprimeparts_core.so: $(CORE_OBJ)
 	$(CC) -shared $(LDFLAGS) $^ $(LDLIBS) -o $@
 
@@ -287,6 +300,9 @@ $(BUILD_DIR)/query-service-smoke: $(BUILD_DIR)/query_service_smoke.o $(BUILD_DIR
 $(BUILD_DIR)/primeparts-test-iceberg-writer: $(TEST_ICEBERG_WRITER_OBJ) $(WRITER_OBJ) $(SCHEMAS_OBJ)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(ICEBERG_LDLIBS) -pthread -o $@
 
+$(BUILD_DIR)/primeparts-test-scan-planner: $(TEST_SCAN_PLANNER_OBJ) $(SCAN_OBJS) $(WRITER_OBJ)
+	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(ICEBERG_LDLIBS) -pthread -o $@
+
 $(BUILD_DIR)/primeparts-tui: $(BUILD_DIR)/tui_main.o $(BUILD_DIR)/tui_runquery.o $(BUILD_DIR)/tui_generate.o $(BUILD_DIR)/tui_config.o $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(BUILD_DIR)/lua_presets.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(SOURCE_SCAN_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $(NOTCURSES_RPATH) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(NOTCURSES_LDLIBS) $(LUA_LDLIBS) -lsqlite3 -pthread -o $@
 
@@ -302,9 +318,10 @@ $(BUILD_DIR)/pp: $(BUILD_DIR)/pp_main.o $(BUILD_DIR)/lua_query_module.o $(BUILD_
 $(BUILD_DIR)/test_core: $(CORE_OBJ) $(TEST_OBJ)
 	$(CC) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) -pthread -o $@
 
-test: $(BUILD_DIR)/test_core $(BUILD_DIR)/primeparts-test-iceberg-writer
+test: $(BUILD_DIR)/test_core $(BUILD_DIR)/primeparts-test-iceberg-writer $(BUILD_DIR)/primeparts-test-scan-planner
 	$(BUILD_DIR)/test_core
 	$(BUILD_DIR)/primeparts-test-iceberg-writer
+	$(BUILD_DIR)/primeparts-test-scan-planner
 
 smoke: $(BUILD_DIR)/primeparts-lmdb-smoke \
        $(BUILD_DIR)/primeparts-generate-smoke \
