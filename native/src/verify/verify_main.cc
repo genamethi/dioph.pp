@@ -104,9 +104,9 @@ int RunTable(const std::shared_ptr<iceberg::Catalog>& catalog,
                           traits.sort_keys.front().ascending &&
                           traits.sort_keys.front().name == req;
     if (!declared) {
-      log.Line("FAIL " + table + ": check requires an ascending sort order on '" +
-               req + "' declared in the catalog; run pp-declare-sort --table " +
-               table + " --field " + req);
+      log.Line("FAIL " + table +
+               ": check requires an ascending sort order on '" + req +
+               "' declared in the catalog");
       return 1;
     }
   }

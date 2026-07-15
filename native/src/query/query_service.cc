@@ -77,7 +77,7 @@ bool RequireSorted(const primeparts::SourceTableReader& reader,
   if (error) {
     *error = "table '" + table +
              "' declares no ascending sort order in the catalog; " + what +
-             " requires it (run pp-declare-sort)";
+             " requires one";
   }
   return false;
 }
