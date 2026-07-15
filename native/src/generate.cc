@@ -55,13 +55,8 @@ namespace {
 
 constexpr int64_t kDefaultChunkPrimes = 500000;
 
-// Minimum --count. Smaller runs fragment the byte-aligned buckets and aren't
-// worth a full generate invocation.
 constexpr int64_t kMinCount = 1'000'000'000;
 
-// Fresh/empty warehouse (or --temp) default start index. prime_rank == 1-based
-// prime index; index 1 is p=2, intentionally omitted, so a from-scratch build
-// starts at index 2 (p=3).
 constexpr int64_t kFreshStartIdx = 2;
 
 thread_local std::string g_last_error;
@@ -87,6 +82,7 @@ struct Options {
   bool temp = false;
   fs::path warehouse;
   std::string rest_uri;
+  iceberg::Namespace ns;
 };
 
 struct BatchHolder {
@@ -254,6 +250,8 @@ void usage(FILE* stream) {
       "  --warehouse PATH          Warehouse root. Default: config.lua 'warehouse'.\n"
       "  --rest-uri URL            pp-catalogd base (e.g. http://127.0.0.1:8181).\n"
       "                            Default: config.lua 'rest_uri' or 127.0.0.1:8181.\n"
+      "  --namespace NS            Catalog namespace for both tables.\n"
+      "                            Default: config.lua 'namespace' or primeparts.\n"
       "  --temp                    Write to $FUNBUNS_DATA_DIR/tmp/iceberg_temp_<ts>/\n"
       "                            warehouse and skip the commit (files-only).\n"
       "  --chunk-primes N          Materialization chunk size (default: 500000).\n"
@@ -263,7 +261,8 @@ void usage(FILE* stream) {
       "Environment:\n"
       "  PRIMEPARTS_PRIME_RANK_START prime_rank to stamp on the first prime row.\n"
       "                              Default: the resolved start index.\n"
-      "  PRIMEPARTS_REST_URI         Overrides --rest-uri / config.lua.\n");
+      "  PRIMEPARTS_REST_URI         Overrides --rest-uri / config.lua.\n"
+      "  PRIMEPARTS_NAMESPACE        Namespace when --namespace is absent.\n");
 }
 
 bool parse_i64(const char* text, int64_t* out) {
@@ -284,8 +283,6 @@ bool resolve_rank_start(Options* options) {
       return false;
     }
   }
-  // else: leave prime_rank_start = 0; run_generation defaults it to the resolved
-  // start_idx once the frontier is known.
   return true;
 }
 
@@ -322,8 +319,6 @@ std::string json_escape(std::string_view text) {
   }
   return out;
 }
-
-// --- producer: pp_batch_result -> arrow RecordBatch (this producer's columns) -
 
 std::shared_ptr<arrow::Array> int64_array(const int64_t* values, int64_t length) {
   arrow::Int64Builder builder;
@@ -365,8 +360,6 @@ std::shared_ptr<arrow::Array> partitions_rank_array(const pp_batch_result& batch
   return int64_array(ranks.data(), static_cast<int64_t>(batch.partition_count));
 }
 
-// Physical primes batch: (p, k, prime_rank). Bucket columns live in the
-// manifest partition tuple and are stripped by the writer.
 std::shared_ptr<arrow::RecordBatch> make_primes_batch(const pp_batch_result& batch,
                                                       int64_t rank_start) {
   auto schema = arrow::schema({
@@ -382,7 +375,6 @@ std::shared_ptr<arrow::RecordBatch> make_primes_batch(const pp_batch_result& bat
        dense_int64_range(rank_start, rows)});
 }
 
-// Physical partitions batch: (p, m_k, n_k, q_k, prime_rank).
 std::shared_ptr<arrow::RecordBatch> make_partitions_batch(const pp_batch_result& batch,
                                                           int64_t rank_start) {
   auto schema = arrow::schema({
@@ -485,9 +477,11 @@ bool parse_args(int argc, char** argv, Options* options) {
       {"warehouse", required_argument, nullptr, 'w'},
       {"temp", no_argument, nullptr, 1004},
       {"rest-uri", required_argument, nullptr, 1005},
+      {"namespace", required_argument, nullptr, 1006},
       {"help", no_argument, nullptr, 'h'},
       {nullptr, 0, nullptr, 0},
   };
+  std::string ns_name;
   int opt;
   while ((opt = getopt_long(argc, argv, "n:c:w:h", long_options, nullptr)) != -1) {
     switch (opt) {
@@ -518,6 +512,7 @@ bool parse_args(int argc, char** argv, Options* options) {
       case 'w': options->warehouse = optarg; break;
       case 1004: options->temp = true; break;
       case 1005: options->rest_uri = optarg; break;
+      case 1006: ns_name = optarg; break;
       case 'h': usage(stdout); std::exit(0);
       default: return false;
     }
@@ -531,7 +526,6 @@ bool parse_args(int argc, char** argv, Options* options) {
     return false;
   }
 
-  // Defaults from config.lua when the flags are absent (CLI flag wins).
   std::string cfg_err;
   auto cfg = primeparts::config::Load(&cfg_err);
   if (options->rest_uri.empty()) {
@@ -542,6 +536,13 @@ bool parse_args(int argc, char** argv, Options* options) {
     else
       options->rest_uri = primeparts::catalog::kDefaultRestUri;
   }
+  if (ns_name.empty()) {
+    if (const char* env = std::getenv("PRIMEPARTS_NAMESPACE"); env && env[0])
+      ns_name = env;
+    else if (auto it = cfg.find("namespace"); it != cfg.end() && !it->second.empty())
+      ns_name = it->second;
+  }
+  options->ns = primeparts::catalog::ResolveNamespace(ns_name);
   if (options->warehouse.empty()) {
     if (options->temp) {
       options->warehouse = default_temp_root() / "warehouse";
@@ -588,15 +589,10 @@ bool commit_plan(const Options& options,
     specs.push_back(std::move(spec));
   }
   return primeparts::catalog::CommitFilesAtomic(catalog, nullptr, options.rest_uri,
-                                                options.warehouse, specs, error);
+                                                options.ns, options.warehouse,
+                                                specs, error);
 }
 
-// Resolve the first prime index to generate. --temp or an unset start_idx on a
-// fresh warehouse defaults to kFreshStartIdx (p=3). Otherwise ask catalogd for
-// the committed `prime_rank` frontier and continue at frontier+1; an explicit
-// --start-idx is honored only when there is no frontier (fresh) or when catalogd
-// is unreachable (offline override). False + last_error on an unrecoverable
-// failure.
 bool resolve_start_idx(const Options& options, const pp_gen_callbacks* callbacks,
                        int64_t* out_start) {
   if (options.temp) {
@@ -606,10 +602,10 @@ bool resolve_start_idx(const Options& options, const pp_gen_callbacks* callbacks
   int64_t ub = 0;
   bool present = false;
   std::string err;
-  if (!primeparts::catalog::FetchFieldUpperBound(options.rest_uri, "primeparts",
+  if (!primeparts::catalog::FetchFieldUpperBound(options.rest_uri, options.ns,
                                                  "primes", "prime_rank", &ub,
                                                  &present, &err)) {
-    if (options.start_idx > 0) {  // offline override
+    if (options.start_idx > 0) {
       *out_start = options.start_idx;
       log_line(callbacks,
                "warning: catalogd unreachable (%s); using --start-idx=%" PRId64,
@@ -691,7 +687,7 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
     ShapePolicy policy;
     ResumeState resume;
     if (catalog &&
-        !LoadAlignedResume(catalog, iceberg::Namespace{{"primeparts"}},
+        !LoadAlignedResume(catalog, options.ns,
                            {"primes", "partitions"}, "primes",
                            primeparts::BucketFields{"p_bucket_version",
                                                     "p_bucket"},
@@ -711,8 +707,9 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
                                 {"p", "prime_rank", "q_k"},
                                 {{"p", true}, {"prime_rank", true}, {"q_k", false}},
                                 false, nullptr});
-    auto writer = AlignedBucketWriter::Make(options.warehouse, std::move(tables),
-                                            AtomKey{"p"}, policy, resume, &error);
+    auto writer = AlignedBucketWriter::Make(options.warehouse, options.ns,
+                                            std::move(tables), AtomKey{"p"},
+                                            policy, resume, &error);
     if (!writer) {
       set_last_error("open writer: " + error);
       log_line(callbacks, "%s", g_last_error.c_str());
@@ -747,7 +744,7 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
     std::condition_variable q_can_push;
     std::condition_variable q_can_pop;
     std::deque<WriteJob> jobs;
-    const size_t kMaxPending = 1;  // one job may wait while another is written
+    const size_t kMaxPending = 1;
     bool producer_done = false;
     bool writer_failed = false;
     std::string writer_error;
@@ -937,10 +934,12 @@ int pp_gen_run(const pp_gen_options* options,
   internal.count = options->count;
   internal.chunk_primes = options->chunk_primes > 0 ? options->chunk_primes : kDefaultChunkPrimes;
   internal.threads = options->threads;
-  internal.prime_rank_start = options->prime_rank_start;  // 0 => derive from start_idx
+  internal.prime_rank_start = options->prime_rank_start;
   internal.temp = options->temp != 0;
   if (options->warehouse) internal.warehouse = options->warehouse;
   if (options->rest_uri) internal.rest_uri = options->rest_uri;
+  internal.ns = primeparts::catalog::ResolveNamespace(
+      options->ns ? options->ns : "");
   if (internal.count < kMinCount || internal.chunk_primes <= 0 || internal.threads < 0) {
     set_last_error("invalid pp_gen_options values (count must be >= 1000000000)");
     return 1;

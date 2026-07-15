@@ -1,17 +1,3 @@
-// pp — the primeparts Lua query shell.
-//
-// Binds the embedded-Lua `query` module (number theory + catalog-backed data
-// queries + aggregations) to a live QueryService over a warehouse, then runs a
-// Lua file, a -e snippet, or an interactive REPL. This is the general query
-// surface: any query — point lookup, k-scan, or aggregation — is just Lua, so
-// new query shapes never need a new binary.
-//
-//   pp [--warehouse DIR] run FILE.lua      # run a script
-//   pp [--warehouse DIR] -e "CODE"         # run a snippet
-//   pp [--warehouse DIR]                   # interactive REPL
-//
-// Warehouse defaults to $PRIMEPARTS_WAREHOUSE_ROOT, else the staging path.
-
 #include <lua.hpp>
 
 #include <cstdio>
@@ -19,6 +5,7 @@
 #include <iostream>
 #include <string>
 
+#include "primeparts/catalog/pp_iceberg_rest.h"
 #include "primeparts/query/lua_query_module.h"
 #include "primeparts/query/query_service.h"
 
@@ -28,7 +15,7 @@ const char* kDefaultWarehouse = "/media/extssd/research/dioph.pp/data/ib-staging
 
 void Usage(const char* argv0) {
   std::fprintf(stderr,
-               "usage: %s [--warehouse DIR] [run FILE.lua | -e CODE]\n"
+               "usage: %s [--warehouse DIR] [--namespace NS] [run FILE.lua | -e CODE]\n"
                "  no script/-e: interactive REPL.\n"
                "  the `query` module is bound to the warehouse, e.g.\n"
                "    for _,r in ipairs(query.hist{col=\"k\"}) do "
@@ -36,7 +23,6 @@ void Usage(const char* argv0) {
                argv0);
 }
 
-// Report a Lua error left on the stack, then pop it.
 void ReportLuaError(lua_State* L) {
   const char* msg = lua_tostring(L, -1);
   std::fprintf(stderr, "error: %s\n", msg ? msg : "(unknown)");
@@ -61,6 +47,7 @@ int RunRepl(lua_State* L) {
 
 int main(int argc, char** argv) {
   std::string warehouse;
+  std::string ns_name;
   std::string run_file;
   std::string eval_code;
   bool have_eval = false;
@@ -70,6 +57,9 @@ int main(int argc, char** argv) {
     if (arg == "--warehouse") {
       if (i + 1 >= argc) { std::fprintf(stderr, "--warehouse requires a value\n"); return 2; }
       warehouse = argv[++i];
+    } else if (arg == "--namespace") {
+      if (i + 1 >= argc) { std::fprintf(stderr, "--namespace requires a value\n"); return 2; }
+      ns_name = argv[++i];
     } else if (arg == "-e") {
       if (i + 1 >= argc) { std::fprintf(stderr, "-e requires code\n"); return 2; }
       eval_code = argv[++i];
@@ -82,7 +72,7 @@ int main(int argc, char** argv) {
       return 0;
     } else if (run_file.empty() && !have_eval && arg.size() > 4 &&
                arg.rfind(".lua") == arg.size() - 4) {
-      run_file = arg;  // bare path to a .lua file
+      run_file = arg;
     } else {
       std::fprintf(stderr, "unknown argument: %s\n", arg.c_str());
       Usage(argv[0]);
@@ -102,7 +92,8 @@ int main(int argc, char** argv) {
   luaL_openlibs(L);
 
   std::string e;
-  auto qs = primeparts::query::QueryService::Open(warehouse, &e);
+  auto qs = primeparts::query::QueryService::Open(
+      warehouse, primeparts::catalog::ResolveNamespace(ns_name), &e);
   if (!qs) {
     std::fprintf(stderr,
                  "[i] no catalog at %s (%s) — number-theory functions only\n",

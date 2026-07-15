@@ -29,6 +29,7 @@ Branch `planner-prep` (off `tui-query`). One commit per phase, message = phase f
 
 - `SourceTableReader::Impl::OpenRowGroupTask` — selected field not physical in file (identity-partition column) → NotImplemented error — filed-by 03 — by design (MOR path serves those selects); revisit if a consumer ever selects bucket columns with a residual
 - `pp_catalogd.cc` plan routes (planTableScan / fetchPlanningResult / cancelPlanning / fetchScanTasks) — 406 UnsupportedOperationException — filed-by 08 — owner: future server-side lift invoking the 02 planner module
+- generate-commit-smoke (`make smoke`) — fails at arg parse: 916563a added `kMinCount = 1e9` but generate_smoke.cc still passes `--count 1000`; broken since before planner-prep — filed-by 07 — owner: unassigned
 - declaring sort order / properties on EXISTING tables — no surface exists (pp-declare-sort binary built then deleted: packaging undecided; user direction leans config.lua `tables` section + Lua interface) — filed-by 06 — owner: future design session. Until filled, order-requiring paths (ScanByK, windowed hist, verify primes, Extent frontier) error on the live tables. Preconditions the surface must keep: uuid-guarded updateTable, refuse if primary-key bounds missing on any committed file, refuse to replace a different existing order, idempotent no-op.
 
 ## session protocol

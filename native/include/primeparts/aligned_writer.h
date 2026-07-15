@@ -71,8 +71,9 @@ struct CommitPlan {
 class AlignedBucketWriter {
  public:
   static std::unique_ptr<AlignedBucketWriter> Make(
-      const fs::path& warehouse, std::vector<BoundTable> tables, AtomKey atom,
-      ShapePolicy policy, ResumeState resume, std::string* error);
+      const fs::path& warehouse, const iceberg::Namespace& ns,
+      std::vector<BoundTable> tables, AtomKey atom, ShapePolicy policy,
+      ResumeState resume, std::string* error);
 
   ~AlignedBucketWriter();
   AlignedBucketWriter(const AlignedBucketWriter&) = delete;

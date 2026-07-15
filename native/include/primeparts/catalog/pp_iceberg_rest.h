@@ -22,17 +22,22 @@ namespace primeparts::catalog {
 namespace fs = std::filesystem;
 
 inline constexpr char kDefaultRestUri[] = "http://127.0.0.1:8181";
+inline constexpr char kDefaultNamespace[] = "primeparts";
+inline constexpr char kCatalogName[] = "primeparts";
+
+iceberg::Namespace ResolveNamespace(const std::string& name);
 
 struct RestOptions {
   std::string rest_uri;
-  std::string rest_name = "primeparts";
+  std::string rest_name = kCatalogName;
   std::string rest_warehouse;
   std::string rest_prefix;
 };
 
 std::shared_ptr<iceberg::FileIO> LocalIO();
 
-fs::path StagingDataDir(const fs::path& warehouse, const std::string& table_name);
+fs::path StagingDataDir(const fs::path& warehouse, const iceberg::Namespace& ns,
+                        const std::string& table_name);
 
 std::shared_ptr<iceberg::Catalog> MakeCatalog(const RestOptions& opts,
                                               const fs::path& warehouse,
@@ -56,19 +61,21 @@ std::shared_ptr<iceberg::Catalog> OpenCatalog(const fs::path& warehouse,
 
 bool RestServerReachable(const std::string& rest_uri);
 
-bool FetchFieldUpperBound(const std::string& rest_uri, const std::string& ns,
+bool FetchFieldUpperBound(const std::string& rest_uri,
+                          const iceberg::Namespace& ns,
                           const std::string& table, const std::string& field,
                           int64_t* out, bool* present, std::string* error);
 
 fs::path TableMetadataPath(const std::shared_ptr<iceberg::Catalog>& catalog,
+                           const iceberg::Namespace& ns,
                            const std::string& table, std::string* error);
 
 bool EnsureNamespace(const std::shared_ptr<iceberg::Catalog>& catalog,
                      const iceberg::Namespace& ns, std::string* error);
 
 bool DropTable(const std::shared_ptr<iceberg::Catalog>& catalog,
-               const fs::path& warehouse, const std::string& table, bool purge,
-               std::string* error);
+               const iceberg::Namespace& ns, const fs::path& warehouse,
+               const std::string& table, bool purge, std::string* error);
 
 struct TableDeclaration {
   std::shared_ptr<iceberg::SortOrder> sort_order;
@@ -76,20 +83,22 @@ struct TableDeclaration {
 };
 
 std::shared_ptr<iceberg::Table> EnsureTable(
-    const std::shared_ptr<iceberg::Catalog>& catalog, const fs::path& warehouse,
+    const std::shared_ptr<iceberg::Catalog>& catalog,
+    const iceberg::Namespace& ns, const fs::path& warehouse,
     const std::string& table_name,
     const std::shared_ptr<iceberg::Schema>& schema,
     const std::shared_ptr<iceberg::PartitionSpec>& spec,
     const TableDeclaration& declare, std::string* error);
 
 bool MoveStagedFilesInto(
-    const std::shared_ptr<iceberg::Table>& table, const fs::path& warehouse,
-    const std::string& table_name,
+    const std::shared_ptr<iceberg::Table>& table, const iceberg::Namespace& ns,
+    const fs::path& warehouse, const std::string& table_name,
     const std::vector<std::shared_ptr<iceberg::DataFile>>& files,
     std::string* error);
 
 bool CommitFiles(const std::shared_ptr<iceberg::Catalog>& catalog,
-                 const fs::path& warehouse, const std::string& table_name,
+                 const iceberg::Namespace& ns, const fs::path& warehouse,
+                 const std::string& table_name,
                  const std::shared_ptr<iceberg::Schema>& schema,
                  const std::shared_ptr<iceberg::PartitionSpec>& spec,
                  const TableDeclaration& declare,

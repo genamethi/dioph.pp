@@ -1,5 +1,3 @@
-// primeparts/catalog/pp_commit.cc — see header.
-
 #include "primeparts/catalog/pp_commit.h"
 
 #include <memory>
@@ -10,7 +8,7 @@
 
 #include "iceberg/catalog.h"
 #include "iceberg/catalog/sql/catalog_store.h"
-#include "iceberg/json_serde_internal.h"  // iceberg::ToJson(TableUpdate/TableRequirement)
+#include "iceberg/json_serde_internal.h"
 #include "iceberg/result.h"
 #include "iceberg/snapshot.h"
 #include "iceberg/table.h"
@@ -21,7 +19,7 @@
 #include "iceberg/table_update.h"
 #include "iceberg/update/fast_append.h"
 
-#include "primeparts/catalog/pp_iceberg_rest.h"  // EnsureTable, MoveStagedFilesInto
+#include "primeparts/catalog/pp_iceberg_rest.h"
 
 namespace primeparts::catalog {
 
@@ -29,29 +27,24 @@ namespace {
 
 using json = nlohmann::json;
 
-// One table's assembled change: identifier + the requirements/updates a commit
-// CAS validates then applies. Empty updates ⇒ nothing to commit for this table.
 struct TableChange {
   iceberg::TableIdentifier id;
   std::vector<std::unique_ptr<iceberg::TableRequirement>> reqs;
   std::vector<std::unique_ptr<iceberg::TableUpdate>> updates;
 };
 
-// Ensure/create the table, move its staged files in, FastAppend + Apply (writes
-// manifests + manifest list, returns the new snapshot without committing), then
-// build the (requirements, updates) that mirror what Transaction::CommitOnce
-// would send — AddSnapshot + SetSnapshotRef("main") guarded by ForUpdateTable's
-// assert-ref requirements.
 bool AssembleChange(const std::shared_ptr<iceberg::Catalog>& catalog,
-                    const fs::path& warehouse, TableCommitSpec& spec,
-                    TableChange* out, std::string* error) {
-  auto table = EnsureTable(catalog, warehouse, spec.table_name, spec.schema,
+                    const iceberg::Namespace& ns, const fs::path& warehouse,
+                    TableCommitSpec& spec, TableChange* out,
+                    std::string* error) {
+  auto table = EnsureTable(catalog, ns, warehouse, spec.table_name, spec.schema,
                            spec.spec, spec.declare, error);
   if (!table) return false;
   out->id = table->name();
   if (spec.files.empty()) return true;
 
-  if (!MoveStagedFilesInto(table, warehouse, spec.table_name, spec.files, error))
+  if (!MoveStagedFilesInto(table, ns, warehouse, spec.table_name, spec.files,
+                           error))
     return false;
 
   auto app_r = table->NewFastAppend();
@@ -62,9 +55,6 @@ bool AssembleChange(const std::shared_ptr<iceberg::Catalog>& catalog,
   auto app = std::move(app_r.value());
   for (const auto& f : spec.files) app->AppendFile(f);
 
-  // FastAppend hides the base no-arg Apply() with its 2-arg override; qualify to
-  // the base, which writes the manifests + manifest list and returns the staged
-  // snapshot without committing.
   auto applied = app->iceberg::SnapshotUpdate::Apply();
   if (!applied.has_value()) {
     *error = "Apply " + spec.table_name + ": " + applied.error().message;
@@ -111,16 +101,14 @@ bool ChangeToJson(const TableChange& c, json* out, std::string* error) {
   return true;
 }
 
-// Assemble every spec into a TableChange (writes manifests via Apply). Specs
-// with no files ensure the table exists but contribute no change.
 bool AssembleChanges(const std::shared_ptr<iceberg::Catalog>& catalog,
-                     const fs::path& warehouse,
+                     const iceberg::Namespace& ns, const fs::path& warehouse,
                      std::vector<TableCommitSpec>& specs,
                      std::vector<TableChange>* out, std::string* error) {
   out->reserve(specs.size());
   for (auto& spec : specs) {
     TableChange c;
-    if (!AssembleChange(catalog, warehouse, spec, &c, error)) return false;
+    if (!AssembleChange(catalog, ns, warehouse, spec, &c, error)) return false;
     if (!c.updates.empty()) out->push_back(std::move(c));
   }
   return true;
@@ -141,11 +129,13 @@ bool ChangesToBody(const std::vector<TableChange>& changes, json* body,
 }  // namespace
 
 bool AssembleTransactionBody(const std::shared_ptr<iceberg::Catalog>& catalog,
+                             const iceberg::Namespace& ns,
                              const fs::path& warehouse,
                              std::vector<TableCommitSpec>& specs,
                              std::string* body_json, std::string* error) {
   std::vector<TableChange> changes;
-  if (!AssembleChanges(catalog, warehouse, specs, &changes, error)) return false;
+  if (!AssembleChanges(catalog, ns, warehouse, specs, &changes, error))
+    return false;
   json body;
   if (!ChangesToBody(changes, &body, error)) return false;
   *body_json = body.dump();
@@ -154,10 +144,12 @@ bool AssembleTransactionBody(const std::shared_ptr<iceberg::Catalog>& catalog,
 
 bool CommitFilesAtomic(const std::shared_ptr<iceberg::Catalog>& catalog,
                        const std::shared_ptr<iceberg::sql::CatalogStore>& store,
-                       const std::string& rest_uri, const fs::path& warehouse,
+                       const std::string& rest_uri,
+                       const iceberg::Namespace& ns, const fs::path& warehouse,
                        std::vector<TableCommitSpec>& specs, std::string* error) {
   std::vector<TableChange> changes;
-  if (!AssembleChanges(catalog, warehouse, specs, &changes, error)) return false;
+  if (!AssembleChanges(catalog, ns, warehouse, specs, &changes, error))
+    return false;
   if (changes.empty()) return true;
 
   if (store) {

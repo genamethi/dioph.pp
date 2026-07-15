@@ -52,6 +52,7 @@ int64_t UpperBoundByKey(const arrow::RecordBatch& batch, const std::string& key,
 
 struct AlignedBucketWriter::Impl {
   fs::path warehouse;
+  iceberg::Namespace ns;
   std::vector<BoundTable> tables;
   AtomKey atom;
   ShapePolicy policy;
@@ -88,7 +89,7 @@ bool AlignedBucketWriter::Impl::OpenBucketWriters(std::string* error) {
   for (size_t t = 0; t < tables.size(); ++t) {
     const auto& bt = tables[t];
     WriterConfig cfg;
-    cfg.output_dir = catalog::StagingDataDir(warehouse, bt.name) / vdir / bdir;
+    cfg.output_dir = catalog::StagingDataDir(warehouse, ns, bt.name) / vdir / bdir;
     cfg.schema = bt.schema;
     cfg.table_name = bt.name;
     cfg.filename_prefix = bt.name;
@@ -163,10 +164,12 @@ bool AlignedBucketWriter::Impl::RgFill(std::string* error) {
 }
 
 std::unique_ptr<AlignedBucketWriter> AlignedBucketWriter::Make(
-    const fs::path& warehouse, std::vector<BoundTable> tables, AtomKey atom,
-    ShapePolicy policy, ResumeState resume, std::string* error) {
+    const fs::path& warehouse, const iceberg::Namespace& ns,
+    std::vector<BoundTable> tables, AtomKey atom, ShapePolicy policy,
+    ResumeState resume, std::string* error) {
   auto impl = std::make_unique<Impl>();
   impl->warehouse = warehouse;
+  impl->ns = ns;
   impl->tables = std::move(tables);
   impl->atom = std::move(atom);
   impl->policy = policy;

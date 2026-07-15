@@ -38,8 +38,6 @@ namespace primeparts::query {
 
 namespace {
 
-const iceberg::Namespace kNs{{"primeparts"}};
-
 struct WidenedColumn {
   const int64_t* i64 = nullptr;
   const int32_t* i32 = nullptr;
@@ -89,11 +87,12 @@ bool RequireSorted(const primeparts::SourceTableReader& reader,
 struct QueryService::Impl {
   std::shared_ptr<iceberg::Catalog> catalog;
   fs::path warehouse;
+  iceberg::Namespace ns;
   std::vector<std::string> schema_fields;
   bool schema_loaded = false;
 
   fs::path ResolveMeta(const std::string& table, std::string* error) {
-    auto t = catalog->LoadTable(iceberg::TableIdentifier{.ns = kNs, .name = table});
+    auto t = catalog->LoadTable(iceberg::TableIdentifier{.ns = ns, .name = table});
     if (!t.has_value()) {
       if (error) *error = "LoadTable(" + table + "): " + t.error().message;
       return {};
@@ -106,12 +105,14 @@ QueryService::QueryService(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) 
 QueryService::~QueryService() = default;
 
 std::unique_ptr<QueryService> QueryService::Open(const fs::path& warehouse,
+                                                 const iceberg::Namespace& ns,
                                                  std::string* error) {
   auto impl = std::make_unique<Impl>();
   std::string mode;
   impl->catalog = catalog::OpenCatalog(warehouse, "", &mode, error);
   if (!impl->catalog) return nullptr;
   impl->warehouse = warehouse;
+  impl->ns = ns;
   return std::unique_ptr<QueryService>(new QueryService(std::move(impl)));
 }
 
@@ -392,8 +393,8 @@ bool QueryService::Materialize(const std::string& name,
                                const std::vector<std::vector<int64_t>>& columns,
                                std::string* metadata_location,
                                std::string* error) {
-  return MaterializeIntColumns(impl_->catalog, impl_->warehouse, name, col_names,
-                               columns, metadata_location, error);
+  return MaterializeIntColumns(impl_->catalog, impl_->ns, impl_->warehouse, name,
+                               col_names, columns, metadata_location, error);
 }
 
 TableRows QueryService::ReadTable(const std::string& table,
@@ -401,7 +402,7 @@ TableRows QueryService::ReadTable(const std::string& table,
                                   int64_t limit, std::string* error) {
   TableRows out;
   auto t = impl_->catalog->LoadTable(
-      iceberg::TableIdentifier{.ns = kNs, .name = table});
+      iceberg::TableIdentifier{.ns = impl_->ns, .name = table});
   if (!t.has_value()) {
     if (error) *error = "LoadTable(" + table + "): " + t.error().message;
     return out;
@@ -454,7 +455,7 @@ const std::vector<std::string>& QueryService::SchemaFields() {
   std::vector<std::string>& out = impl_->schema_fields;
   for (const char* tbl : {"primes", "partitions"}) {
     auto t = impl_->catalog->LoadTable(
-        iceberg::TableIdentifier{.ns = kNs, .name = tbl});
+        iceberg::TableIdentifier{.ns = impl_->ns, .name = tbl});
     if (!t.has_value()) continue;
     auto sch = t.value()->schema();
     if (!sch.has_value()) continue;
@@ -494,7 +495,7 @@ bool QueryService::ValidatePreset(const QueryPreset& p, std::string* error) {
 }
 
 std::vector<std::string> QueryService::ListTables(std::string* error) {
-  auto r = impl_->catalog->ListTables(kNs);
+  auto r = impl_->catalog->ListTables(impl_->ns);
   if (!r.has_value()) {
     if (error) *error = "ListTables: " + r.error().message;
     return {};
@@ -511,7 +512,7 @@ TableExtent QueryService::Extent(const std::string& table, bool with_key_max,
   TableExtent e;
   e.table = table;
   auto t = impl_->catalog->LoadTable(
-      iceberg::TableIdentifier{.ns = kNs, .name = table});
+      iceberg::TableIdentifier{.ns = impl_->ns, .name = table});
   if (!t.has_value()) {
     if (error) *error = "LoadTable(" + table + "): " + t.error().message;
     return e;

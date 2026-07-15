@@ -32,6 +32,7 @@ constexpr char kDefaultWarehouse[] =
 struct Options {
   std::string warehouse = kDefaultWarehouse;
   std::string rest_uri;
+  std::string ns_name;
   std::string table = "both";
   ppv::Window window;
   int threads = 0;
@@ -55,8 +56,9 @@ void Usage(const char* argv0) {
     "  --max-examples N   violating rows to record (default 20)\n"
     "  --warehouse DIR    warehouse root (default %s)\n"
     "  --rest-uri URI     IRC endpoint override (default %s)\n"
+    "  --namespace NS     catalog namespace (default %s; env PRIMEPARTS_NAMESPACE)\n"
     "  --log PATH         run-log path (default verify-<time>.log)\n",
-    argv0, kDefaultWarehouse, ppc::kDefaultRestUri);
+    argv0, kDefaultWarehouse, ppc::kDefaultRestUri, ppc::kDefaultNamespace);
 }
 
 struct Logger {
@@ -74,10 +76,10 @@ int64_t LatestSnapshotId(const std::shared_ptr<iceberg::Table>& tbl) {
 }
 
 int RunTable(const std::shared_ptr<iceberg::Catalog>& catalog,
-             const ppv::Check& check, const Options& opts, Logger& log) {
+             const iceberg::Namespace& ns, const ppv::Check& check,
+             const Options& opts, Logger& log) {
   const std::string& table = check.spec().table;
-  iceberg::TableIdentifier ident{.ns = iceberg::Namespace{{"primeparts"}},
-                                 .name = table};
+  iceberg::TableIdentifier ident{.ns = ns, .name = table};
   auto loaded = catalog->LoadTable(ident);
   if (!loaded.has_value()) {
     log.Line("FAIL " + table + ": LoadTable: " + loaded.error().message);
@@ -161,11 +163,12 @@ int main(int argc, char** argv) {
       {"max-examples", required_argument, nullptr, 'e'},
       {"warehouse", required_argument, nullptr, 'w'},
       {"rest-uri", required_argument, nullptr, 'r'},
+      {"namespace", required_argument, nullptr, 'N'},
       {"log", required_argument, nullptr, 'o'},
       {"help", no_argument, nullptr, 'h'},
       {nullptr, 0, nullptr, 0}};
   int o;
-  while ((o = getopt_long(argc, argv, "t:L:H:n:T:j:e:w:r:o:h", long_opts,
+  while ((o = getopt_long(argc, argv, "t:L:H:n:T:j:e:w:r:N:o:h", long_opts,
                           nullptr)) != -1) {
     switch (o) {
       case 't': opts.table = optarg; break;
@@ -177,6 +180,7 @@ int main(int argc, char** argv) {
       case 'e': opts.max_examples = std::atoi(optarg); break;
       case 'w': opts.warehouse = optarg; break;
       case 'r': opts.rest_uri = optarg; break;
+      case 'N': opts.ns_name = optarg; break;
       case 'o': opts.log_path = optarg; break;
       case 'h': Usage(argv[0]); return 0;
       default: Usage(argv[0]); return 2;
@@ -210,9 +214,11 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "error: OpenCatalog: %s\n", err.c_str());
     return 1;
   }
+  const iceberg::Namespace ns = ppc::ResolveNamespace(opts.ns_name);
   log.Line("== primeparts-verify ==");
   log.Line("warehouse  : " + opts.warehouse);
   log.Line("catalog    : " + mode);
+  log.Line("namespace  : " + ns.ToString());
   if (opts.window.p_lo > 0 || opts.window.p_hi > 0 || opts.window.limit > 0)
     log.Line("window     : p_lo=" + std::to_string(opts.window.p_lo) +
              " p_hi=" + std::to_string(opts.window.p_hi) +
@@ -221,7 +227,7 @@ int main(int argc, char** argv) {
   int rc = 0;
   for (const auto& check : checks) {
     if (opts.table != "both" && check->spec().table != opts.table) continue;
-    rc |= RunTable(catalog, *check, opts, log);
+    rc |= RunTable(catalog, ns, *check, opts, log);
   }
   log.Line(rc == 0 ? "OVERALL: PASS" : "OVERALL: FAIL");
   std::fprintf(stderr, "log written to %s\n", opts.log_path.c_str());

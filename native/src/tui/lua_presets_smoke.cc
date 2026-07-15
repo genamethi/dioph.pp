@@ -1,9 +1,4 @@
-// Smoke for the embedded-Lua preset facility: round-trip (serialize -> load),
-// seed-file load, and reader-side validation (good accepted, bad rejected).
-//
-// Usage: lua-presets-smoke [warehouse_root]   (run from the repo root so the
-// seed scripts/lua/queries.lua is found).
-
+#include "primeparts/catalog/pp_iceberg_rest.h"
 #include "primeparts/query/query_service.h"
 #include "primeparts/tui/lua_presets.h"
 
@@ -20,7 +15,6 @@ int main(int argc, char** argv) {
   int fail = 0;
   LuaPresets lp;
 
-  // 1) round-trip: serialize -> temp file -> load -> compare.
   QueryPreset p;
   p.id = "t";
   p.desc = "primes where k == {k}";
@@ -50,7 +44,6 @@ int main(int argc, char** argv) {
     if (!ok) ++fail;
   }
 
-  // 2) load the seed file (run from repo root).
   {
     std::vector<std::string> e2;
     auto seed = lp.Load("scripts/lua/queries.lua", &e2);
@@ -61,17 +54,16 @@ int main(int argc, char** argv) {
     if (!ok) ++fail;
   }
 
-  // 3) reader-side validation against the catalog schema.
   {
     const std::string wh =
         argc >= 2 ? argv[1] : "/media/extssd/research/dioph.pp/data/ib-staging";
     std::string oe;
-    auto qs = QueryService::Open(wh, &oe);
+    auto qs = QueryService::Open(wh, primeparts::catalog::ResolveNamespace(""), &oe);
     if (!qs) {
       std::printf("[skip] validation (QueryService::Open: %s)\n", oe.c_str());
     } else {
       std::string ve;
-      bool good = qs->ValidatePreset(p, &ve);  // accepts k, target k -> valid
+      bool good = qs->ValidatePreset(p, &ve);
       std::printf("[%s] valid preset accepted%s%s\n", good ? "ok" : "!!",
                   good ? "" : ": ", ve.c_str());
       if (!good) ++fail;
@@ -91,7 +83,6 @@ int main(int argc, char** argv) {
     }
   }
 
-  // 4) config round-trip (SaveConfig -> LoadConfig), mixed types.
   {
     std::map<std::string, std::string> kv = {
         {"log_limit", "500"}, {"log_format", "json"}, {"autosave", "true"}};

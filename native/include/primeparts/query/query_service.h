@@ -11,6 +11,10 @@
 
 #include "primeparts/query/query_preset.h"
 
+namespace iceberg {
+struct Namespace;
+}
+
 namespace primeparts::query {
 
 namespace fs = std::filesystem;
@@ -83,6 +87,7 @@ struct ScanControl {
 class QueryService {
  public:
   static std::unique_ptr<QueryService> Open(const fs::path& warehouse,
+                                            const iceberg::Namespace& ns,
                                             std::string* error);
   ~QueryService();
   QueryService(const QueryService&) = delete;
