@@ -54,6 +54,7 @@ bool AssembleChange(const std::shared_ptr<iceberg::Catalog>& catalog,
   }
   auto app = std::move(app_r.value());
   for (const auto& f : spec.files) app->AppendFile(f);
+  for (const auto& [key, value] : spec.summary) app->Set(key, value);
 
   auto applied = app->iceberg::SnapshotUpdate::Apply();
   if (!applied.has_value()) {

@@ -54,10 +54,20 @@ struct ShapePolicy {
 };
 
 struct ResumeState {
+  int32_t bucket_version = 0;
   int32_t bucket = 0;
-  int64_t bucket_fill_bytes = 0;
+  int64_t bucket_bytes = 0;
   std::map<std::string, int32_t> next_seq;
 };
+
+inline constexpr char kAlignedBucketVersionKey[] = "pp.aligned.bucket-version";
+inline constexpr char kAlignedBucketKey[] = "pp.aligned.bucket";
+inline constexpr char kAlignedBucketBytesKey[] = "pp.aligned.bucket-bytes";
+inline constexpr char kAlignedNextSeqKey[] = "pp.aligned.next-seq";
+
+std::map<std::string, std::string> AlignedResumeSummary(
+    const ResumeState& resume, const std::string& table,
+    const std::string& reference_table);
 
 struct TableFiles {
   std::string name;
@@ -66,6 +76,7 @@ struct TableFiles {
 
 struct CommitPlan {
   std::vector<TableFiles> tables;
+  ResumeState resume;
 };
 
 class AlignedBucketWriter {
@@ -90,16 +101,10 @@ class AlignedBucketWriter {
   explicit AlignedBucketWriter(std::unique_ptr<Impl> impl);
 };
 
-struct BucketFields {
-  std::string version_field;
-  std::string bucket_field;
-};
-
 bool LoadAlignedResume(const std::shared_ptr<iceberg::Catalog>& catalog,
                        const iceberg::Namespace& ns,
                        const std::vector<std::string>& table_names,
                        const std::string& reference_table,
-                       const BucketFields& bucket_fields,
                        int32_t bucket_version, ResumeState* out,
                        std::string* error);
 

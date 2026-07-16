@@ -583,6 +583,8 @@ bool commit_plan(const Options& options,
         error);
     if (!spec.declare.sort_order) return false;
     spec.declare.properties = {{"pp.buckets.self-contained", "true"}};
+    spec.summary =
+        primeparts::AlignedResumeSummary(plan.resume, tf.name, "primes");
     for (const auto& wf : tf.files) {
       if (wf.data_file) spec.files.push_back(wf.data_file);
     }
@@ -689,8 +691,6 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
     if (catalog &&
         !LoadAlignedResume(catalog, options.ns,
                            {"primes", "partitions"}, "primes",
-                           primeparts::BucketFields{"p_bucket_version",
-                                                    "p_bucket"},
                            policy.bucket_version, &resume, &error)) {
       set_last_error("resume: " + error);
       log_line(callbacks, "%s", g_last_error.c_str());

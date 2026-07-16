@@ -1,26 +1,20 @@
 #include "primeparts/aligned_writer.h"
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <cstdint>
 #include <memory>
 #include <string>
-#include <system_error>
-#include <variant>
+#include <unordered_map>
 #include <vector>
 
 #include <arrow/api.h>
 
 #include "iceberg/catalog.h"
 #include "iceberg/expression/literal.h"
-#include "iceberg/manifest/manifest_entry.h"
-#include "iceberg/manifest/manifest_list.h"
-#include "iceberg/manifest/manifest_reader.h"
-#include "iceberg/partition_field.h"
-#include "iceberg/partition_spec.h"
 #include "iceberg/result.h"
 #include "iceberg/row/partition_values.h"
-#include "iceberg/schema.h"
 #include "iceberg/snapshot.h"
 #include "iceberg/table.h"
 #include "iceberg/table_identifier.h"
@@ -60,6 +54,7 @@ struct AlignedBucketWriter::Impl {
 
   int32_t bucket = 0;
   int64_t bucket_ref_bytes = 0;
+  int64_t bucket_base_bytes = 0;
   int rgs_completed_in_file = 0;
 
   double ref_bpr = 1.1;
@@ -110,13 +105,19 @@ bool AlignedBucketWriter::Impl::OpenBucketWriters(std::string* error) {
 }
 
 bool AlignedBucketWriter::Impl::CloseBucketWriters(std::string* error) {
+  int64_t ref_bytes = 0;
   for (size_t t = 0; t < tables.size(); ++t) {
     if (!writers[t]) continue;
     std::vector<WrittenFile> files;
     if (!writers[t]->Close(&files, error)) return false;
+    next_seq[t] = writers[t]->next_file_seq();
+    if (static_cast<int>(t) == ref_idx) {
+      for (const auto& f : files) ref_bytes += f.bytes;
+    }
     all_files[t].insert(all_files[t].end(), files.begin(), files.end());
     writers[t].reset();
   }
+  bucket_ref_bytes = bucket_base_bytes + ref_bytes;
   return true;
 }
 
@@ -154,6 +155,7 @@ bool AlignedBucketWriter::Impl::RgFill(std::string* error) {
       if (!CloseBucketWriters(error)) return false;
       ++bucket;
       bucket_ref_bytes = 0;
+      bucket_base_bytes = 0;
       next_seq.assign(tables.size(), 0);
       if (!OpenBucketWriters(error)) return false;
     }
@@ -176,7 +178,8 @@ std::unique_ptr<AlignedBucketWriter> AlignedBucketWriter::Make(
   impl->ref_bpr =
       policy.ref_bytes_per_row_prior > 0 ? policy.ref_bytes_per_row_prior : 1.1;
   impl->bucket = resume.bucket;
-  impl->bucket_ref_bytes = resume.bucket_fill_bytes;
+  impl->bucket_ref_bytes = resume.bucket_bytes;
+  impl->bucket_base_bytes = resume.bucket_bytes;
 
   int ref_count = 0;
   for (size_t t = 0; t < impl->tables.size(); ++t) {
@@ -262,24 +265,52 @@ bool AlignedBucketWriter::Finish(CommitPlan* out, std::string* error) {
   auto& I = *impl_;
   if (!I.CloseBucketWriters(error)) return false;
   out->tables.clear();
+  out->resume = ResumeState{};
+  out->resume.bucket_version = I.policy.bucket_version;
+  out->resume.bucket = I.bucket;
+  out->resume.bucket_bytes = I.bucket_ref_bytes;
   for (size_t t = 0; t < I.tables.size(); ++t) {
+    out->resume.next_seq[I.tables[t].name] = I.next_seq[t];
     out->tables.push_back(TableFiles{I.tables[t].name, std::move(I.all_files[t])});
   }
   return true;
 }
 
+std::map<std::string, std::string> AlignedResumeSummary(
+    const ResumeState& resume, const std::string& table,
+    const std::string& reference_table) {
+  std::map<std::string, std::string> out;
+  out[kAlignedBucketVersionKey] = std::to_string(resume.bucket_version);
+  out[kAlignedBucketKey] = std::to_string(resume.bucket);
+  auto it = resume.next_seq.find(table);
+  out[kAlignedNextSeqKey] =
+      std::to_string(it != resume.next_seq.end() ? it->second : 0);
+  if (table == reference_table) {
+    out[kAlignedBucketBytesKey] = std::to_string(resume.bucket_bytes);
+  }
+  return out;
+}
+
 namespace {
 
-int32_t SeqFromFilename(const std::string& name) {
-  auto pos = name.rfind('_');
-  if (pos == std::string::npos) return -1;
-  auto dot = name.find('.', pos);
-  if (dot == std::string::npos) return -1;
-  try {
-    return static_cast<int32_t>(std::stoi(name.substr(pos + 1, dot - pos - 1)));
-  } catch (...) {
-    return -1;
+bool SummaryInt(const std::unordered_map<std::string, std::string>& summary,
+                const std::string& table, const char* key, int64_t* out,
+                std::string* error) {
+  auto it = summary.find(key);
+  if (it == summary.end()) {
+    if (error) {
+      *error = table + ": snapshot summary lacks " + key +
+               "; last commit predates aligned-resume declaration";
+    }
+    return false;
   }
+  const auto& s = it->second;
+  auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), *out);
+  if (ec != std::errc() || ptr != s.data() + s.size()) {
+    if (error) *error = table + ": " + key + " is not an integer: " + s;
+    return false;
+  }
+  return true;
 }
 
 }  // namespace
@@ -288,10 +319,18 @@ bool LoadAlignedResume(const std::shared_ptr<iceberg::Catalog>& catalog,
                        const iceberg::Namespace& ns,
                        const std::vector<std::string>& table_names,
                        const std::string& reference_table,
-                       const BucketFields& bucket_fields,
                        int32_t bucket_version, ResumeState* out,
                        std::string* error) {
   *out = ResumeState{};
+  out->bucket_version = bucket_version;
+
+  struct Declared {
+    int64_t bucket = 0;
+    int64_t next_seq = 0;
+    int64_t bucket_bytes = 0;
+  };
+  std::map<std::string, Declared> decls;
+
   for (const auto& name : table_names) {
     out->next_seq[name] = 0;
     auto t = catalog->LoadTable(iceberg::TableIdentifier{.ns = ns, .name = name});
@@ -300,115 +339,48 @@ bool LoadAlignedResume(const std::shared_ptr<iceberg::Catalog>& catalog,
       if (error) *error = "LoadTable(" + name + "): " + t.error().message;
       return false;
     }
-    auto tbl = t.value();
-    auto snap_r = tbl->current_snapshot();
+    auto snap_r = t.value()->current_snapshot();
     if (!snap_r.has_value() || !snap_r.value()) continue;
-    auto schema_r = tbl->schema();
-    if (!schema_r.has_value()) {
-      if (error) *error = name + ": schema: " + schema_r.error().message;
-      return false;
-    }
-    auto spec_r = tbl->spec();
-    if (!spec_r.has_value()) {
-      if (error) *error = name + ": spec: " + spec_r.error().message;
-      return false;
-    }
-    const auto& spec = spec_r.value();
+    const auto& summary = snap_r.value()->summary;
 
-    int v_pos = -1;
-    int b_pos = -1;
-    const auto spec_fields = spec->fields();
-    for (size_t i = 0; i < spec_fields.size(); ++i) {
-      if (spec_fields[i].name() == bucket_fields.version_field) {
-        v_pos = static_cast<int>(i);
-      } else if (spec_fields[i].name() == bucket_fields.bucket_field) {
-        b_pos = static_cast<int>(i);
-      }
+    int64_t version = 0;
+    Declared d;
+    if (!SummaryInt(summary, name, kAlignedBucketVersionKey, &version, error) ||
+        !SummaryInt(summary, name, kAlignedBucketKey, &d.bucket, error) ||
+        !SummaryInt(summary, name, kAlignedNextSeqKey, &d.next_seq, error)) {
+      return false;
     }
-    if (v_pos < 0 || b_pos < 0) {
+    if (version > bucket_version) {
       if (error) {
-        *error = name + ": partition spec lacks declared bucket fields " +
-                 bucket_fields.version_field + "/" + bucket_fields.bucket_field;
+        *error = name + ": declares bucket-version " + std::to_string(version) +
+                 " newer than requested " + std::to_string(bucket_version);
       }
       return false;
     }
-
-    iceberg::SnapshotCache cache(snap_r.value().get());
-    auto manifests = cache.DataManifests(tbl->io());
-    if (!manifests.has_value()) {
-      if (error) *error = name + ": manifests: " + manifests.error().message;
+    if (version < bucket_version) continue;
+    if (name == reference_table &&
+        !SummaryInt(summary, name, kAlignedBucketBytesKey, &d.bucket_bytes,
+                    error)) {
       return false;
     }
+    decls[name] = d;
+  }
 
-    struct CommittedFile {
-      int32_t bucket;
-      int64_t bytes;
-      std::string base;
-    };
-    std::vector<CommittedFile> files;
-    int32_t max_bucket = -1;
-    for (const auto& m : manifests.value()) {
-      auto reader = iceberg::ManifestReader::Make(m, tbl->io(), schema_r.value(),
-                                                  spec);
-      if (!reader.has_value()) {
-        if (error) *error = name + ": manifest: " + reader.error().message;
-        return false;
+  auto ref = decls.find(reference_table);
+  if (ref != decls.end()) {
+    out->bucket = static_cast<int32_t>(ref->second.bucket);
+    out->bucket_bytes = ref->second.bucket_bytes;
+  }
+  for (const auto& [name, d] : decls) {
+    if (d.bucket > out->bucket) {
+      if (error) {
+        *error = name + ": declares bucket " + std::to_string(d.bucket) +
+                 " past the reference frontier " + std::to_string(out->bucket);
       }
-      auto entries = reader.value()->LiveEntries();
-      if (!entries.has_value()) {
-        if (error) *error = name + ": entries: " + entries.error().message;
-        return false;
-      }
-      for (const auto& entry : entries.value()) {
-        const auto& df = entry.data_file;
-        if (!df) continue;
-        auto v_lit = df->partition.ValueAt(static_cast<size_t>(v_pos));
-        auto b_lit = df->partition.ValueAt(static_cast<size_t>(b_pos));
-        if (!v_lit.has_value() || !b_lit.has_value()) {
-          if (error) {
-            *error = name + ": partition tuple of " + df->file_path +
-                     " lacks the bucket fields";
-          }
-          return false;
-        }
-        const auto* v_val =
-            std::get_if<int32_t>(&v_lit.value().get().value());
-        const auto* b_val =
-            std::get_if<int32_t>(&b_lit.value().get().value());
-        if (!v_val || !b_val) {
-          if (error) {
-            *error = name + ": bucket partition values of " + df->file_path +
-                     " are not int32";
-          }
-          return false;
-        }
-        if (*v_val != bucket_version) continue;
-        if (*b_val > max_bucket) max_bucket = *b_val;
-        files.push_back(CommittedFile{
-            *b_val, df->file_size_in_bytes,
-            fs::path(df->file_path).filename().string()});
-      }
+      return false;
     }
-
-    const int32_t frontier = max_bucket < 0 ? 0 : max_bucket;
-    int32_t max_seq = -1;
-    int64_t fill = 0;
-    for (const auto& f : files) {
-      if (f.bucket != frontier) continue;
-      const int32_t seq = SeqFromFilename(f.base);
-      if (seq < 0) {
-        if (error) {
-          *error = name + ": committed file has no parseable sequence: " + f.base;
-        }
-        return false;
-      }
-      if (seq > max_seq) max_seq = seq;
-      fill += f.bytes;
-    }
-    out->next_seq[name] = max_seq + 1;
-    if (name == reference_table) {
-      out->bucket = frontier;
-      out->bucket_fill_bytes = max_bucket < 0 ? 0 : fill;
+    if (d.bucket == out->bucket) {
+      out->next_seq[name] = static_cast<int32_t>(d.next_seq);
     }
   }
   return true;
