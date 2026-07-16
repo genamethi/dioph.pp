@@ -563,3 +563,111 @@ present = sorted({d for degs in tab["he_degrees"] for d in degs})
 print(f"{len(tab)} chains 3 -> 137 | distinct basis elements present: "
       f"{['He_%d' % d for d in present]}")
 tab.sort_values("degree", ascending=False).head(12)
+
+# %% [markdown]
+# ## Collapse classes: chains that share a Hermite expansion
+#
+# The He-expansion is an **invariant** of a chain -- many distinct chains collapse
+# to the same one, because only a chain's "shape" (which edges raise a power, and
+# the net translation) matters, not the `n = 1` routing between them. For
+# `3 -> 137` the 37 chains collapse to just 6 expansions: e.g. **16** chains all
+# give `He_1 + 134` (the pure-translation, all-`n=1` chains), while `He_4 + 10
+# He_2 + 27` is reached by exactly one.
+
+# %%
+def collapse_classes(src, dst):
+    """Group all chains src -> dst by their He-expansion. Returns one row per
+    distinct expansion with the chain count, degree, and an example chain."""
+    tab = expand_chains(src, dst)
+    return (tab.groupby("hermite")
+               .agg(n_chains=("chain", "size"),
+                    degree=("degree", "first"),
+                    example=("chain", "first"))
+               .reset_index()
+               .sort_values(["degree", "n_chains"], ascending=[True, False])
+               .reset_index(drop=True))
+
+
+def collapse_over_bound(src, N):
+    """One DFS: every chain from `src` to any reachable target <= N, grouped by
+    (target, He-expansion). Chain counts grow fast, so keep N modest."""
+    from collections import Counter
+    counts, example, degree = Counter(), {}, {}
+
+    def dfs(node, path):
+        if path:
+            hd = to_hermite(chain_poly(path))
+            key = (node, hermite_str(hd))
+            counts[key] += 1
+            example.setdefault(key, "->".join(map(str, [src] + [p for *_, p in path])))
+            degree[key] = max(hd)
+        for m, n, p in sorted(children_mn.get(node, [])):
+            if p <= N:
+                dfs(p, path + [(node, m, n, p)])
+
+    dfs(src, [])
+    rows = [{"target": t, "hermite": h, "n_chains": c,
+             "degree": degree[(t, h)], "example": example[(t, h)]}
+            for (t, h), c in counts.items()]
+    return (pd.DataFrame(rows)
+              .sort_values(["target", "degree", "n_chains"],
+                           ascending=[True, True, False])
+              .reset_index(drop=True))
+
+
+print("collapse classes for 3 -> 137:")
+collapse_classes(3, 137)
+# Scan a bound instead (all reachable targets <= N):  collapse_over_bound(3, 60)
+
+# %% [markdown]
+# ## The composition algebra
+#
+# The edges are the maps `f_{m,n}(t) = 2^m + t^n`, and chaining is composition,
+# so the maps form a monoid under `o` with these features (all checked below):
+#
+# * **degree multiplies:** `deg(f_a o f_b) = n_a * n_b`;
+# * the `n = 1` maps are **translations** `t -> t + 2^m` and compose to
+#   translations, `f_{a,1} o f_{b,1} = t + (2^a + 2^b)` -- a closed, commutative
+#   sub-monoid;
+# * every composite is **monic** in the He basis (leading coefficient 1);
+# * composition is **not commutative** in general.
+#
+# The generators are the distinct edge maps `f_{m,n}` occurring in the data.
+
+# %%
+def compose_maps(seq, x=X):
+    """Compose edge maps f_{m,n}(t) = 2^m + t^n. `seq` is applied inner -> outer:
+    seq = [b, a] gives f_a(f_b(x)) = (f_a o f_b)(x)."""
+    poly = x
+    for (m, n) in seq:
+        poly = 2 ** m + poly ** n
+    return sp.expand(poly)
+
+
+def edge_maps(m_max=2, n_max=3):
+    """Distinct edge maps (m, n) in the data, bounded for a readable table."""
+    s = {(m, n) for lst in children_mn.values() for m, n, _ in lst
+         if m <= m_max and n <= n_max}
+    return sorted(s)
+
+
+def composition_table(gens):
+    """He-expansion of f_a o f_b for all a (rows, outer) and b (cols, inner)."""
+    data = {f"o f{b}": [hermite_str(to_hermite(compose_maps([b, a]))) for a in gens]
+            for b in gens}
+    return pd.DataFrame(data, index=[f"f{a}" for a in gens])
+
+
+gens = edge_maps(m_max=2, n_max=3)
+print("generators (m, n):", gens)
+
+# Verify the structural claims programmatically.
+assert all(sp.Poly(compose_maps([b, a]), X).degree() == a[1] * b[1]
+           for a in gens for b in gens), "degree should multiply"
+trans = [g for g in gens if g[1] == 1]
+for a in trans:
+    for b in trans:
+        assert compose_maps([b, a]) == X + (2 ** a[0] + 2 ** b[0]), "translation closure"
+print("checked: degree multiplies; n=1 maps are translations (closed, commutative)")
+
+composition_table(gens)
