@@ -1,12 +1,10 @@
 #include "primeparts/aligned_writer.h"
 
 #include <algorithm>
-#include <charconv>
 #include <cmath>
 #include <cstdint>
 #include <memory>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 #include <arrow/api.h>
@@ -19,6 +17,7 @@
 #include "iceberg/table.h"
 #include "iceberg/table_identifier.h"
 
+#include "primeparts/catalog/partition_stats.h"
 #include "primeparts/catalog/pp_iceberg_rest.h"
 #include "primeparts/writer.h"
 
@@ -54,7 +53,6 @@ struct AlignedBucketWriter::Impl {
 
   int32_t bucket = 0;
   int64_t bucket_ref_bytes = 0;
-  int64_t bucket_base_bytes = 0;
   int rgs_completed_in_file = 0;
 
   double ref_bpr = 1.1;
@@ -105,19 +103,13 @@ bool AlignedBucketWriter::Impl::OpenBucketWriters(std::string* error) {
 }
 
 bool AlignedBucketWriter::Impl::CloseBucketWriters(std::string* error) {
-  int64_t ref_bytes = 0;
   for (size_t t = 0; t < tables.size(); ++t) {
     if (!writers[t]) continue;
     std::vector<WrittenFile> files;
     if (!writers[t]->Close(&files, error)) return false;
-    next_seq[t] = writers[t]->next_file_seq();
-    if (static_cast<int>(t) == ref_idx) {
-      for (const auto& f : files) ref_bytes += f.bytes;
-    }
     all_files[t].insert(all_files[t].end(), files.begin(), files.end());
     writers[t].reset();
   }
-  bucket_ref_bytes = bucket_base_bytes + ref_bytes;
   return true;
 }
 
@@ -155,7 +147,6 @@ bool AlignedBucketWriter::Impl::RgFill(std::string* error) {
       if (!CloseBucketWriters(error)) return false;
       ++bucket;
       bucket_ref_bytes = 0;
-      bucket_base_bytes = 0;
       next_seq.assign(tables.size(), 0);
       if (!OpenBucketWriters(error)) return false;
     }
@@ -179,7 +170,6 @@ std::unique_ptr<AlignedBucketWriter> AlignedBucketWriter::Make(
       policy.ref_bytes_per_row_prior > 0 ? policy.ref_bytes_per_row_prior : 1.1;
   impl->bucket = resume.bucket;
   impl->bucket_ref_bytes = resume.bucket_bytes;
-  impl->bucket_base_bytes = resume.bucket_bytes;
 
   int ref_count = 0;
   for (size_t t = 0; t < impl->tables.size(); ++t) {
@@ -265,50 +255,65 @@ bool AlignedBucketWriter::Finish(CommitPlan* out, std::string* error) {
   auto& I = *impl_;
   if (!I.CloseBucketWriters(error)) return false;
   out->tables.clear();
-  out->resume = ResumeState{};
-  out->resume.bucket_version = I.policy.bucket_version;
-  out->resume.bucket = I.bucket;
-  out->resume.bucket_bytes = I.bucket_ref_bytes;
   for (size_t t = 0; t < I.tables.size(); ++t) {
-    out->resume.next_seq[I.tables[t].name] = I.next_seq[t];
     out->tables.push_back(TableFiles{I.tables[t].name, std::move(I.all_files[t])});
   }
   return true;
 }
 
-std::map<std::string, std::string> AlignedResumeSummary(
-    const ResumeState& resume, const std::string& table,
-    const std::string& reference_table) {
-  std::map<std::string, std::string> out;
-  out[kAlignedBucketVersionKey] = std::to_string(resume.bucket_version);
-  out[kAlignedBucketKey] = std::to_string(resume.bucket);
-  auto it = resume.next_seq.find(table);
-  out[kAlignedNextSeqKey] =
-      std::to_string(it != resume.next_seq.end() ? it->second : 0);
-  if (table == reference_table) {
-    out[kAlignedBucketBytesKey] = std::to_string(resume.bucket_bytes);
-  }
-  return out;
-}
-
 namespace {
 
-bool SummaryInt(const std::unordered_map<std::string, std::string>& summary,
-                const std::string& table, const char* key, int64_t* out,
-                std::string* error) {
-  auto it = summary.find(key);
-  if (it == summary.end()) {
+struct BucketStats {
+  int32_t frontier = 0;
+  int64_t frontier_bytes = 0;
+  int32_t frontier_files = 0;
+  bool any = false;
+};
+
+bool BucketStatsForTable(const iceberg::Table& table, const std::string& name,
+                         const BucketFields& bucket_fields,
+                         int32_t bucket_version, BucketStats* out,
+                         std::string* error) {
+  catalog::PartitionStatsSet stats;
+  if (!catalog::LoadPartitionStats(table, &stats, error)) {
+    if (error) *error = name + ": " + *error;
+    return false;
+  }
+  int v_pos = -1;
+  int b_pos = -1;
+  for (size_t i = 0; i < stats.field_names.size(); ++i) {
+    if (stats.field_names[i] == bucket_fields.version_field) {
+      v_pos = static_cast<int>(i);
+    } else if (stats.field_names[i] == bucket_fields.bucket_field) {
+      b_pos = static_cast<int>(i);
+    }
+  }
+  if (v_pos < 0 || b_pos < 0) {
     if (error) {
-      *error = table + ": snapshot summary lacks " + key +
-               "; last commit predates aligned-resume declaration";
+      *error = name + ": partition spec lacks declared bucket fields " +
+               bucket_fields.version_field + "/" + bucket_fields.bucket_field;
     }
     return false;
   }
-  const auto& s = it->second;
-  auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), *out);
-  if (ec != std::errc() || ptr != s.data() + s.size()) {
-    if (error) *error = table + ": " + key + " is not an integer: " + s;
-    return false;
+  for (const auto& row : stats.rows) {
+    if (row.data_file_count <= 0) continue;
+    const int64_t version = row.partition[v_pos];
+    if (version > bucket_version) {
+      if (error) {
+        *error = name + ": partition stats declare bucket-version " +
+                 std::to_string(version) + " newer than requested " +
+                 std::to_string(bucket_version);
+      }
+      return false;
+    }
+    if (version < bucket_version) continue;
+    const auto bucket = static_cast<int32_t>(row.partition[b_pos]);
+    if (!out->any || bucket > out->frontier) {
+      out->any = true;
+      out->frontier = bucket;
+      out->frontier_bytes = row.total_data_file_size_in_bytes;
+      out->frontier_files = row.data_file_count;
+    }
   }
   return true;
 }
@@ -319,18 +324,12 @@ bool LoadAlignedResume(const std::shared_ptr<iceberg::Catalog>& catalog,
                        const iceberg::Namespace& ns,
                        const std::vector<std::string>& table_names,
                        const std::string& reference_table,
+                       const BucketFields& bucket_fields,
                        int32_t bucket_version, ResumeState* out,
                        std::string* error) {
   *out = ResumeState{};
-  out->bucket_version = bucket_version;
 
-  struct Declared {
-    int64_t bucket = 0;
-    int64_t next_seq = 0;
-    int64_t bucket_bytes = 0;
-  };
-  std::map<std::string, Declared> decls;
-
+  std::map<std::string, BucketStats> per_table;
   for (const auto& name : table_names) {
     out->next_seq[name] = 0;
     auto t = catalog->LoadTable(iceberg::TableIdentifier{.ns = ns, .name = name});
@@ -341,46 +340,30 @@ bool LoadAlignedResume(const std::shared_ptr<iceberg::Catalog>& catalog,
     }
     auto snap_r = t.value()->current_snapshot();
     if (!snap_r.has_value() || !snap_r.value()) continue;
-    const auto& summary = snap_r.value()->summary;
-
-    int64_t version = 0;
-    Declared d;
-    if (!SummaryInt(summary, name, kAlignedBucketVersionKey, &version, error) ||
-        !SummaryInt(summary, name, kAlignedBucketKey, &d.bucket, error) ||
-        !SummaryInt(summary, name, kAlignedNextSeqKey, &d.next_seq, error)) {
+    BucketStats bs;
+    if (!BucketStatsForTable(*t.value(), name, bucket_fields, bucket_version,
+                             &bs, error)) {
       return false;
     }
-    if (version > bucket_version) {
+    per_table[name] = bs;
+  }
+
+  auto ref = per_table.find(reference_table);
+  if (ref != per_table.end() && ref->second.any) {
+    out->bucket = ref->second.frontier;
+    out->bucket_bytes = ref->second.frontier_bytes;
+  }
+  for (const auto& [name, bs] : per_table) {
+    if (!bs.any) continue;
+    if (bs.frontier > out->bucket) {
       if (error) {
-        *error = name + ": declares bucket-version " + std::to_string(version) +
-                 " newer than requested " + std::to_string(bucket_version);
+        *error = name + ": frontier bucket " + std::to_string(bs.frontier) +
+                 " is past the reference frontier " + std::to_string(out->bucket);
       }
       return false;
     }
-    if (version < bucket_version) continue;
-    if (name == reference_table &&
-        !SummaryInt(summary, name, kAlignedBucketBytesKey, &d.bucket_bytes,
-                    error)) {
-      return false;
-    }
-    decls[name] = d;
-  }
-
-  auto ref = decls.find(reference_table);
-  if (ref != decls.end()) {
-    out->bucket = static_cast<int32_t>(ref->second.bucket);
-    out->bucket_bytes = ref->second.bucket_bytes;
-  }
-  for (const auto& [name, d] : decls) {
-    if (d.bucket > out->bucket) {
-      if (error) {
-        *error = name + ": declares bucket " + std::to_string(d.bucket) +
-                 " past the reference frontier " + std::to_string(out->bucket);
-      }
-      return false;
-    }
-    if (d.bucket == out->bucket) {
-      out->next_seq[name] = static_cast<int32_t>(d.next_seq);
+    if (bs.frontier == out->bucket) {
+      out->next_seq[name] = bs.frontier_files;
     }
   }
   return true;

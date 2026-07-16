@@ -85,8 +85,6 @@ class BucketParquetWriter {
 
   bool Close(std::vector<WrittenFile>* out, std::string* error);
 
-  int32_t next_file_seq() const;
-
  private:
   struct Impl;
   std::unique_ptr<Impl> impl_;

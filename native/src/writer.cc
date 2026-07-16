@@ -483,8 +483,6 @@ bool BucketParquetWriter::RollFile(std::string* error,
   return true;
 }
 
-int32_t BucketParquetWriter::next_file_seq() const { return impl_->next_seq; }
-
 bool BucketParquetWriter::Close(std::vector<WrittenFile>* out,
                                 std::string* error) {
   if (impl_->closed) {

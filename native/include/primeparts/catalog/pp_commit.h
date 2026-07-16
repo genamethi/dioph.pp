@@ -1,7 +1,6 @@
 #pragma once
 
 #include <filesystem>
-#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -29,7 +28,6 @@ struct TableCommitSpec {
   std::shared_ptr<iceberg::PartitionSpec> spec;
   TableDeclaration declare;
   std::vector<std::shared_ptr<iceberg::DataFile>> files;
-  std::map<std::string, std::string> summary;
 };
 
 bool CommitFilesAtomic(const std::shared_ptr<iceberg::Catalog> &catalog,

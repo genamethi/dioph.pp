@@ -19,6 +19,7 @@
 #include "iceberg/table_update.h"
 #include "iceberg/update/fast_append.h"
 
+#include "primeparts/catalog/partition_stats.h"
 #include "primeparts/catalog/pp_iceberg_rest.h"
 
 namespace primeparts::catalog {
@@ -54,7 +55,6 @@ bool AssembleChange(const std::shared_ptr<iceberg::Catalog>& catalog,
   }
   auto app = std::move(app_r.value());
   for (const auto& f : spec.files) app->AppendFile(f);
-  for (const auto& [key, value] : spec.summary) app->Set(key, value);
 
   auto applied = app->iceberg::SnapshotUpdate::Apply();
   if (!applied.has_value()) {
@@ -64,9 +64,15 @@ bool AssembleChange(const std::shared_ptr<iceberg::Catalog>& catalog,
   const auto& snapshot = applied.value().snapshot;
   const std::string& branch = applied.value().target_branch;
 
+  auto stats = BuildPartitionStatsForAppend(*table, *snapshot, spec.files,
+                                            error);
+  if (!stats) return false;
+
   out->updates.push_back(std::make_unique<iceberg::table::AddSnapshot>(snapshot));
   out->updates.push_back(std::make_unique<iceberg::table::SetSnapshotRef>(
       branch, snapshot->snapshot_id, iceberg::SnapshotRefType::kBranch));
+  out->updates.push_back(
+      std::make_unique<iceberg::table::SetPartitionStatistics>(std::move(stats)));
 
   auto reqs =
       iceberg::TableRequirements::ForUpdateTable(*table->metadata(), out->updates);
