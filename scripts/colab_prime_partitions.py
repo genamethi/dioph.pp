@@ -372,3 +372,75 @@ render_table(matches)
 #   biggest exponent >= 3:      lambda g: g["k"].iloc[0] > 0 and g["n_k"].max() >= 3
 #   all q bases equal:          lambda g: g["k"].iloc[0] > 0 and g["q_k"].nunique() == 1
 # e.g.:  render_table(prime_filter(df, lambda g: g["k"].iloc[0] == 1))
+
+# %% [markdown]
+# ## Chains: the q --(m)--> p graph
+#
+# Each partition `p = 2^m + q^n` gives a directed edge **q --(m)--> p** (the base
+# `q` is the parent of `p`). With the default `n = 1` slice, a path through this
+# graph "resolves" into a sequence of `m` edge-labels -- e.g.
+# `3 -> 5 -> 7 -> 11 -> 13 -> 29 -> 37 -> 41 -> 43 -> 59 -> 67 -> 71 -> 73 -> 137`
+# reads `1,1,2,1,4,3,2,1,4,3,2,1,6` (or `6,1,2,3,4,1,2,3,4,1,2,1,1` read 137->3).
+#
+# Note: the **roots** of the n=1 graph (primes with no `n_k == 1` parent) are
+# exactly the "no n_k == 1" primes from the group filter above.
+
+# %%
+from collections import defaultdict
+
+
+def build_graph(df, n=1):
+    """Directed graph from the partitions with n_k == n: an edge
+    q --(m)--> p for each p = 2^m + q^n. Returns (children, parents, edges_df)
+    where children[q] / parents[p] are lists of (m, other_node)."""
+    sel = df[df["n_k"] == n][["p", "m_k", "q_k"]].dropna().astype(int)
+    children, parents, rows = defaultdict(list), defaultdict(list), []
+    for p, m, q in sel.itertuples(index=False):
+        children[q].append((m, p))
+        parents[p].append((m, q))
+        rows.append({"parent_q": q, "m": m, "child_p": p})
+    edges = (pd.DataFrame(rows, columns=["parent_q", "m", "child_p"])
+             .sort_values(["parent_q", "m"]).reset_index(drop=True))
+    return children, parents, edges
+
+
+def chains(src, dst, children):
+    """All simple directed paths src -> dst, each a list of (q, m, p) edges.
+    Edges strictly increase the node value, so bounding by `dst` keeps this
+    finite; still, wide targets can have exponentially many paths."""
+    out = []
+
+    def dfs(node, trail):
+        if node == dst:
+            out.append(trail[:])
+            return
+        for m, p in sorted(children.get(node, [])):
+            if p <= dst:
+                dfs(p, trail + [(node, m, p)])
+
+    dfs(src, [])
+    return out
+
+
+def labels(path):
+    """The m-sequence (edge labels) of a path returned by `chains`."""
+    return [m for _, m, _ in path]
+
+
+def nodes_of(src, path):
+    """The node sequence of a path: [src, then each child]."""
+    return [src] + [p for _, _, p in path]
+
+
+children, parents, edges = build_graph(df, n=1)
+print(f"n=1 graph: {len(set(edges.parent_q) | set(edges.child_p))} nodes, "
+      f"{len(edges)} edges")
+
+# Your example: all chains 3 -> 137 and their m-sequences.
+paths = chains(3, 137, children)
+print(f"\n{len(paths)} chains 3 -> 137:")
+for path in paths:
+    print("  ", "->".join(map(str, nodes_of(3, path))), " m:", labels(path))
+
+# The edge list is a plain DataFrame -- export it for networkx/gephi/etc.:
+# export_csv(edges, "nk1_edges.csv", download=False, echo=False)
