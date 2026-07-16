@@ -255,45 +255,51 @@ init_notebook_mode(all_interactive=True)
 
 TOTAL_WIDTH = sum(int(w.removesuffix("px")) for w in COL_WIDTHS.values())
 
-# CSS insurance: DataTables recomputes widths on draw and the header filter
-# <input> boxes carry a large default min-width -- both fight the widths passed
-# to show(). These `!important` rules (itables renders inline in the Colab cell,
-# so a page-level <style> reaches the table) pin the layout regardless.
-_css = [
-    f"table.dataTable {{ table-layout:fixed !important; "
-    f"width:{TOTAL_WIDTH}px !important; }}",
-    "table.dataTable th, table.dataTable td {"
-    " padding:2px 6px !important; overflow:hidden; text-overflow:ellipsis;"
-    " white-space:normal; text-align:center; }",
-    # Let the per-column filter inputs shrink to their column instead of forcing
-    # a wide minimum.
-    "table.dataTable thead input {"
-    " min-width:0 !important; width:100% !important; box-sizing:border-box; }",
-]
-for i, (col, w) in enumerate(COL_WIDTHS.items(), start=1):
-    _css.append(
-        f"table.dataTable th:nth-child({i}), table.dataTable td:nth-child({i})"
-        f" {{ width:{w} !important; }}"
-    )
-display(HTML("<style>\n" + "\n".join(_css) + "\n</style>"))
 
-# Documented itables recipe: columnDefs widths need autoWidth=False AND a
-# concrete total width in `style` (width:auto applies nothing).
-show(
-    df,
-    paging=True,
-    pageLength=PAGE_LENGTH,
-    lengthMenu=[10, 25, 50, 100, 250],
-    column_filters="header",
-    order=[[0, "asc"]],                          # default sort by prime_rank
-    classes="display compact",                   # tighter cell padding
-    style=f"table-layout:fixed; width:{TOTAL_WIDTH}px; margin:0",
-    autoWidth=False,
-    columnDefs=[
-        {"targets": i, "width": COL_WIDTHS[c], "className": "dt-center"}
-        for i, c in enumerate(df.columns)
-    ],
-)
+def render_table(view):
+    """Render `view` (any DataFrame with the standard columns) as the compact,
+    narrow, sortable/filterable/paginated itables grid used throughout this
+    notebook. Call it on `df` or on any filtered subset."""
+    # CSS insurance: DataTables recomputes widths on draw and the header filter
+    # <input> boxes carry a large default min-width -- both fight the widths
+    # passed to show(). These `!important` rules (itables renders inline in the
+    # Colab cell, so a page-level <style> reaches the table) pin the layout.
+    css = [
+        f"table.dataTable {{ table-layout:fixed !important; "
+        f"width:{TOTAL_WIDTH}px !important; }}",
+        "table.dataTable th, table.dataTable td {"
+        " padding:2px 6px !important; overflow:hidden; text-overflow:ellipsis;"
+        " white-space:normal; text-align:center; }",
+        "table.dataTable thead input {"
+        " min-width:0 !important; width:100% !important; box-sizing:border-box; }",
+    ]
+    for i, w in enumerate(COL_WIDTHS.values(), start=1):
+        css.append(
+            f"table.dataTable th:nth-child({i}), table.dataTable td:nth-child({i})"
+            f" {{ width:{w} !important; }}"
+        )
+    display(HTML("<style>\n" + "\n".join(css) + "\n</style>"))
+
+    # Documented itables recipe: columnDefs widths need autoWidth=False AND a
+    # concrete total width in `style` (width:auto applies nothing).
+    show(
+        view,
+        paging=True,
+        pageLength=PAGE_LENGTH,
+        lengthMenu=[10, 25, 50, 100, 250],
+        column_filters="header",
+        order=[[0, "asc"]],                      # default sort by prime_rank
+        classes="display compact",               # tighter cell padding
+        style=f"table-layout:fixed; width:{TOTAL_WIDTH}px; margin:0",
+        autoWidth=False,
+        columnDefs=[
+            {"targets": i, "width": COL_WIDTHS[c], "className": "dt-center"}
+            for i, c in enumerate(view.columns)
+        ],
+    )
+
+
+render_table(df)
 
 # %% [markdown]
 # ## Export the full table as CSV
@@ -304,18 +310,65 @@ show(
 # it straight out of the output.
 
 # %%
-csv_text = df.to_csv(index=False)
+def export_csv(view, filename="prime_partitions.csv", download=True, echo=True):
+    """Write `view` to `filename` as CSV, optionally trigger a Colab download,
+    optionally print it inline, and return the CSV text. Works on `df` or any
+    filtered subset."""
+    csv_text = view.to_csv(index=False)
+    with open(filename, "w") as f:
+        f.write(csv_text)
+    print(f"wrote {filename} ({len(view)} rows)")
+    if download:
+        try:  # In Colab, pop a download to your machine (no-op elsewhere).
+            from google.colab import files
+            files.download(filename)
+        except Exception:
+            pass
+    if echo:
+        print(csv_text)
+    return csv_text
 
-with open("prime_partitions.csv", "w") as f:
-    f.write(csv_text)
-print(f"wrote prime_partitions.csv ({len(df)} rows)")
 
-# In Colab, pop a download of the file to your machine (no-op elsewhere).
-try:
-    from google.colab import files
-    files.download("prime_partitions.csv")
-except Exception:
-    pass
+csv_text = export_csv(df)  # full table
 
-# Full CSV inline -- copy from here if you prefer.
-print(csv_text)
+# %% [markdown]
+# ## Group filters (per-prime predicates)
+#
+# Some questions are about a prime's **whole set of partitions**, not one row --
+# e.g. "primes that have partitions but *none* with `n_k == 1`". You can't get
+# that by filtering rows to `n_k != 1` (that would keep the `n_k >= 2` rows of a
+# prime that *also* has an `n_k == 1` row). You need a predicate over each
+# prime's group of rows.
+#
+# `prime_filter(df, predicate)` does exactly that: `predicate(g)` receives the
+# sub-table `g` of all rows for one prime and returns True/False; every row of
+# the matching primes is kept. Write any predicate you like -- a few examples
+# are shown.
+
+# %%
+def prime_filter(df, predicate):
+    """Keep every row of the primes whose partition group satisfies `predicate`.
+    `predicate(g)` gets the sub-DataFrame of all rows for one prime."""
+    return df.groupby("p", sort=False).filter(predicate)
+
+
+# The one you asked for: prime HAS partitions, and none of them has n_k == 1
+# (i.e. every partition is p = 2^m + q^n with n >= 2).
+def no_exponent_one(g):
+    return g["k"].iloc[0] > 0 and (g["n_k"] != 1).all()
+
+
+matches = prime_filter(df, no_exponent_one)
+print(f"{matches['p'].nunique()} of {df['p'].nunique()} primes match "
+      f"({len(matches)} rows)")
+render_table(matches)
+
+# Export the matches too (no auto-download by default; flip download=True):
+# export_csv(matches, "prime_partitions_no_exponent_one.csv", download=False)
+
+# More predicates to copy/adapt -- each receives one prime's rows `g`:
+#   exactly one partition:      lambda g: g["k"].iloc[0] == 1
+#   a base q used twice:        lambda g: g["q_k"].duplicated().any()
+#   biggest exponent >= 3:      lambda g: g["k"].iloc[0] > 0 and g["n_k"].max() >= 3
+#   all q bases equal:          lambda g: g["k"].iloc[0] > 0 and g["q_k"].nunique() == 1
+# e.g.:  render_table(prime_filter(df, lambda g: g["k"].iloc[0] == 1))
