@@ -57,8 +57,9 @@ INCLUDE_P2 = True
 # search box, per-column filter inputs, and page-of-25 pagination.
 
 # %%
-# In Colab, uncomment the next line (or run it as its own cell):
-# !pip install -q itables
+# In Colab, uncomment the next line (or run it as its own cell). itables drives
+# the interactive table; sympy is used by the Hermite section at the end.
+# !pip install -q itables sympy
 
 # %% [markdown]
 # ## Compute -- faithful port of native/src/core.c
@@ -444,3 +445,121 @@ for path in paths:
 
 # The edge list is a plain DataFrame -- export it for networkx/gephi/etc.:
 # export_csv(edges, "nk1_edges.csv", download=False, echo=False)
+
+# %% [markdown]
+# ## Chains -> Hermite polynomials
+#
+# Your substitution, made explicit. Each edge `q --(m,n)--> p` is the partition
+# `p = 2^m + q^n`, i.e. the map `f(t) = 2^m + t^n` applied to the parent `q`.
+# Composing the edge maps along a chain, from the **root outward**, writes the
+# leaf prime as a polynomial in the root variable `x` -- and that polynomial is
+# an integer combination of probabilists' Hermite polynomials `He_n`. Each
+# `He_n` alternates in sign; in the combination the negative terms cancel,
+# leaving the (positive) binomial expansion. Example, root `3`:
+#
+# ```
+# 3 --(1,2)--> 11 --(4,2)--> 137
+# p(x) = 16 + (2 + x^2)^2 = x^4 + 4x^2 + 20 = He_4 + 10 He_2 + 27,   p(3) = 137
+# ```
+#
+# `He_4 = x^4 - 6x^2 + 3`; its `-6x^2 + 3` is exactly cancelled by `10 He_2 + 27`.
+# Enumerating the chains to a target gives you all such combinations; distinct
+# chains can collapse to the same `He` expansion. Needs `sympy` (in Colab already).
+
+# %%
+import sympy as sp
+from collections import defaultdict
+
+X = sp.symbols("x")
+
+
+def He(n, x=X):
+    """Probabilists' (monic) Hermite polynomial He_n."""
+    return sp.hermite_prob(n, x)
+
+
+def build_graph_mn(df):
+    """Full graph over ALL exponents n: edge q --(m,n)--> p for p = 2^m + q^n.
+    children_mn[q] = list of (m, n, p)."""
+    sel = df.dropna(subset=["n_k"])[["p", "m_k", "n_k", "q_k"]].astype(int)
+    children_mn = defaultdict(list)
+    for p, m, n, q in sel.itertuples(index=False):
+        children_mn[q].append((m, n, p))
+    return children_mn
+
+
+def chains_mn(src, dst, children_mn):
+    """All simple paths src -> dst in the full (m, n) graph; each a list of
+    (q, m, n, p) edges. Edges strictly increase value, so `dst` bounds it."""
+    out = []
+
+    def dfs(node, trail):
+        if node == dst:
+            out.append(trail[:])
+            return
+        for m, n, p in sorted(children_mn.get(node, [])):
+            if p <= dst:
+                dfs(p, trail + [(node, m, n, p)])
+
+    dfs(src, [])
+    return out
+
+
+def chain_poly(path, x=X):
+    """Compose the edge maps f(t) = 2^m + t^n from the root outward; return the
+    leaf prime as a sympy polynomial in x (x = the root / base value)."""
+    poly = x
+    for _q, m, n, _p in path:
+        poly = 2 ** m + poly ** n
+    return sp.expand(poly)
+
+
+def to_hermite(expr, x=X):
+    """Integer coefficients c_n with expr = sum_n c_n He_n (monic He basis)."""
+    P = sp.Poly(sp.expand(expr), x)
+    out = {}
+    while P.as_expr() != 0:
+        d = P.degree()
+        c = P.LC()
+        out[d] = out.get(d, 0) + c
+        P = sp.Poly(sp.expand(P.as_expr() - c * He(d, x)), x)
+        if d == 0:
+            break
+    return dict(sorted(out.items(), reverse=True))
+
+
+def hermite_str(hd):
+    """Pretty-print a {degree: coeff} Hermite expansion."""
+    return " + ".join((f"{c}*He_{d}" if d else f"{c}") for d, c in hd.items())
+
+
+children_mn = build_graph_mn(df)
+
+
+def expand_chains(src, dst):
+    """Enumerate every chain src -> dst, compose it to a polynomial in the root,
+    and expand in the He_n basis. One row per chain."""
+    rows = []
+    for path in chains_mn(src, dst, children_mn):
+        nodes = [src] + [p for *_, p in path]
+        poly = chain_poly(path)
+        hd = to_hermite(poly)
+        assert poly.subs(X, src) == dst          # the chain rebuilds dst
+        rows.append({
+            "chain": "->".join(map(str, nodes)),
+            "m_seq": [m for _, m, _, _ in path],
+            "n_seq": [n for _, _, n, _ in path],
+            "poly": str(poly),
+            "hermite": hermite_str(hd),
+            "degree": max(hd),
+            "he_degrees": tuple(sorted(hd)),
+        })
+    return pd.DataFrame(rows)
+
+
+# Your example, fully enumerated and expanded:
+tab = expand_chains(3, 137)
+present = sorted({d for degs in tab["he_degrees"] for d in degs})
+print(f"{len(tab)} chains 3 -> 137 | distinct basis elements present: "
+      f"{['He_%d' % d for d in present]}")
+tab.sort_values("degree", ascending=False).head(12)
