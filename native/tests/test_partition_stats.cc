@@ -1,4 +1,5 @@
 #include "primeparts/catalog/partition_stats.h"
+#include "primeparts/common/arrow_init.h"
 #include "primeparts/schemas.h"
 
 #include <cstdint>
@@ -8,7 +9,9 @@
 #include <string>
 #include <vector>
 
+#include "iceberg/arrow/arrow_io_util.h"
 #include "iceberg/expression/literal.h"
+#include "iceberg/file_io.h"
 #include "iceberg/manifest/manifest_entry.h"
 #include "iceberg/row/partition_values.h"
 #include "iceberg/snapshot.h"
@@ -102,9 +105,13 @@ int main() {
     return 1;
   }
 
+  primeparts::common::EnsureArrowRegistration();
+  std::shared_ptr<iceberg::FileIO> io = iceberg::arrow::MakeLocalFileIO();
+
   std::shared_ptr<iceberg::PartitionStatisticsFile> file;
   if (!ppc::WritePartitionStatsFile(stats, snap1.snapshot_id,
-                                    "file://" + out.string(), &file, &error)) {
+                                    "file://" + out.string(), io, &file,
+                                    &error)) {
     std::cerr << error << "\n";
     return 1;
   }
@@ -118,7 +125,7 @@ int main() {
     std::cerr << error << "\n";
     return 1;
   }
-  if (!ppc::ReadPartitionStatsFile(*file, &loaded, &error)) {
+  if (!ppc::ReadPartitionStatsFile(*file, io, &loaded, &error)) {
     std::cerr << error << "\n";
     return 1;
   }

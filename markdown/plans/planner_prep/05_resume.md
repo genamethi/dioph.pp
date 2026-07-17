@@ -11,6 +11,7 @@ grep gate: `grep -rn 'pp\.aligned\|AlignedResumeSummary\|next_file_seq\|SeqFromF
 ## notes
 
 - Resume reflects only COMMITTED files; staged debris from a crashed run cannot collide (writer filename tokens).
-- A failed transaction can orphan an unregistered partition-stats parquet in the metadata dir — same debris class as the manifests Apply writes; no cleanup pass exists.
+- A failed transaction can orphan an unregistered partition-stats parquet in the metadata dir — same debris class as the manifests Apply writes; no cleanup pass exists. A retried commit of the same snapshot id overwrites the orphan (deterministic filename).
 - Stats registration is per snapshot; superseded stats files accumulate like old metadata.json versions (no expiry surface).
 - next_seq = data_file_count leans on the dense-from-0 per-bucket seq invariant; only the aligned writer commits into these tables.
+- rework (post-review): stats file write/read moved onto the vendored `Writer`/`Reader` registries through FileIO — `StatsFileSchema` (iceberg schema, field ids 1–12) drives both sides; hand-rolled `parquet::arrow::WriteTable`/`OpenFile`, `PARQUET:field_id` tagging, `StripFileScheme`, and tmp+rename all deleted. Atomicity comes from the catalog transaction (the file is unreferenced until SetPartitionStatistics lands), matching object stores with no rename. `WritePartitionStatsFile`/`ReadPartitionStatsFile` signatures gained `io`; descriptor size from `Writer::length()`.

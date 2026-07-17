@@ -49,9 +49,11 @@ bool MergePartitionStats(
 bool WritePartitionStatsFile(
     const PartitionStatsSet& stats, int64_t snapshot_id,
     const std::string& metadata_dir_uri,
+    const std::shared_ptr<iceberg::FileIO>& io,
     std::shared_ptr<iceberg::PartitionStatisticsFile>* out, std::string* error);
 
 bool ReadPartitionStatsFile(const iceberg::PartitionStatisticsFile& file,
+                            const std::shared_ptr<iceberg::FileIO>& io,
                             PartitionStatsSet* stats, std::string* error);
 
 bool LoadPartitionStats(const iceberg::Table& table, PartitionStatsSet* out,

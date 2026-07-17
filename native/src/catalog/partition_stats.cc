@@ -2,21 +2,21 @@
 
 #include <algorithm>
 #include <chrono>
-#include <filesystem>
 #include <map>
 #include <memory>
 #include <string>
-#include <system_error>
 #include <utility>
 #include <variant>
 #include <vector>
 
 #include <arrow/api.h>
-#include <arrow/io/file.h>
-#include <parquet/arrow/reader.h>
-#include <parquet/arrow/writer.h>
+#include <arrow/c/bridge.h>
 
 #include "iceberg/expression/literal.h"
+#include "iceberg/file_format.h"
+#include "iceberg/file_io.h"
+#include "iceberg/file_reader.h"
+#include "iceberg/file_writer.h"
 #include "iceberg/manifest/manifest_entry.h"
 #include "iceberg/manifest/manifest_list.h"
 #include "iceberg/manifest/manifest_reader.h"
@@ -33,13 +33,9 @@
 #include "iceberg/transform.h"
 #include "iceberg/type.h"
 
-#include "primeparts/common/uri.h"
-
 namespace primeparts::catalog {
 
 namespace {
-
-namespace fs = std::filesystem;
 
 constexpr int32_t kPartitionFieldId = 1;
 constexpr int32_t kSpecIdFieldId = 2;
@@ -54,8 +50,53 @@ constexpr int32_t kTotalRecordCountFieldId = 10;
 constexpr int32_t kLastUpdatedAtFieldId = 11;
 constexpr int32_t kLastUpdatedSnapshotIdFieldId = 12;
 
-std::shared_ptr<arrow::KeyValueMetadata> FieldIdMeta(int32_t id) {
-  return arrow::key_value_metadata({{"PARQUET:field_id", std::to_string(id)}});
+std::shared_ptr<iceberg::Type> IcebergTypeFor(iceberg::TypeId type) {
+  return type == iceberg::TypeId::kInt
+             ? std::static_pointer_cast<iceberg::Type>(iceberg::int32())
+             : std::static_pointer_cast<iceberg::Type>(iceberg::int64());
+}
+
+std::shared_ptr<iceberg::Schema> StatsFileSchema(
+    const PartitionStatsSet& stats) {
+  std::vector<iceberg::SchemaField> tuple_fields;
+  for (size_t i = 0; i < stats.field_names.size(); ++i) {
+    tuple_fields.push_back(iceberg::SchemaField::MakeOptional(
+        stats.field_ids[i], stats.field_names[i],
+        IcebergTypeFor(stats.field_types[i])));
+  }
+  std::vector<iceberg::SchemaField> fields;
+  fields.push_back(iceberg::SchemaField::MakeRequired(
+      kPartitionFieldId, "partition",
+      std::make_shared<iceberg::StructType>(std::move(tuple_fields))));
+  fields.push_back(iceberg::SchemaField::MakeRequired(
+      kSpecIdFieldId, "spec_id", iceberg::int32()));
+  fields.push_back(iceberg::SchemaField::MakeRequired(
+      kDataRecordCountFieldId, "data_record_count", iceberg::int64()));
+  fields.push_back(iceberg::SchemaField::MakeRequired(
+      kDataFileCountFieldId, "data_file_count", iceberg::int32()));
+  fields.push_back(iceberg::SchemaField::MakeRequired(
+      kTotalDataFileSizeFieldId, "total_data_file_size_in_bytes",
+      iceberg::int64()));
+  fields.push_back(iceberg::SchemaField::MakeOptional(
+      kPositionDeleteRecordCountFieldId, "position_delete_record_count",
+      iceberg::int64()));
+  fields.push_back(iceberg::SchemaField::MakeOptional(
+      kPositionDeleteFileCountFieldId, "position_delete_file_count",
+      iceberg::int32()));
+  fields.push_back(iceberg::SchemaField::MakeOptional(
+      kEqualityDeleteRecordCountFieldId, "equality_delete_record_count",
+      iceberg::int64()));
+  fields.push_back(iceberg::SchemaField::MakeOptional(
+      kEqualityDeleteFileCountFieldId, "equality_delete_file_count",
+      iceberg::int32()));
+  fields.push_back(iceberg::SchemaField::MakeOptional(
+      kTotalRecordCountFieldId, "total_record_count", iceberg::int64()));
+  fields.push_back(iceberg::SchemaField::MakeOptional(
+      kLastUpdatedAtFieldId, "last_updated_at", iceberg::int64()));
+  fields.push_back(iceberg::SchemaField::MakeOptional(
+      kLastUpdatedSnapshotIdFieldId, "last_updated_snapshot_id",
+      iceberg::int64()));
+  return std::make_shared<iceberg::Schema>(std::move(fields), 0);
 }
 
 int64_t UnixMs(const iceberg::TimePointMs& tp) {
@@ -90,8 +131,12 @@ bool TupleFromPartitionValues(const iceberg::PartitionValues& values,
       out->push_back(*v64);
     } else {
       if (error) {
-        *error = where + ": partition value " + std::to_string(i) +
-                 " is not an integer type";
+        *error = "NotImplemented: " + where + ": partition value " +
+                 std::to_string(i) + " holds " +
+                 lit.value().get().ToString() +
+                 ", not an int or long; stats tuples are int/long only — "
+                 "supporting it requires carrying iceberg::Literal tuples "
+                 "through PartitionStatsRow and the stats file schema";
       }
       return false;
     }
@@ -157,8 +202,11 @@ bool SingleSpecOnly(const iceberg::Table& table, std::string* error) {
   }
   if (metadata->partition_specs.size() > 1) {
     if (error) {
-      *error = "partition stats: tables with evolved partition specs are not "
-               "implemented";
+      *error = "NotImplemented: table has " +
+               std::to_string(metadata->partition_specs.size()) +
+               " partition specs; partition stats handle a single spec only — "
+               "supporting evolution requires the spec's unified partition "
+               "tuple (field union across specs keyed by partition field id)";
     }
     return false;
   }
@@ -176,8 +224,13 @@ bool PartitionStatsFields(const iceberg::Schema& schema,
     if (!pf.transform() ||
         pf.transform()->transform_type() != iceberg::TransformType::kIdentity) {
       if (error) {
-        *error = "partition stats: non-identity transform on partition field " +
-                 std::string(pf.name()) + " is not implemented";
+        *error = "NotImplemented: partition field " + std::string(pf.name()) +
+                 " uses transform '" +
+                 (pf.transform() ? pf.transform()->ToString()
+                                 : std::string("null")) +
+                 "'; partition stats resolve identity transforms only — "
+                 "supporting it requires keying stats rows by the transformed "
+                 "partition value type";
       }
       return false;
     }
@@ -198,8 +251,11 @@ bool PartitionStatsFields(const iceberg::Schema& schema,
     const auto type = source->type()->type_id();
     if (type != iceberg::TypeId::kInt && type != iceberg::TypeId::kLong) {
       if (error) {
-        *error = "partition stats: non-integer partition field " +
-                 std::string(pf.name()) + " is not implemented";
+        *error = "NotImplemented: partition field " + std::string(pf.name()) +
+                 " has source type " + source->type()->ToString() +
+                 "; partition stats tuples are int/long only — supporting it "
+                 "requires carrying iceberg::Literal tuples through "
+                 "PartitionStatsRow and the stats file schema";
       }
       return false;
     }
@@ -237,8 +293,12 @@ bool ComputePartitionStats(const iceberg::Table& table,
   }
   if (!deletes.value().empty()) {
     if (error) {
-      *error = "partition stats: snapshots with delete manifests are not "
-               "implemented";
+      *error = "NotImplemented: snapshot " +
+               std::to_string(snapshot.snapshot_id) + " carries " +
+               std::to_string(deletes.value().size()) +
+               " delete manifests; partition stats accumulate data manifests "
+               "only — supporting deletes requires walking delete entries "
+               "into the position/equality delete columns of each stats row";
     }
     return false;
   }
@@ -299,6 +359,7 @@ bool MergePartitionStats(
 bool WritePartitionStatsFile(
     const PartitionStatsSet& stats, int64_t snapshot_id,
     const std::string& metadata_dir_uri,
+    const std::shared_ptr<iceberg::FileIO>& io,
     std::shared_ptr<iceberg::PartitionStatisticsFile>* out,
     std::string* error) {
   std::vector<const PartitionStatsRow*> sorted;
@@ -314,8 +375,7 @@ bool WritePartitionStatsFile(
   for (size_t i = 0; i < stats.field_names.size(); ++i) {
     tuple_fields.push_back(arrow::field(stats.field_names[i],
                                         ArrowTypeFor(stats.field_types[i]),
-                                        /*nullable=*/true,
-                                        FieldIdMeta(stats.field_ids[i])));
+                                        true));
     if (stats.field_types[i] == iceberg::TypeId::kInt) {
       tuple_builders.push_back(std::make_unique<arrow::Int32Builder>());
     } else {
@@ -407,182 +467,195 @@ bool WritePartitionStatsFile(
   }
 
   auto schema = arrow::schema({
-      arrow::field("partition", arrow::struct_(tuple_fields), false,
-                   FieldIdMeta(kPartitionFieldId)),
-      arrow::field("spec_id", arrow::int32(), false,
-                   FieldIdMeta(kSpecIdFieldId)),
-      arrow::field("data_record_count", arrow::int64(), false,
-                   FieldIdMeta(kDataRecordCountFieldId)),
-      arrow::field("data_file_count", arrow::int32(), false,
-                   FieldIdMeta(kDataFileCountFieldId)),
-      arrow::field("total_data_file_size_in_bytes", arrow::int64(), false,
-                   FieldIdMeta(kTotalDataFileSizeFieldId)),
-      arrow::field("position_delete_record_count", arrow::int64(), true,
-                   FieldIdMeta(kPositionDeleteRecordCountFieldId)),
-      arrow::field("position_delete_file_count", arrow::int32(), true,
-                   FieldIdMeta(kPositionDeleteFileCountFieldId)),
-      arrow::field("equality_delete_record_count", arrow::int64(), true,
-                   FieldIdMeta(kEqualityDeleteRecordCountFieldId)),
-      arrow::field("equality_delete_file_count", arrow::int32(), true,
-                   FieldIdMeta(kEqualityDeleteFileCountFieldId)),
-      arrow::field("total_record_count", arrow::int64(), true,
-                   FieldIdMeta(kTotalRecordCountFieldId)),
-      arrow::field("last_updated_at", arrow::int64(), true,
-                   FieldIdMeta(kLastUpdatedAtFieldId)),
-      arrow::field("last_updated_snapshot_id", arrow::int64(), true,
-                   FieldIdMeta(kLastUpdatedSnapshotIdFieldId)),
+      arrow::field("partition", arrow::struct_(tuple_fields), false),
+      arrow::field("spec_id", arrow::int32(), false),
+      arrow::field("data_record_count", arrow::int64(), false),
+      arrow::field("data_file_count", arrow::int32(), false),
+      arrow::field("total_data_file_size_in_bytes", arrow::int64(), false),
+      arrow::field("position_delete_record_count", arrow::int64(), true),
+      arrow::field("position_delete_file_count", arrow::int32(), true),
+      arrow::field("equality_delete_record_count", arrow::int64(), true),
+      arrow::field("equality_delete_file_count", arrow::int32(), true),
+      arrow::field("total_record_count", arrow::int64(), true),
+      arrow::field("last_updated_at", arrow::int64(), true),
+      arrow::field("last_updated_snapshot_id", arrow::int64(), true),
   });
-  auto arrow_table = arrow::Table::Make(
-      schema,
+  auto batch = arrow::RecordBatch::Make(
+      schema, static_cast<int64_t>(sorted.size()),
       {struct_r.ValueOrDie(), spec_id_a, data_records_a, data_files_a,
        total_size_a, pos_del_records_a, pos_del_files_a, eq_del_records_a,
        eq_del_files_a, total_records_a, updated_at_a, updated_snap_a});
 
   const std::string filename =
       "partition-stats-" + std::to_string(snapshot_id) + ".parquet";
-  const std::string uri = metadata_dir_uri + "/" + filename;
-  const fs::path path = primeparts::common::StripFileScheme(uri);
-  const fs::path tmp =
-      path.parent_path() / ("." + path.filename().string() + ".tmp");
-  std::error_code ec;
-  fs::create_directories(path.parent_path(), ec);
-  fs::remove(tmp, ec);
+  const std::string location = metadata_dir_uri + "/" + filename;
 
-  auto sink_r = arrow::io::FileOutputStream::Open(tmp.string());
-  if (!ok(sink_r.status())) return false;
-  auto st = parquet::arrow::WriteTable(
-      *arrow_table, arrow::default_memory_pool(), sink_r.ValueOrDie(),
-      std::max<int64_t>(1, static_cast<int64_t>(sorted.size())));
-  if (!ok(st)) return false;
-  if (!ok(sink_r.ValueOrDie()->Close())) return false;
-  fs::rename(tmp, path, ec);
-  if (ec) {
+  iceberg::WriterOptions wopts;
+  wopts.path = location;
+  wopts.schema = StatsFileSchema(stats);
+  wopts.io = io;
+  auto writer_r = iceberg::WriterFactoryRegistry::Open(
+      iceberg::FileFormatType::kParquet, wopts);
+  if (!writer_r.has_value()) {
     if (error) {
-      *error = "rename " + tmp.string() + " -> " + path.string() + ": " +
-               ec.message();
+      *error = "WriterFactoryRegistry::Open " + location + ": " +
+               writer_r.error().message;
     }
+    return false;
+  }
+  auto writer = std::move(writer_r.value());
+
+  ArrowArray c_array;
+  if (!ok(arrow::ExportRecordBatch(*batch, &c_array))) return false;
+  auto write_st = writer->Write(&c_array);
+  if (!write_st.has_value()) {
+    if (error) *error = "Writer::Write: " + write_st.error().message;
+    return false;
+  }
+  auto close_st = writer->Close();
+  if (!close_st.has_value()) {
+    if (error) *error = "Writer::Close: " + close_st.error().message;
+    return false;
+  }
+  auto length_r = writer->length();
+  if (!length_r.has_value()) {
+    if (error) *error = "Writer::length: " + length_r.error().message;
     return false;
   }
 
   auto result = std::make_shared<iceberg::PartitionStatisticsFile>();
   result->snapshot_id = snapshot_id;
-  result->path = uri;
-  result->file_size_in_bytes = static_cast<int64_t>(fs::file_size(path, ec));
+  result->path = location;
+  result->file_size_in_bytes = length_r.value();
   *out = std::move(result);
   return true;
 }
 
 bool ReadPartitionStatsFile(const iceberg::PartitionStatisticsFile& file,
+                            const std::shared_ptr<iceberg::FileIO>& io,
                             PartitionStatsSet* stats, std::string* error) {
   stats->rows.clear();
-  const std::string path = primeparts::common::StripFileScheme(file.path);
-  auto rf = arrow::io::ReadableFile::Open(path);
-  if (!rf.ok()) {
-    if (error) *error = rf.status().ToString();
-    return false;
-  }
-  auto reader_r =
-      parquet::arrow::OpenFile(rf.ValueOrDie(), arrow::default_memory_pool());
-  if (!reader_r.ok()) {
-    if (error) *error = reader_r.status().ToString();
-    return false;
-  }
-  std::shared_ptr<arrow::Table> table;
-  auto st = reader_r.ValueOrDie()->ReadTable(&table);
-  if (!st.ok()) {
-    if (error) *error = st.ToString();
-    return false;
-  }
-  auto combined = table->CombineChunks();
-  if (!combined.ok()) {
-    if (error) *error = combined.status().ToString();
-    return false;
-  }
-  table = combined.ValueOrDie();
 
-  auto column = [&](const std::string& name) -> std::shared_ptr<arrow::Array> {
-    auto col = table->GetColumnByName(name);
-    if (!col || col->num_chunks() == 0) return nullptr;
-    return col->chunk(0);
-  };
-  auto required = [&](const std::string& name,
-                      std::shared_ptr<arrow::Array>* out_arr) {
-    *out_arr = column(name);
-    if (!*out_arr) {
-      if (error) *error = file.path + ": missing column " + name;
-      return false;
+  iceberg::ReaderOptions ropts;
+  ropts.path = file.path;
+  if (file.file_size_in_bytes > 0) {
+    ropts.length = static_cast<size_t>(file.file_size_in_bytes);
+  }
+  ropts.io = io;
+  ropts.projection = StatsFileSchema(*stats);
+  auto reader_r = iceberg::ReaderFactoryRegistry::Open(
+      iceberg::FileFormatType::kParquet, ropts);
+  if (!reader_r.has_value()) {
+    if (error) {
+      *error = "ReaderFactoryRegistry::Open " + file.path + ": " +
+               reader_r.error().message;
     }
-    return true;
-  };
-
-  std::shared_ptr<arrow::Array> partition_a, spec_id_a, data_records_a,
-      data_files_a, total_size_a;
-  if (!required("partition", &partition_a) ||
-      !required("spec_id", &spec_id_a) ||
-      !required("data_record_count", &data_records_a) ||
-      !required("data_file_count", &data_files_a) ||
-      !required("total_data_file_size_in_bytes", &total_size_a)) {
     return false;
   }
-  auto total_records_a = column("total_record_count");
-  auto updated_at_a = column("last_updated_at");
-  auto updated_snap_a = column("last_updated_snapshot_id");
-
-  if (partition_a->type_id() != arrow::Type::STRUCT) {
-    if (error) *error = file.path + ": partition column is not a struct";
+  auto reader = std::move(reader_r.value());
+  auto cschema_r = reader->Schema();
+  if (!cschema_r.has_value()) {
+    if (error) *error = "Reader::Schema: " + cschema_r.error().message;
     return false;
   }
-  const auto& tuple = static_cast<const arrow::StructArray&>(*partition_a);
-  std::vector<std::shared_ptr<arrow::Array>> tuple_cols;
-  for (size_t i = 0; i < stats->field_names.size(); ++i) {
-    auto child = tuple.GetFieldByName(stats->field_names[i]);
-    if (!child) {
-      if (error) {
-        *error = file.path + ": partition struct missing field " +
-                 stats->field_names[i];
-      }
-      return false;
-    }
-    const auto want = stats->field_types[i] == iceberg::TypeId::kInt
-                          ? arrow::Type::INT32
-                          : arrow::Type::INT64;
-    if (child->type_id() != want) {
-      if (error) {
-        *error = file.path + ": partition field " + stats->field_names[i] +
-                 " has unexpected physical type";
-      }
-      return false;
-    }
-    tuple_cols.push_back(std::move(child));
+  ArrowSchema cschema = cschema_r.value();
+  auto arrow_schema_r = arrow::ImportSchema(&cschema);
+  if (!arrow_schema_r.ok()) {
+    if (error) *error = arrow_schema_r.status().ToString();
+    return false;
   }
+  auto arrow_schema = std::move(arrow_schema_r).ValueOrDie();
 
-  const int64_t n = table->num_rows();
   auto i64_at = [](const arrow::Array& a, int64_t i) {
     return a.type_id() == arrow::Type::INT32
                ? static_cast<int64_t>(
                      static_cast<const arrow::Int32Array&>(a).Value(i))
                : static_cast<const arrow::Int64Array&>(a).Value(i);
   };
-  for (int64_t i = 0; i < n; ++i) {
-    PartitionStatsRow row;
-    for (const auto& arr : tuple_cols) {
-      row.partition.push_back(i64_at(*arr, i));
+
+  while (true) {
+    auto next_r = reader->Next();
+    if (!next_r.has_value()) {
+      if (error) *error = "Reader::Next: " + next_r.error().message;
+      return false;
     }
-    row.spec_id = static_cast<const arrow::Int32Array&>(*spec_id_a).Value(i);
-    row.data_record_count = i64_at(*data_records_a, i);
-    row.data_file_count =
-        static_cast<const arrow::Int32Array&>(*data_files_a).Value(i);
-    row.total_data_file_size_in_bytes = i64_at(*total_size_a, i);
-    row.total_record_count = total_records_a && !total_records_a->IsNull(i)
-                                 ? i64_at(*total_records_a, i)
-                                 : row.data_record_count;
-    if (updated_at_a && !updated_at_a->IsNull(i)) {
-      row.last_updated_at = i64_at(*updated_at_a, i);
+    if (!next_r.value().has_value()) break;
+    ArrowArray c_array = std::move(next_r.value().value());
+    auto batch_r = arrow::ImportRecordBatch(&c_array, arrow_schema);
+    if (!batch_r.ok()) {
+      if (error) *error = batch_r.status().ToString();
+      return false;
     }
-    if (updated_snap_a && !updated_snap_a->IsNull(i)) {
-      row.last_updated_snapshot_id = i64_at(*updated_snap_a, i);
+    auto rb = std::move(batch_r).ValueOrDie();
+    if (rb->num_columns() != 12) {
+      if (error) {
+        *error = file.path + ": expected 12 stats columns, got " +
+                 std::to_string(rb->num_columns());
+      }
+      return false;
     }
-    stats->rows.push_back(std::move(row));
+    const auto& partition_a = rb->column(0);
+    if (partition_a->type_id() != arrow::Type::STRUCT) {
+      if (error) *error = file.path + ": partition column is not a struct";
+      return false;
+    }
+    const auto& tuple = static_cast<const arrow::StructArray&>(*partition_a);
+    if (tuple.num_fields() != static_cast<int>(stats->field_names.size())) {
+      if (error) {
+        *error = file.path + ": partition struct has " +
+                 std::to_string(tuple.num_fields()) +
+                 " fields, spec declares " +
+                 std::to_string(stats->field_names.size());
+      }
+      return false;
+    }
+    const auto& spec_id_a = rb->column(1);
+    const auto& data_records_a = rb->column(2);
+    const auto& data_files_a = rb->column(3);
+    const auto& total_size_a = rb->column(4);
+    const auto& pos_del_records_a = rb->column(5);
+    const auto& pos_del_files_a = rb->column(6);
+    const auto& eq_del_records_a = rb->column(7);
+    const auto& eq_del_files_a = rb->column(8);
+    const auto& total_records_a = rb->column(9);
+    const auto& updated_at_a = rb->column(10);
+    const auto& updated_snap_a = rb->column(11);
+
+    for (int64_t i = 0; i < rb->num_rows(); ++i) {
+      PartitionStatsRow row;
+      for (int f = 0; f < tuple.num_fields(); ++f) {
+        row.partition.push_back(i64_at(*tuple.field(f), i));
+      }
+      row.spec_id = static_cast<const arrow::Int32Array&>(*spec_id_a).Value(i);
+      row.data_record_count = i64_at(*data_records_a, i);
+      row.data_file_count =
+          static_cast<const arrow::Int32Array&>(*data_files_a).Value(i);
+      row.total_data_file_size_in_bytes = i64_at(*total_size_a, i);
+      if (!pos_del_records_a->IsNull(i)) {
+        row.position_delete_record_count = i64_at(*pos_del_records_a, i);
+      }
+      if (!pos_del_files_a->IsNull(i)) {
+        row.position_delete_file_count = static_cast<int32_t>(
+            i64_at(*pos_del_files_a, i));
+      }
+      if (!eq_del_records_a->IsNull(i)) {
+        row.equality_delete_record_count = i64_at(*eq_del_records_a, i);
+      }
+      if (!eq_del_files_a->IsNull(i)) {
+        row.equality_delete_file_count = static_cast<int32_t>(
+            i64_at(*eq_del_files_a, i));
+      }
+      row.total_record_count = !total_records_a->IsNull(i)
+                                   ? i64_at(*total_records_a, i)
+                                   : row.data_record_count;
+      if (!updated_at_a->IsNull(i)) {
+        row.last_updated_at = i64_at(*updated_at_a, i);
+      }
+      if (!updated_snap_a->IsNull(i)) {
+        row.last_updated_snapshot_id = i64_at(*updated_snap_a, i);
+      }
+      stats->rows.push_back(std::move(row));
+    }
   }
   return true;
 }
@@ -613,7 +686,7 @@ bool StatsForSnapshot(const iceberg::Table& table,
                                 error)) {
         return false;
       }
-      return ReadPartitionStatsFile(*entry, out, error);
+      return ReadPartitionStatsFile(*entry, table.io(), out, error);
     }
   }
   return ComputePartitionStats(table, snapshot, out, error);
@@ -681,8 +754,8 @@ std::shared_ptr<iceberg::PartitionStatisticsFile> BuildPartitionStatsForAppend(
   }
   std::shared_ptr<iceberg::PartitionStatisticsFile> out;
   if (!WritePartitionStatsFile(stats, new_snapshot.snapshot_id,
-                               metadata_location.substr(0, slash), &out,
-                               error)) {
+                               metadata_location.substr(0, slash), table.io(),
+                               &out, error)) {
     return nullptr;
   }
   return out;

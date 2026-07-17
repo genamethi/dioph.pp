@@ -368,10 +368,12 @@ std::unique_ptr<BucketParquetWriter> BucketParquetWriter::Make(
   for (const auto& sc : config.stat_columns) {
     ResolvedStatColumn rs;
     rs.sorted = sc.sorted;
+    std::string type_name;
     for (const auto& f : config.schema->fields()) {
       if (f.name() == sc.name) {
         rs.field_id = f.field_id();
         rs.type = f.type()->type_id();
+        type_name = f.type()->ToString();
         break;
       }
     }
@@ -380,7 +382,14 @@ std::unique_ptr<BucketParquetWriter> BucketParquetWriter::Make(
       return nullptr;
     }
     if (rs.type != iceberg::TypeId::kInt && rs.type != iceberg::TypeId::kLong) {
-      if (error) *error = "stat column is not an integer type: " + sc.name;
+      if (error) {
+        *error = "NotImplemented: declared stat column '" + sc.name +
+                 "' has type " + type_name +
+                 "; bound capture is implemented for int and long only — "
+                 "honoring this declaration requires computing min/max as an "
+                 "iceberg::Literal of that type and serializing it via "
+                 "Literal::Serialize";
+      }
       return nullptr;
     }
     rs.arrow_index = impl->arrow_schema->GetFieldIndex(sc.name);

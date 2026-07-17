@@ -27,11 +27,13 @@ Branch `planner-prep` (off `tui-query`). One commit per phase, message = phase f
 
 ## holes registry
 
-- `SourceTableReader::Impl::OpenRowGroupTask` — selected field not physical in file (identity-partition column) → NotImplemented error — filed-by 03 — by design (MOR path serves those selects); revisit if a consumer ever selects bucket columns with a residual
+- split read path (`SourceTableReader::Impl::OpenSplitTask`) — selected field not physical in file (identity-partition column) → loud missing-required-field error from the vendored projection — filed-by 03, reworded by post-review rework — by design (MOR path serves those selects); revisit if a consumer ever selects bucket columns with a residual
 - `pp_catalogd.cc` plan routes (planTableScan / fetchPlanningResult / cancelPlanning / fetchScanTasks) — 406 UnsupportedOperationException — filed-by 08 — owner: future server-side lift invoking the 02 planner module
 - generate-commit-smoke (`make smoke`) — fails at arg parse: 916563a added `kMinCount = 1e9` but generate_smoke.cc still passes `--count 1000`; broken since before planner-prep — filed-by 07 — owner: superseded by the testing-overhaul PR (all smokes scrapped there)
 - existing-table declaration surface (see 06) — order-requiring paths error on live tables until it lands; testing/e2e of those paths is blocked on it — owner: future design session
 - `partition_stats.cc` — non-identity partition transforms, non-integer partition source fields, snapshots carrying delete manifests, and multi-spec tables (partition evolution) → loud NotImplemented — filed-by 05 rework — owner: unassigned
+- int/long-only value handling across scan/writer seams — stat-column bounds (`writer.cc` Make), task-ordering bound decode (`SortTasksByLowerBound`), key window (`ScanPlan.key_lo/key_hi` int64; `FoldKeyConjunct`/`SliceToKeyWindow`) — non-int declarations error loudly naming the found type; non-int predicates don't fold or prune (inclusive, correct) — filed-by post-review rework — owner: unassigned
+- `table_traits.cc` — declared sort order with non-identity transform → loud NotImplemented (was a quiet unsorted fallback) — filed-by post-review rework — owner: unassigned
 - superseded partition-stats files and stats files orphaned by failed transactions accumulate in table metadata dirs; no expiry/cleanup surface — filed-by 05 rework — owner: unassigned
 - declaring sort order / properties on EXISTING tables — no surface exists (pp-declare-sort binary built then deleted: packaging undecided; user direction leans config.lua `tables` section + Lua interface) — filed-by 06 — owner: future design session. Until filled, order-requiring paths (ScanByK, windowed hist, verify primes, Extent frontier) error on the live tables. Preconditions the surface must keep: uuid-guarded updateTable, refuse if primary-key bounds missing on any committed file, refuse to replace a different existing order, idempotent no-op.
 
