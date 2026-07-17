@@ -28,7 +28,7 @@ rationale recorded per phase; one commit per phase, message = phase file name, e
 - [x] 00 branch + tracker scaffold
 - [x] 01 gtest harness wiring
 - [x] 02 re-express hand-rolled tests
-- [ ] 03 scrap smokes
+- [x] 03 scrap smokes
 - [ ] 04 e2e fixture harness
 - [ ] 05 sanitizer build
 - [ ] 06 CI
