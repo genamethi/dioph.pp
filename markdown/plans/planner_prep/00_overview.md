@@ -27,7 +27,7 @@ Branch `planner-prep` (off `tui-query`). One commit per phase, message = phase f
 
 ## holes registry
 
-- split read path (`SourceTableReader::Impl::OpenSplitTask`) — selected field not physical in file (identity-partition column) → loud missing-required-field error from the vendored projection — filed-by 03, reworded by post-review rework — by design (MOR path serves those selects); revisit if a consumer ever selects bucket columns with a residual
+- selecting identity-partition columns (`p_bucket_version`/`p_bucket`) — BOTH read paths error loudly ("Missing required field with id: N" from the vendored projection): the vendored reader implements no constant-column synthesis from the partition tuple (Java PartitionUtil equivalent absent from iceberg-cpp). 09 e2e confirmed: full-table `read` on live warehouse errors; any explicit column subset works — filed-by 03, corrected-by 09 (earlier claim that the MOR path serves these was wrong) — owner: unassigned
 - `pp_catalogd.cc` plan routes (planTableScan / fetchPlanningResult / cancelPlanning / fetchScanTasks) — 406 UnsupportedOperationException — filed-by 08 — owner: future server-side lift invoking the 02 planner module
 - generate-commit-smoke (`make smoke`) — fails at arg parse: 916563a added `kMinCount = 1e9` but generate_smoke.cc still passes `--count 1000`; broken since before planner-prep — filed-by 07 — owner: superseded by the testing-overhaul PR (all smokes scrapped there)
 - existing-table declaration surface (see 06) — order-requiring paths error on live tables until it lands; testing/e2e of those paths is blocked on it — owner: future design session
