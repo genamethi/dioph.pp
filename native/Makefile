@@ -72,7 +72,11 @@ TEST_SUITE_OBJS := $(BUILD_DIR)/core_test.o $(BUILD_DIR)/writer_test.o \
                    $(BUILD_DIR)/scan_planner_test.o $(BUILD_DIR)/partition_stats_test.o
 TEST_SUITE_LIBOBJS := $(WRITER_OBJ) $(SCHEMAS_OBJ) $(SCAN_OBJS) $(PARTITION_STATS_OBJ) $(CORE_OBJ)
 
-.PHONY: all clean test install
+E2E_BIN := $(BUILD_DIR)/primeparts-e2e
+E2E_OBJ := $(BUILD_DIR)/e2e_test.o
+E2E_LIBOBJS := $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(PARTITION_STATS_OBJ) $(LMDB_LIB)
+
+.PHONY: all clean test e2e install
 
 PP_INSTALL_PATH ?= $(HOME)/.local/bin
 
@@ -285,6 +289,15 @@ $(TEST_SUITE_BIN): $(TEST_SUITE_OBJS) $(TEST_SUITE_LIBOBJS)
 
 test: $(TEST_SUITE_BIN)
 	$(TEST_SUITE_BIN)
+
+$(E2E_OBJ): e2e/e2e_test.cc | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(GTEST_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(E2E_BIN): $(E2E_OBJ) $(E2E_LIBOBJS)
+	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(GTEST_LDLIBS) -lsqlite3 -pthread -o $@
+
+e2e: $(E2E_BIN) $(BUILD_DIR)/primeparts-catalogd
+	$(E2E_BIN)
 
 clean:
 	rm -rf $(BUILD_DIR)
