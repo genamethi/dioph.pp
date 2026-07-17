@@ -21,7 +21,7 @@ Reviewer: you. Goal: decide merge-readiness of `planner-prep` → `pure-local` (
 - [ ] Smell — speculative generality: `stat_columns` is a general list but only ever p/prime_rank/q_k. Warranted, or should it be named-but-fixed channels? Same q for the GroupKey derived-key machinery — does it match how you actually query, or is it abstraction for its own sake?
 
 ### plan atom (IRC mirroring)
-- [ ] `ScanPlan`/`scan::FileScanTask` model a SUBSET of the spec: I dropped plan-id/paging/PlanStatus as "wire concerns," added `row_groups` as a pp extension. Right cut? Will the dropped parts bite when catalogd actually serves planTableScan?
+- [ ] `ScanPlan`/`scan::FileScanTask` model a SUBSET of the spec: plan-id/paging/PlanStatus live at the server seam (08 stubs), not in the plan type. Sub-file scoping REWORKED post-review: the private `row_groups` ordinals are gone; tasks carry `iceberg::Split{offset,length}` (spec `split-offsets` vocabulary), one task per surviving split. Remaining question: does the session protocol land cleanly on these types when catalogd serves planTableScan?
 - [ ] Is client-side planning the right transitional step at all, or premature vs waiting for server-side? (gap docs said yes — do you still agree?)
 
 ### residual / window handling — SUBTLEST, look hardest here

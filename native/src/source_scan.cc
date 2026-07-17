@@ -2,10 +2,6 @@
 
 #include <arrow/api.h>
 #include <arrow/c/bridge.h>
-#include <arrow/io/file.h>
-#include <parquet/arrow/reader.h>
-#include <parquet/metadata.h>
-#include <parquet/schema.h>
 
 #include <algorithm>
 #include <memory>
@@ -24,6 +20,7 @@
 #include "iceberg/data/file_scan_task_reader.h"
 #include "iceberg/expression/expression.h"
 #include "iceberg/file_io.h"
+#include "iceberg/file_reader.h"
 #include "iceberg/manifest/manifest_entry.h"
 #include "iceberg/manifest/manifest_list.h"
 #include "iceberg/manifest/manifest_reader.h"
@@ -36,6 +33,39 @@
 
 namespace primeparts {
 
+namespace {
+
+class IcebergReaderBatchReader : public arrow::RecordBatchReader {
+ public:
+  IcebergReaderBatchReader(std::unique_ptr<iceberg::Reader> reader,
+                           std::shared_ptr<arrow::Schema> schema)
+      : reader_(std::move(reader)), schema_(std::move(schema)) {}
+
+  std::shared_ptr<arrow::Schema> schema() const override { return schema_; }
+
+  arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override {
+    auto next_r = reader_->Next();
+    if (!next_r.has_value()) {
+      return arrow::Status::IOError(next_r.error().message);
+    }
+    if (!next_r.value().has_value()) {
+      *batch = nullptr;
+      return arrow::Status::OK();
+    }
+    ArrowArray array = std::move(next_r.value().value());
+    auto batch_r = arrow::ImportRecordBatch(&array, schema_);
+    if (!batch_r.ok()) return batch_r.status();
+    *batch = std::move(batch_r).ValueOrDie();
+    return arrow::Status::OK();
+  }
+
+ private:
+  std::unique_ptr<iceberg::Reader> reader_;
+  std::shared_ptr<arrow::Schema> schema_;
+};
+
+}  // namespace
+
 struct SourceTableReader::Impl {
   std::shared_ptr<iceberg::FileIO> io;
   scan::ScanPlan plan;
@@ -43,7 +73,6 @@ struct SourceTableReader::Impl {
   std::unique_ptr<iceberg::FileScanTaskReader> task_reader;
   size_t cursor = 0;
 
-  std::unique_ptr<parquet::arrow::FileReader> active_file;
   std::shared_ptr<arrow::RecordBatchReader> active;
 
   std::string current_file_path;
@@ -103,63 +132,48 @@ struct SourceTableReader::Impl {
     return true;
   }
 
-  bool OpenRowGroupTask(const scan::FileScanTask& task, std::string* error) {
-    auto file_r = arrow::io::ReadableFile::Open(current_file_path);
-    if (!file_r.ok()) {
-      if (error) *error = file_r.status().ToString();
-      return false;
-    }
-    auto reader_r = parquet::arrow::OpenFile(file_r.ValueOrDie(),
-                                             arrow::default_memory_pool());
-    if (!reader_r.ok()) {
-      if (error) *error = reader_r.status().ToString();
-      return false;
-    }
-    active_file = std::move(reader_r).ValueOrDie();
-
-    const auto* descr = active_file->parquet_reader()->metadata()->schema();
-    std::vector<int> column_indices;
-    column_indices.reserve(plan.projected_schema->fields().size());
-    for (const auto& f : plan.projected_schema->fields()) {
-      int found = -1;
-      for (int c = 0; c < descr->num_columns(); ++c) {
-        if (descr->Column(c)->schema_node()->field_id() == f.field_id()) {
-          found = c;
-          break;
-        }
+  bool OpenSplitTask(const scan::FileScanTask& task, std::string* error) {
+    iceberg::ReaderOptions opts;
+    opts.path = task.inner->data_file()->file_path;
+    opts.length =
+        static_cast<size_t>(task.inner->data_file()->file_size_in_bytes);
+    opts.split = task.split;
+    opts.io = io;
+    opts.projection = plan.projected_schema;
+    auto reader_r = iceberg::ReaderFactoryRegistry::Open(
+        task.inner->data_file()->file_format, opts);
+    if (!reader_r.has_value()) {
+      if (error) {
+        *error = "ReaderFactoryRegistry::Open " + opts.path + ": " +
+                 reader_r.error().message;
       }
-      if (found < 0) {
-        if (error) {
-          *error = "NotImplemented: selected field '" + std::string(f.name()) +
-                   "' is not physical in " + current_file_path +
-                   "; the row-group read path cannot synthesize "
-                   "identity-partition columns";
-        }
-        return false;
-      }
-      column_indices.push_back(found);
-    }
-
-    std::vector<int> row_groups(task.row_groups.begin(), task.row_groups.end());
-    auto rb_r = active_file->GetRecordBatchReader(row_groups, column_indices);
-    if (!rb_r.ok()) {
-      if (error) *error = rb_r.status().ToString();
       return false;
     }
-    active = std::move(rb_r).ValueOrDie();
+    auto reader = std::move(reader_r.value());
+    auto schema_r = reader->Schema();
+    if (!schema_r.has_value()) {
+      if (error) *error = "Reader::Schema: " + schema_r.error().message;
+      return false;
+    }
+    ArrowSchema c_schema = schema_r.value();
+    auto arrow_schema_r = arrow::ImportSchema(&c_schema);
+    if (!arrow_schema_r.ok()) {
+      if (error) *error = arrow_schema_r.status().ToString();
+      return false;
+    }
+    active = std::make_shared<IcebergReaderBatchReader>(
+        std::move(reader), std::move(arrow_schema_r).ValueOrDie());
     return true;
   }
 
   bool OpenTaskAtCursor(std::string* error) {
     active.reset();
-    active_file.reset();
     while (cursor < tasks.size()) {
       const auto& task = tasks[cursor];
-      current_file_path =
-          primeparts::common::StripFileScheme(task.inner->data_file()->file_path);
+      current_file_path = task.inner->data_file()->file_path;
       const bool mor = !task.inner->delete_files().empty();
-      if (!mor && !task.row_groups.empty()) {
-        return OpenRowGroupTask(task, error);
+      if (!mor && task.split.has_value()) {
+        return OpenSplitTask(task, error);
       }
       return OpenMorTask(task, error);
     }

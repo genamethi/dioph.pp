@@ -14,6 +14,7 @@
 #include <parquet/statistics.h>
 #include <parquet/types.h>
 
+#include "iceberg/arrow/arrow_io_internal.h"
 #include "iceberg/expression/expression.h"
 #include "iceberg/expression/expressions.h"
 #include "iceberg/expression/inclusive_metrics_evaluator.h"
@@ -26,8 +27,6 @@
 #include "iceberg/table_metadata.h"
 #include "iceberg/table_scan.h"
 #include "iceberg/type.h"
-
-#include "primeparts/common/uri.h"
 
 namespace primeparts::scan {
 
@@ -214,7 +213,13 @@ bool SortTasksByLowerBound(
   }
   const auto type = field->type()->type_id();
   if (type != iceberg::TypeId::kInt && type != iceberg::TypeId::kLong) {
-    if (error) *error = "sort key " + key.name + " is not an integer type";
+    if (error) {
+      *error = "NotImplemented: declared sort key '" + key.name +
+               "' has type " + field->type()->ToString() +
+               "; task ordering decodes int and long bounds only — ordering "
+               "on this key requires deserializing manifest bounds as "
+               "iceberg::Literal of that type and comparing literals";
+    }
     return false;
   }
   std::vector<std::pair<int64_t, std::shared_ptr<iceberg::FileScanTask>>> keyed;
@@ -243,13 +248,14 @@ bool SortTasksByLowerBound(
   return true;
 }
 
-bool SelectRowGroups(const std::string& file_path,
-                     const iceberg::Schema& schema,
-                     const std::shared_ptr<iceberg::Expression>& residual,
-                     bool case_sensitive, std::vector<int32_t>* row_groups,
-                     int64_t* planned_rows, std::string* error) {
-  row_groups->clear();
-  *planned_rows = 0;
+bool SelectSplits(const std::string& file_location, int64_t file_length,
+                  const std::shared_ptr<iceberg::FileIO>& io,
+                  const iceberg::Schema& schema,
+                  const std::shared_ptr<iceberg::Expression>& residual,
+                  bool case_sensitive, std::vector<SplitSelection>* splits,
+                  bool* all_kept, std::string* error) {
+  splits->clear();
+  *all_kept = false;
 
   auto evaluator_r = iceberg::InclusiveMetricsEvaluator::Make(
       residual, schema, case_sensitive);
@@ -261,18 +267,41 @@ bool SelectRowGroups(const std::string& file_path,
   }
   const auto& evaluator = evaluator_r.value();
 
+  auto input_r = iceberg::arrow::OpenArrowInputStream(
+      io, file_location, static_cast<size_t>(file_length));
+  if (!input_r.has_value()) {
+    if (error) {
+      *error = "OpenArrowInputStream " + file_location + ": " +
+               input_r.error().message;
+    }
+    return false;
+  }
   std::unique_ptr<parquet::ParquetFileReader> reader;
   try {
-    reader = parquet::ParquetFileReader::OpenFile(file_path, false);
+    reader = parquet::ParquetFileReader::Open(input_r.value());
   } catch (const std::exception& e) {
-    if (error) *error = "parquet open " + file_path + ": " + e.what();
+    if (error) *error = "parquet open " + file_location + ": " + e.what();
     return false;
   }
   const auto* file_meta = reader->metadata().get();
   const auto* descr = file_meta->schema();
+  const int num_rg = file_meta->num_row_groups();
 
-  for (int rg = 0; rg < file_meta->num_row_groups(); ++rg) {
+  std::vector<int> kept;
+  kept.reserve(static_cast<size_t>(num_rg));
+  std::vector<int64_t> rg_rows(static_cast<size_t>(num_rg), 0);
+
+  for (int rg = 0; rg < num_rg; ++rg) {
     auto rg_meta = file_meta->RowGroup(rg);
+    if (rg > 0 && rg_meta->file_offset() <= 0) {
+      if (error) {
+        *error = "row group " + std::to_string(rg) + " of " + file_location +
+                 " has no file_offset; split planning requires footers that "
+                 "record row-group offsets";
+      }
+      return false;
+    }
+    rg_rows[static_cast<size_t>(rg)] = rg_meta->num_rows();
     iceberg::DataFile df;
     df.record_count = rg_meta->num_rows();
 
@@ -321,9 +350,33 @@ bool SelectRowGroups(const std::string& file_path,
 
     auto match = evaluator->Evaluate(df);
     if (!match.has_value() || match.value()) {
-      row_groups->push_back(rg);
-      *planned_rows += rg_meta->num_rows();
+      kept.push_back(rg);
     }
+  }
+
+  if (static_cast<int>(kept.size()) == num_rg) {
+    *all_kept = true;
+    return true;
+  }
+
+  size_t i = 0;
+  while (i < kept.size()) {
+    size_t j = i;
+    while (j + 1 < kept.size() && kept[j + 1] == kept[j] + 1) ++j;
+    const int first = kept[i];
+    const int last = kept[j];
+    const int64_t begin = first == 0 ? 0 : file_meta->RowGroup(first)->file_offset();
+    const int64_t end = last + 1 < num_rg
+                            ? file_meta->RowGroup(last + 1)->file_offset()
+                            : file_length;
+    SplitSelection sel;
+    sel.split = iceberg::Split{static_cast<size_t>(begin),
+                               static_cast<size_t>(end - begin)};
+    for (size_t k = i; k <= j; ++k) {
+      sel.planned_rows += rg_rows[static_cast<size_t>(kept[k])];
+    }
+    splits->push_back(sel);
+    i = j + 1;
   }
   return true;
 }
@@ -401,26 +454,41 @@ bool PlanTableScan(const std::shared_ptr<iceberg::TableMetadata>& metadata,
 
   out->tasks.reserve(tasks.size());
   for (auto& task : tasks) {
-    FileScanTask planned;
-    if (TrivialResidual(task->residual_filter())) {
+    if (TrivialResidual(task->residual_filter()) ||
+        !task->delete_files().empty()) {
+      FileScanTask planned;
       planned.planned_rows =
           static_cast<int64_t>(task->data_file()->record_count);
       planned.inner = std::move(task);
+      out->planned_rows += planned.planned_rows;
       out->tasks.push_back(std::move(planned));
-      out->planned_rows += out->tasks.back().planned_rows;
       continue;
     }
-    const std::string path =
-        primeparts::common::StripFileScheme(task->data_file()->file_path);
-    if (!SelectRowGroups(path, *table_schema, task->residual_filter(),
-                         request.case_sensitive, &planned.row_groups,
-                         &planned.planned_rows, error)) {
+    const auto& df = task->data_file();
+    std::vector<SplitSelection> selected;
+    bool all_kept = false;
+    if (!SelectSplits(df->file_path,
+                      static_cast<int64_t>(df->file_size_in_bytes), io,
+                      *table_schema, task->residual_filter(),
+                      request.case_sensitive, &selected, &all_kept, error)) {
       return false;
     }
-    if (planned.row_groups.empty()) continue;
-    planned.inner = std::move(task);
-    out->planned_rows += planned.planned_rows;
-    out->tasks.push_back(std::move(planned));
+    if (all_kept) {
+      FileScanTask planned;
+      planned.planned_rows = static_cast<int64_t>(df->record_count);
+      planned.inner = std::move(task);
+      out->planned_rows += planned.planned_rows;
+      out->tasks.push_back(std::move(planned));
+      continue;
+    }
+    for (auto& sel : selected) {
+      FileScanTask planned;
+      planned.inner = task;
+      planned.split = sel.split;
+      planned.planned_rows = sel.planned_rows;
+      out->planned_rows += sel.planned_rows;
+      out->tasks.push_back(std::move(planned));
+    }
   }
   return true;
 }

@@ -244,7 +244,7 @@ $(PP_CATALOGD_OBJ): src/catalog/pp_catalogd.cc include/primeparts/catalog/pp_cat
 $(PP_COMMIT_OBJ): src/catalog/pp_commit.cc include/primeparts/catalog/pp_commit.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/catalog/partition_stats.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(ICEBERG_SRC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(PARTITION_STATS_OBJ): src/catalog/partition_stats.cc include/primeparts/catalog/partition_stats.h include/primeparts/common/uri.h | $(BUILD_DIR)
+$(PARTITION_STATS_OBJ): src/catalog/partition_stats.cc include/primeparts/catalog/partition_stats.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(TEST_PARTITION_STATS_OBJ): tests/test_partition_stats.cc include/primeparts/catalog/partition_stats.h include/primeparts/schemas.h | $(BUILD_DIR)
@@ -265,8 +265,8 @@ $(TEST_ICEBERG_WRITER_OBJ): tests/test_iceberg_writer.cc include/primeparts/writ
 $(TABLE_TRAITS_OBJ): src/scan/table_traits.cc include/primeparts/scan/table_traits.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(SCAN_PLANNER_OBJ): src/scan/scan_planner.cc include/primeparts/scan/scan_planner.h include/primeparts/scan/scan_plan.h include/primeparts/scan/table_traits.h include/primeparts/common/uri.h | $(BUILD_DIR)
-	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+$(SCAN_PLANNER_OBJ): src/scan/scan_planner.cc include/primeparts/scan/scan_planner.h include/primeparts/scan/scan_plan.h include/primeparts/scan/table_traits.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(ICEBERG_SRC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(TEST_SCAN_PLANNER_OBJ): tests/test_scan_planner.cc include/primeparts/scan/scan_planner.h include/primeparts/writer.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@

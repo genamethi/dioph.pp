@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "iceberg/file_reader.h"
 #include "primeparts/scan/table_traits.h"
 
 namespace iceberg {
@@ -28,7 +29,7 @@ struct ScanPlanRequest {
 
 struct FileScanTask {
   std::shared_ptr<iceberg::FileScanTask> inner;
-  std::vector<int32_t> row_groups;
+  std::optional<iceberg::Split> split;
   int64_t planned_rows = 0;
 };
 
