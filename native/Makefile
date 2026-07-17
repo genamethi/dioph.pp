@@ -35,6 +35,9 @@ ICEBERG_LDLIBS += \
 	$(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --libs --static parquet arrow | sed -e 's/-lparquet[ ]//g' -e 's/-larrow[ ]//g' -e 's/-L[^ ]*[ ]//g') \
 	-lcurl -lssl -lcrypto -ldl -lrt
 
+GTEST_CPPFLAGS := -I$(PREFIX)/include/arrow-gtest
+GTEST_LDLIBS := -larrow_gtest_main -larrow_gmock -larrow_gtest
+
 LMDB_DIR := vendor/lmdb/libraries/liblmdb
 LMDB_CPPFLAGS += -I$(LMDB_DIR)
 LMDB_CFLAGS := -O3 -g -fPIC -pthread
@@ -68,6 +71,10 @@ TEST_ICEBERG_WRITER_OBJ := $(BUILD_DIR)/test_iceberg_writer.o
 TEST_PARTITION_STATS_OBJ := $(BUILD_DIR)/test_partition_stats.o
 VERIFY_OBJ := $(BUILD_DIR)/verify.o
 VERIFY_MAIN_OBJ := $(BUILD_DIR)/verify_main.o
+
+TEST_SUITE_BIN := $(BUILD_DIR)/primeparts-tests
+TEST_SUITE_OBJS := $(BUILD_DIR)/smoke_test.o
+TEST_SUITE_LIBOBJS := $(WRITER_OBJ) $(SCHEMAS_OBJ) $(SCAN_OBJS) $(PARTITION_STATS_OBJ) $(CORE_OBJ)
 
 .PHONY: all clean test smoke install
 
@@ -329,11 +336,14 @@ $(BUILD_DIR)/pp: $(BUILD_DIR)/pp_main.o $(BUILD_DIR)/lua_query_module.o $(BUILD_
 $(BUILD_DIR)/test_core: $(CORE_OBJ) $(TEST_OBJ)
 	$(CC) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) -pthread -o $@
 
-test: $(BUILD_DIR)/test_core $(BUILD_DIR)/primeparts-test-iceberg-writer $(BUILD_DIR)/primeparts-test-scan-planner $(BUILD_DIR)/primeparts-test-partition-stats
-	$(BUILD_DIR)/test_core
-	$(BUILD_DIR)/primeparts-test-iceberg-writer
-	$(BUILD_DIR)/primeparts-test-scan-planner
-	$(BUILD_DIR)/primeparts-test-partition-stats
+$(BUILD_DIR)/%_test.o: tests/%_test.cc | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(GTEST_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(TEST_SUITE_BIN): $(TEST_SUITE_OBJS) $(TEST_SUITE_LIBOBJS)
+	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(ICEBERG_LDLIBS) $(GTEST_LDLIBS) -pthread -o $@
+
+test: $(TEST_SUITE_BIN)
+	$(TEST_SUITE_BIN)
 
 smoke: $(BUILD_DIR)/primeparts-lmdb-smoke \
        $(BUILD_DIR)/primeparts-generate-smoke \

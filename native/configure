@@ -150,13 +150,19 @@ if [ ! -f "$PREFIX/lib/libarrow.a" ]; then
   mkdir -p build
   cd build
   cmake .. --preset ninja-release -DARROW_BUILD_STATIC=ON -DARROW_DEPENDENCY_SOURCE=BUNDLED \
-    -DARROW_WITH_SNAPPY=ON -DARROW_BUILD_UTILITIES=ON
+    -DARROW_WITH_SNAPPY=ON -DARROW_BUILD_UTILITIES=ON -DARROW_TESTING=ON
   ninja -j "$JOBS"
   sudo cmake --install .
   cd "$ROOT"
 else
   echo "arrow static present"
 fi
+
+if [ ! -f "$PREFIX/include/arrow-gtest/gtest/gtest.h" ]; then
+  echo "arrow's bundled gtest missing ($PREFIX/include/arrow-gtest/gtest/gtest.h); rebuild arrow with -DARROW_TESTING=ON"
+  exit 1
+fi
+echo "arrow-gtest bundle present"
 
 if [ ! -f "$PREFIX/lib/libiceberg_sql_catalog.a" ]; then
   vendor_sync iceberg-cpp
