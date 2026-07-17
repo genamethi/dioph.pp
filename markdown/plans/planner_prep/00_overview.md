@@ -16,7 +16,7 @@ Branch `planner-prep` (off `tui-query`). One commit per phase, message = phase f
 | 06_declare | sort_order/properties in commit path, pp-declare-sort tool | — | done |
 | 07_namespace | namespace-as-argument threading | — | done |
 | 08_catalogd | 406 stubs for plan routes | — | done |
-| 09_merge | gates, hole audit, verifiable e2e, merge to tui-query (testing overhaul is a separate follow-up PR) | all | todo |
+| 09_merge | gates, hole audit, verifiable e2e, merge to tui-query (testing overhaul is a separate follow-up PR) | all | done |
 
 ## invariants
 
