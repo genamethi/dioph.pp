@@ -1,11 +1,3 @@
-// primeparts/catalog/pp_catalogd.cc — see header.
-//
-// Thin IRC HTTP server. Every route follows the same shape:
-//   parse request JSON (iceberg-cpp serde) -> call the engine (MakeLocalCatalog)
-//   -> serialize the response (iceberg-cpp serde). The engine validates
-//   requirements, applies updates, writes metadata.json and CASes the LMDB head
-//   pointer; this file owns no metadata logic.
-//
 
 #include "primeparts/catalog/pp_catalogd.h"
 
@@ -24,7 +16,7 @@
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 
-#include "primeparts/catalog/pp_iceberg_rest.h"  // MakeLocalCatalog
+#include "primeparts/catalog/pp_iceberg_rest.h"
 
 #include "iceberg/catalog.h"
 #include "iceberg/catalog/sql/catalog_store.h"
@@ -44,7 +36,6 @@
 #include "iceberg/table_update.h"
 #include "iceberg/type_fwd.h"
 
-// iceberg-cpp internal serde (compiled into the archives; headers not installed)
 #include "iceberg/catalog/rest/json_serde_internal.h"
 #include "iceberg/catalog/rest/types.h"
 #include "iceberg/json_serde_internal.h"
@@ -56,7 +47,6 @@ namespace {
 using json = nlohmann::json;
 namespace ir = iceberg::rest;
 
-// ---- response helpers -------------------------------------------------------
 
 void SendJson(httplib::Response& res, int status, const json& body) {
   res.status = status;
@@ -77,7 +67,7 @@ int HttpStatusFor(iceberg::ErrorKind kind) {
     case iceberg::ErrorKind::kNamespaceNotEmpty:
       return 409;
     case iceberg::ErrorKind::kCommitFailed:
-      return 409;  // optimistic-concurrency / requirement failure
+      return 409;
     case iceberg::ErrorKind::kNoSuchTable:
     case iceberg::ErrorKind::kNoSuchNamespace:
     case iceberg::ErrorKind::kNoSuchView:
@@ -110,10 +100,7 @@ void SendIcebergError(httplib::Response& res, const E& err) {
   SendError(res, status, "IcebergError", err.message);
 }
 
-// ---- request parsing helpers ------------------------------------------------
 
-// Iceberg multi-level namespaces are %1F-separated in the URL path (httplib
-// URL-decodes matched groups, so we split on the unit separator 0x1F).
 iceberg::Namespace ParseNamespace(const std::string& encoded) {
   iceberg::Namespace ns;
   std::string level;
@@ -129,8 +116,6 @@ iceberg::Namespace ParseNamespace(const std::string& encoded) {
   return ns;
 }
 
-// Build a TableIdentifier from a JSON `{"namespace":[...],"name":"..."}` object.
-// transactions/commit carries identifiers in the body, not the URL path.
 iceberg::TableIdentifier ParseIdentifier(const json& j) {
   iceberg::TableIdentifier id;
   if (auto it = j.find("namespace"); it != j.end() && it->is_array()) {
@@ -140,9 +125,6 @@ iceberg::TableIdentifier ParseIdentifier(const json& j) {
   return id;
 }
 
-// Parse a commit body's `requirements[]` / `updates[]` into the engine's
-// polymorphic vectors; false + *error on the first bad element. Shared by
-// updateTable and transactions/commit.
 bool ParseReqsUpdates(
     const json& body,
     std::vector<std::unique_ptr<iceberg::TableRequirement>>* reqs,
@@ -165,9 +147,8 @@ bool ParseReqsUpdates(
   return true;
 }
 
-// Parse the request body as JSON; on failure write a 400 and return false.
 bool ParseBody(const httplib::Request& req, httplib::Response& res, json* out) {
-  *out = json::parse(req.body, /*cb=*/nullptr, /*allow_exceptions=*/false);
+  *out = json::parse(req.body, nullptr, false);
   if (out->is_discarded()) {
     SendError(res, 400, "BadRequest", "request body is not valid JSON");
     return false;
@@ -175,9 +156,6 @@ bool ParseBody(const httplib::Request& req, httplib::Response& res, json* out) {
   return true;
 }
 
-// Serialize a loaded/created/committed table into the IRC LoadTableResult /
-// CommitTableResponse body: { "metadata-location", "metadata" [, "config"] }.
-// TableMetadata is serialized via ToJsonString; the wrapper is assembled here.
 iceberg::Result<std::string> TableResultBody(
     const std::shared_ptr<iceberg::Table>& table, bool with_config) {
   const auto& meta = table->metadata();
@@ -190,14 +168,10 @@ iceberg::Result<std::string> TableResultBody(
   json body;
   body["metadata-location"] = std::string(table->metadata_file_location());
   body["metadata"] = json::parse(meta_str.value());
-  // scan-planning-mode: client — catalogd does no server-side scan planning;
-  // clients read manifests directly (frontier-bucket sizing read).
   if (with_config) body["config"] = json{{"scan-planning-mode", "client"}};
   return body.dump();
 }
 
-// Send a LoadTableResult/CommitTableResponse for `table`, or a 500 if the
-// (ABI-safe) metadata serialization itself fails.
 void SendTableResult(httplib::Response& res, int status,
                      const std::shared_ptr<iceberg::Table>& table,
                      bool with_config) {
@@ -207,7 +181,6 @@ void SendTableResult(httplib::Response& res, int status,
   res.set_content(body.value(), "application/json");
 }
 
-// ---- the server -------------------------------------------------------------
 
 std::atomic<httplib::Server*> g_server{nullptr};
 
@@ -215,7 +188,6 @@ void HandleSignal(int) {
   if (auto* s = g_server.load()) s->stop();
 }
 
-// Resolve a schema field id by name; -1 if absent.
 int32_t FieldIdByName(const iceberg::Schema& schema, std::string_view name) {
   for (const auto& f : schema.fields()) {
     if (f.name() == name) return f.field_id();
@@ -223,11 +195,6 @@ int32_t FieldIdByName(const iceberg::Schema& schema, std::string_view name) {
   return -1;
 }
 
-// Read the committed upper bound of `field` from the current snapshot's frontier
-// manifest — the manifest this snapshot added (added_snapshot_id == snapshot id),
-// whose last entry carries the max (entries are written ascending). Direct
-// metadata read, no scan. Sets *present=false when there is no snapshot or the
-// bound is absent. Returns false + *error on a load/read failure.
 bool FieldUpperBound(const std::shared_ptr<iceberg::Catalog>& catalog,
                      const iceberg::TableIdentifier& id, const std::string& field,
                      int64_t* out, bool* present, std::string* error) {
@@ -240,7 +207,7 @@ bool FieldUpperBound(const std::shared_ptr<iceberg::Catalog>& catalog,
   auto table = tbl.value();
 
   auto snap = table->current_snapshot();
-  if (!snap.has_value() || snap.value() == nullptr) return true;  // fresh table
+  if (!snap.has_value() || snap.value() == nullptr) return true;
 
   auto schema = table->schema();
   if (!schema.has_value()) {
@@ -270,7 +237,7 @@ bool FieldUpperBound(const std::shared_ptr<iceberg::Catalog>& catalog,
   for (const auto& m : manifests.value()) {
     if (m.added_snapshot_id == snap_id) { frontier = &m; break; }
   }
-  if (frontier == nullptr) return true;  // nothing added by this snapshot
+  if (frontier == nullptr) return true;
 
   auto reader = iceberg::ManifestReader::Make(*frontier, table->io(),
                                               schema.value(), spec.value());
@@ -289,10 +256,10 @@ bool FieldUpperBound(const std::shared_ptr<iceberg::Catalog>& catalog,
   if (df == nullptr) return true;
   auto it = df->upper_bounds.find(fid);
   if (it == df->upper_bounds.end() || it->second.size() < sizeof(int64_t)) {
-    return true;  // no bound stored for this field
+    return true;
   }
   int64_t v = 0;
-  std::memcpy(&v, it->second.data(), sizeof(int64_t));  // iceberg long: 8-byte LE
+  std::memcpy(&v, it->second.data(), sizeof(int64_t));
   *out = v;
   *present = true;
   return true;
@@ -312,14 +279,11 @@ int RunCatalogd(const CatalogdOptions& opts) {
 
   httplib::Server svr;
 
-  // GET /v1/config — client handshake. We advertise no defaults/overrides; the
-  // client supplies its own warehouse.
   svr.Get("/v1/config", [](const httplib::Request&, httplib::Response& res) {
     SendJson(res, 200, json{{"defaults", json::object()},
                             {"overrides", json::object()}});
   });
 
-  // GET /v1/namespaces — list (optional ?parent=).
   svr.Get("/v1/namespaces", [catalog](const httplib::Request& req,
                                       httplib::Response& res) {
     iceberg::Namespace parent;
@@ -330,7 +294,6 @@ int RunCatalogd(const CatalogdOptions& opts) {
     SendJson(res, 200, ir::ToJson(body));
   });
 
-  // POST /v1/namespaces — create.
   svr.Post("/v1/namespaces", [catalog](const httplib::Request& req,
                                        httplib::Response& res) {
     json body;
@@ -345,7 +308,6 @@ int RunCatalogd(const CatalogdOptions& opts) {
     SendJson(res, 200, ir::ToJson(resp));
   });
 
-  // GET /v1/namespaces/{ns} — load properties.
   svr.Get(R"(/v1/namespaces/([^/]+))", [catalog](const httplib::Request& req,
                                                  httplib::Response& res) {
     auto ns = ParseNamespace(req.matches[1]);
@@ -355,12 +317,7 @@ int RunCatalogd(const CatalogdOptions& opts) {
     SendJson(res, 200, ir::ToJson(resp));
   });
 
-  // (HEAD /v1/namespaces/{ns} — exists — is served by the GET handler above:
-  // cpp-httplib dispatches HEAD to the GET handlers, so a load that succeeds
-  // returns 200 and a missing namespace returns 404, which is the exists
-  // semantics the IRC client wants.)
 
-  // DELETE /v1/namespaces/{ns} — drop.
   svr.Delete(R"(/v1/namespaces/([^/]+))", [catalog](const httplib::Request& req,
                                                     httplib::Response& res) {
     auto st = catalog->DropNamespace(ParseNamespace(req.matches[1]));
@@ -368,7 +325,6 @@ int RunCatalogd(const CatalogdOptions& opts) {
     res.status = 204;
   });
 
-  // POST /v1/namespaces/{ns}/properties — update properties.
   svr.Post(R"(/v1/namespaces/([^/]+)/properties)",
            [catalog](const httplib::Request& req, httplib::Response& res) {
              json body;
@@ -382,14 +338,12 @@ int RunCatalogd(const CatalogdOptions& opts) {
              auto st = catalog->UpdateNamespaceProperties(
                  ParseNamespace(req.matches[1]), ur.updates, removals);
              if (!st.has_value()) return SendIcebergError(res, st.error());
-             // Engine returns void; report all requested changes as applied.
              ir::UpdateNamespacePropertiesResponse resp;
              for (auto& [k, _] : ur.updates) resp.updated.push_back(k);
              resp.removed = ur.removals;
              SendJson(res, 200, ir::ToJson(resp));
            });
 
-  // GET /v1/namespaces/{ns}/tables — list.
   svr.Get(R"(/v1/namespaces/([^/]+)/tables)",
           [catalog](const httplib::Request& req, httplib::Response& res) {
             auto r = catalog->ListTables(ParseNamespace(req.matches[1]));
@@ -398,7 +352,6 @@ int RunCatalogd(const CatalogdOptions& opts) {
             SendJson(res, 200, ir::ToJson(body));
           });
 
-  // POST /v1/namespaces/{ns}/tables — create.
   svr.Post(R"(/v1/namespaces/([^/]+)/tables)",
            [catalog](const httplib::Request& req, httplib::Response& res) {
              json body;
@@ -415,10 +368,9 @@ int RunCatalogd(const CatalogdOptions& opts) {
              auto r = catalog->CreateTable(id, cr.schema, spec, order, cr.location,
                                            cr.properties);
              if (!r.has_value()) return SendIcebergError(res, r.error());
-             SendTableResult(res, 200, r.value(), /*with_config=*/true);
+             SendTableResult(res, 200, r.value(), true);
            });
 
-  // POST /v1/namespaces/{ns}/register — register an existing metadata.json.
   svr.Post(R"(/v1/namespaces/([^/]+)/register)",
            [catalog](const httplib::Request& req, httplib::Response& res) {
              json body;
@@ -431,27 +383,19 @@ int RunCatalogd(const CatalogdOptions& opts) {
                                          .name = rr.name};
              auto r = catalog->RegisterTable(id, rr.metadata_location);
              if (!r.has_value()) return SendIcebergError(res, r.error());
-             SendTableResult(res, 200, r.value(), /*with_config=*/true);
+             SendTableResult(res, 200, r.value(), true);
            });
 
-  // GET /v1/namespaces/{ns}/tables/{table} — load.
   svr.Get(R"(/v1/namespaces/([^/]+)/tables/([^/]+))",
           [catalog](const httplib::Request& req, httplib::Response& res) {
             iceberg::TableIdentifier id{.ns = ParseNamespace(req.matches[1]),
                                         .name = req.matches[2]};
             auto r = catalog->LoadTable(id);
             if (!r.has_value()) return SendIcebergError(res, r.error());
-            SendTableResult(res, 200, r.value(), /*with_config=*/true);
+            SendTableResult(res, 200, r.value(), true);
           });
 
-  // (HEAD /v1/namespaces/{ns}/tables/{table} — exists — is served by the GET
-  // load handler above via cpp-httplib's HEAD->GET dispatch: 200 if it loads,
-  // 404 if absent.)
 
-  // GET /v1/namespaces/{ns}/tables/{table}/field-upper-bound?field=NAME —
-  // pp-native: the committed max of a column, read from the current snapshot's
-  // frontier manifest metric (no scan). {"field":NAME,"upper_bound":N|null}.
-  // Drives generate's resume-from-frontier (field=prime_rank).
   svr.Get(R"(/v1/namespaces/([^/]+)/tables/([^/]+)/field-upper-bound)",
           [catalog](const httplib::Request& req, httplib::Response& res) {
             if (!req.has_param("field"))
@@ -483,11 +427,6 @@ int RunCatalogd(const CatalogdOptions& opts) {
              planning_unsupported);
   svr.Post(R"(/v1/namespaces/([^/]+)/tables/([^/]+)/tasks)", planning_unsupported);
 
-  // POST /v1/namespaces/{ns}/tables/{table} — COMMIT (updateTable). The
-  // load-bearing route: native FastAppend / RowDelta commits arrive here as
-  // {requirements, updates}. Deletion vectors are forward-compatible — the
-  // delete-file / Puffin specifics ride inside add-snapshot updates, which
-  // TableUpdateFromJson + the engine handle without any change to this layer.
   svr.Post(R"(/v1/namespaces/([^/]+)/tables/([^/]+))",
            [catalog](const httplib::Request& req, httplib::Response& res) {
              json body;
@@ -501,11 +440,9 @@ int RunCatalogd(const CatalogdOptions& opts) {
                return SendError(res, 400, "BadRequest", perr);
              auto r = catalog->UpdateTable(id, requirements, updates);
              if (!r.has_value()) return SendIcebergError(res, r.error());
-             // CommitTableResponse shape == {metadata-location, metadata} (no config).
-             SendTableResult(res, 200, r.value(), /*with_config=*/false);
+             SendTableResult(res, 200, r.value(), false);
            });
 
-  // DELETE /v1/namespaces/{ns}/tables/{table} — drop (?purgeRequested=).
   svr.Delete(R"(/v1/namespaces/([^/]+)/tables/([^/]+))",
              [catalog](const httplib::Request& req, httplib::Response& res) {
                iceberg::TableIdentifier id{.ns = ParseNamespace(req.matches[1]),
@@ -517,7 +454,6 @@ int RunCatalogd(const CatalogdOptions& opts) {
                res.status = 204;
              });
 
-  // POST /v1/tables/rename.
   svr.Post("/v1/tables/rename", [catalog](const httplib::Request& req,
                                           httplib::Response& res) {
     json body;
@@ -530,14 +466,9 @@ int RunCatalogd(const CatalogdOptions& opts) {
     res.status = 200;
   });
 
-  // POST /v1/namespaces/{ns}/tables/{table}/metrics — report scan metrics. We
-  // accept and discard (the spec allows a 204).
   svr.Post(R"(/v1/namespaces/([^/]+)/tables/([^/]+)/metrics)",
            [](const httplib::Request&, httplib::Response& res) { res.status = 204; });
 
-  // POST /v1/transactions/commit — atomic multi-table commit. Every table-change
-  // is applied through catalog->UpdateTable inside ONE store write txn; any
-  // requirement failure aborts the whole transaction so no head pointer moves.
   svr.Post("/v1/transactions/commit",
            [catalog, store](const httplib::Request& req, httplib::Response& res) {
              json body;

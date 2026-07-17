@@ -161,8 +161,8 @@ int main() {
     auto arrow_schema = std::move(arrow_schema_r).ValueOrDie();
 
     int64_t read_rows = 0;
-    int64_t p_min = INT64_MAX;
-    int64_t p_max = INT64_MIN;
+    int64_t key_lo = INT64_MAX;
+    int64_t key_hi = INT64_MIN;
     while (true) {
       auto next_r = reader->Next();
       if (!Check(next_r.has_value(), "Reader::Next failed")) return 1;
@@ -174,16 +174,16 @@ int main() {
       auto pcol = std::static_pointer_cast<arrow::Int64Array>(
           rb->GetColumnByName("p"));
       for (int64_t i = 0; i < rb->num_rows(); ++i) {
-        p_min = std::min(p_min, pcol->Value(i));
-        p_max = std::max(p_max, pcol->Value(i));
+        key_lo = std::min(key_lo, pcol->Value(i));
+        key_hi = std::max(key_hi, pcol->Value(i));
       }
       read_rows += rb->num_rows();
     }
-    if (!Check(read_rows == 100 && p_min == 200 && p_max == 299,
+    if (!Check(read_rows == 100 && key_lo == 200 && key_hi == 299,
                "expected split to read exactly row group 2 (rows 200..299), "
                "got rows=" +
-                   std::to_string(read_rows) + " p=[" + std::to_string(p_min) +
-                   "," + std::to_string(p_max) + "]")) {
+                   std::to_string(read_rows) + " p=[" + std::to_string(key_lo) +
+                   "," + std::to_string(key_hi) + "]")) {
       return 1;
     }
   }

@@ -32,7 +32,7 @@ int main(int argc, char** argv) {
 
   {
     auto t0 = std::chrono::steady_clock::now();
-    auto hits = qs->ScanByK(0, /*p_lo=*/0, /*p_hi=*/0, /*limit=*/10, &err);
+    auto hits = qs->ScanByK(0, 0, 0, 10, &err);
     double dt = secs_since(t0);
     std::printf("\n[k-scan] k=0 LIMIT 10 -> %zu hits in %.3fs\n", hits.size(), dt);
     for (auto& h : hits) std::printf("    p=%lld  rank=%lld\n", (long long)h.p, (long long)h.prime_rank);

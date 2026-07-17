@@ -67,7 +67,7 @@ std::shared_ptr<iceberg::PartitionSpec> BucketPartitionSpec(
                                iceberg::Transform::Identity()),
        iceberg::PartitionField(bucket_id, 1001, "p_bucket",
                                iceberg::Transform::Identity())},
-      /*allow_missing_fields=*/false);
+      false);
   if (!spec_result.has_value()) {
     if (error) *error = spec_result.error().message;
     return nullptr;

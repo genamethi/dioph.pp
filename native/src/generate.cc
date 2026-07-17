@@ -963,7 +963,7 @@ int pp_gen_run(const pp_gen_options* options,
 }  // extern "C"
 
 #ifndef PRIMEPARTS_GENERATE_NO_MAIN
-void gen_stdout_log(void* /*user_data*/, const char* line) {
+void gen_stdout_log(void*, const char* line) {
   std::fputs(line, stdout);
   std::fputc('\n', stdout);
   std::fflush(stdout);

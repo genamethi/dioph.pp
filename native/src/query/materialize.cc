@@ -55,7 +55,7 @@ bool MaterializeIntColumns(
   auto batch = arrow::RecordBatch::Make(arrow::schema(afields), nrows, aarrays);
 
   if (!primeparts::catalog::DropTable(catalog, ns, warehouse, name,
-                                      /*purge=*/true, error))
+                                      true, error))
     return false;
 
   primeparts::WriterConfig cfg;
