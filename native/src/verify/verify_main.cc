@@ -2,11 +2,13 @@
 
 #include "primeparts/catalog/pp_iceberg_rest.h"
 #include "primeparts/common/uri.h"
+#include "primeparts/scan/table_traits.h"
 
 #include "iceberg/catalog.h"
 #include "iceberg/snapshot.h"
 #include "iceberg/table.h"
 #include "iceberg/table_identifier.h"
+#include "iceberg/table_metadata.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -30,6 +32,7 @@ constexpr char kDefaultWarehouse[] =
 struct Options {
   std::string warehouse = kDefaultWarehouse;
   std::string rest_uri;
+  std::string ns_name;
   std::string table = "both";
   ppv::Window window;
   int threads = 0;
@@ -53,8 +56,9 @@ void Usage(const char* argv0) {
     "  --max-examples N   violating rows to record (default 20)\n"
     "  --warehouse DIR    warehouse root (default %s)\n"
     "  --rest-uri URI     IRC endpoint override (default %s)\n"
+    "  --namespace NS     catalog namespace (default %s; env PRIMEPARTS_NAMESPACE)\n"
     "  --log PATH         run-log path (default verify-<time>.log)\n",
-    argv0, kDefaultWarehouse, ppc::kDefaultRestUri);
+    argv0, kDefaultWarehouse, ppc::kDefaultRestUri, ppc::kDefaultNamespace);
 }
 
 struct Logger {
@@ -72,9 +76,10 @@ int64_t LatestSnapshotId(const std::shared_ptr<iceberg::Table>& tbl) {
 }
 
 int RunTable(const std::shared_ptr<iceberg::Catalog>& catalog,
-             const std::string& table, const Options& opts, Logger& log) {
-  iceberg::TableIdentifier ident{.ns = iceberg::Namespace{{"primeparts"}},
-                                 .name = table};
+             const iceberg::Namespace& ns, const ppv::Check& check,
+             const Options& opts, Logger& log) {
+  const std::string& table = check.spec().table;
+  iceberg::TableIdentifier ident{.ns = ns, .name = table};
   auto loaded = catalog->LoadTable(ident);
   if (!loaded.has_value()) {
     log.Line("FAIL " + table + ": LoadTable: " + loaded.error().message);
@@ -84,8 +89,28 @@ int RunTable(const std::shared_ptr<iceberg::Catalog>& catalog,
   const std::string meta = primeparts::common::StripFileScheme(
       tbl->metadata_file_location());
 
-  auto check = table == "primes" ? ppv::MakePrimeRankCheck()
-                                 : ppv::MakePartitionCheck();
+  if (!check.spec().requires_ascending.empty()) {
+    primeparts::scan::TableReadTraits traits;
+    std::string terr;
+    const auto& metadata = tbl->metadata();
+    if (!metadata ||
+        !primeparts::scan::TableReadTraits::FromMetadata(*metadata, &traits,
+                                                         &terr)) {
+      log.Line("FAIL " + table + ": traits: " + terr);
+      return 1;
+    }
+    const auto& req = check.spec().requires_ascending;
+    const bool declared = traits.sorted() &&
+                          traits.sort_keys.front().ascending &&
+                          traits.sort_keys.front().name == req;
+    if (!declared) {
+      log.Line("FAIL " + table +
+               ": check requires an ascending sort order on '" + req +
+               "' declared in the catalog");
+      return 1;
+    }
+  }
+
   auto filter = ppv::BuildWindowFilter(opts.window);
 
   std::optional<int64_t> from_snap;
@@ -101,7 +126,7 @@ int RunTable(const std::shared_ptr<iceberg::Catalog>& catalog,
   }
 
   std::string err;
-  auto r = ppv::TableVerifier::Run(meta, *check, filter, opts.threads,
+  auto r = ppv::TableVerifier::Run(meta, check, filter, opts.threads,
                                    opts.window.limit, opts.max_examples,
                                    from_snap, &err);
   if (!err.empty()) {
@@ -124,7 +149,7 @@ int RunTable(const std::shared_ptr<iceberg::Catalog>& catalog,
   return r.ok() ? 0 : 1;
 }
 
-}
+}  // namespace
 
 int main(int argc, char** argv) {
   Options opts;
@@ -138,11 +163,12 @@ int main(int argc, char** argv) {
       {"max-examples", required_argument, nullptr, 'e'},
       {"warehouse", required_argument, nullptr, 'w'},
       {"rest-uri", required_argument, nullptr, 'r'},
+      {"namespace", required_argument, nullptr, 'N'},
       {"log", required_argument, nullptr, 'o'},
       {"help", no_argument, nullptr, 'h'},
       {nullptr, 0, nullptr, 0}};
   int o;
-  while ((o = getopt_long(argc, argv, "t:L:H:n:T:j:e:w:r:o:h", long_opts,
+  while ((o = getopt_long(argc, argv, "t:L:H:n:T:j:e:w:r:N:o:h", long_opts,
                           nullptr)) != -1) {
     switch (o) {
       case 't': opts.table = optarg; break;
@@ -154,15 +180,27 @@ int main(int argc, char** argv) {
       case 'e': opts.max_examples = std::atoi(optarg); break;
       case 'w': opts.warehouse = optarg; break;
       case 'r': opts.rest_uri = optarg; break;
+      case 'N': opts.ns_name = optarg; break;
       case 'o': opts.log_path = optarg; break;
       case 'h': Usage(argv[0]); return 0;
       default: Usage(argv[0]); return 2;
     }
   }
-  if (opts.table != "primes" && opts.table != "partitions" &&
-      opts.table != "both") {
-    std::fprintf(stderr, "error: --table must be primes|partitions|both\n");
-    return 2;
+
+  auto checks = ppv::AllChecks();
+  if (opts.table != "both") {
+    bool known = false;
+    for (const auto& c : checks)
+      if (c->spec().table == opts.table) known = true;
+    if (!known) {
+      std::string tables;
+      for (const auto& c : checks) {
+        if (!tables.empty()) tables += "|";
+        tables += c->spec().table;
+      }
+      std::fprintf(stderr, "error: --table must be %s|both\n", tables.c_str());
+      return 2;
+    }
   }
 
   if (opts.log_path.empty())
@@ -176,20 +214,20 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "error: OpenCatalog: %s\n", err.c_str());
     return 1;
   }
+  const iceberg::Namespace ns = ppc::ResolveNamespace(opts.ns_name);
   log.Line("== primeparts-verify ==");
   log.Line("warehouse  : " + opts.warehouse);
   log.Line("catalog    : " + mode);
+  log.Line("namespace  : " + ns.ToString());
   if (opts.window.p_lo > 0 || opts.window.p_hi > 0 || opts.window.limit > 0)
     log.Line("window     : p_lo=" + std::to_string(opts.window.p_lo) +
              " p_hi=" + std::to_string(opts.window.p_hi) +
              " limit=" + std::to_string(opts.window.limit));
 
   int rc = 0;
-  if (opts.table == "both") {
-    rc |= RunTable(catalog, "primes", opts, log);
-    rc |= RunTable(catalog, "partitions", opts, log);
-  } else {
-    rc = RunTable(catalog, opts.table, opts, log);
+  for (const auto& check : checks) {
+    if (opts.table != "both" && check->spec().table != opts.table) continue;
+    rc |= RunTable(catalog, ns, *check, opts, log);
   }
   log.Line(rc == 0 ? "OVERALL: PASS" : "OVERALL: FAIL");
   std::fprintf(stderr, "log written to %s\n", opts.log_path.c_str());

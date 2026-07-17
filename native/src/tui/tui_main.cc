@@ -1,31 +1,3 @@
-// primeparts TUI — multi-screen app over QueryService + the LMDB catalog.
-//
-// Multi-screen app design: markdown/arch/tui_app_design.md. Screens (F1..F5):
-//   F1 Run Query  — saved Lua presets, threaded + cancellable + progress, `c`
-//                   field-name dispatch into a compatible query. (tui_runquery.cc)
-//   F4 Generate   — runs the primeparts-generate subprocess; streams its output
-//                   into a capped (kGenMaxLines), scrollable pane. (tui_generate.cc)
-//   F5 Config     — app config (Lua), log janitor. (tui_config.cc)
-//   F2 Make Query / F3 Status — stubs (next passes).
-//
-// This TU owns the core widgets (topbar/status/frame/row/layout), the shared
-// modal + dispatch RENDERING + confirm, preset load/save, and main()'s input
-// loop. Screen-specific logic lives in the per-screen TUs above; shared state and
-// all cross-file declarations are in primeparts/tui/tui_app.h.
-//
-// KEY MODEL (per the user, do not re-derive — see feedback_dont_assume):
-//   * arrows / hjkl  = NAVIGATE (move the cursor among option rows; scroll
-//                      results / output). +/- is NEVER navigation.
-//   * + / -          = cycle the VALUE of the cursored option, shown to the
-//                      right of the option name (preset cycle; generate/config
-//                      coarse adjust). Numeric fields also edit via Enter modal.
-//   * Tab            = switch panel focus (options <-> results/output).
-//   * Enter          = open the field-edit modal (Run Query runs on confirm;
-//                      Generate just commits values — `g` runs the subprocess).
-//   * q              = quit (y/N).
-//
-// NOT YET: F2 Make Query (ad-hoc + save-as-preset); F3 Status; Ctrl+L log view.
-
 #include "primeparts/tui/tui_app.h"
 
 #include <algorithm>
@@ -38,7 +10,9 @@
 #include <string>
 #include <vector>
 
-#include <unistd.h>  // readlink (binary-relative seed path)
+#include <unistd.h>
+
+#include "primeparts/catalog/pp_iceberg_rest.h"
 
 namespace primeparts::tui {
 
@@ -47,8 +21,6 @@ namespace {
 constexpr char kDefaultWarehouse[] =
     "/media/extssd/research/dioph.pp/data/ib-staging";
 
-// Where saved presets live: an actual config dir, not CWD. XDG_CONFIG_HOME (or
-// ~/.config) / primeparts / queries.lua.
 fs::path config_presets_path() {
   const char* xdg = std::getenv("XDG_CONFIG_HOME");
   if (xdg && *xdg) return fs::path(xdg) / "primeparts" / "queries.lua";
@@ -57,14 +29,12 @@ fs::path config_presets_path() {
   return fs::path(".primeparts-queries.lua");
 }
 
-fs::path config_file_path() {  // <config>/config.lua, alongside queries.lua
+fs::path config_file_path() {
   return config_presets_path().parent_path() / "config.lua";
 }
 
 }  // namespace
 
-// Directory holding this binary (primeparts-tui); primeparts-generate lives
-// alongside it.
 fs::path binary_dir() {
   char buf[4096];
   ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
@@ -73,8 +43,6 @@ fs::path binary_dir() {
   return fs::path(buf).parent_path();
 }
 
-// The shipped seed presets, found relative to the binary
-// (<bindir>/../../scripts/lua/queries.lua) — read on first run before any save.
 fs::path binary_seed_path() {
   fs::path dir = binary_dir();
   if (dir.empty()) return {};
@@ -92,13 +60,10 @@ int64_t fval(const Preset& p, const char* name, int64_t dflt) {
     if (f.name == name) return f.value;
   return dflt;
 }
-// option rows in the query panel = 1 (Preset) + fields.
 size_t option_count(const App& a) {
   return 1 + a.presets[a.preset_idx].fields.size();
 }
 
-// One full-width list row inside a bordered pane: zebra bg, or inverted+caret
-// when it is the focused selection.
 void row(struct ncplane* pl, int y, int x0, int w, const std::string& text,
          bool selected, bool focused, size_t idx) {
   if (selected && focused) {
@@ -144,11 +109,11 @@ int layout(App* a) {
     ncplane_move_yx(a->query, 1, 0);
     ncplane_resize_simple(a->results, body - qh, cols);
     ncplane_move_yx(a->results, 1 + qh, 0);
-  } else {  // other screens use the whole body in `query`; results is hidden
+  } else {
     ncplane_resize_simple(a->query, body, cols);
     ncplane_move_yx(a->query, 1, 0);
     ncplane_resize_simple(a->results, 1, cols);
-    ncplane_move_yx(a->results, rows - 1, 0);  // under the status row (covered)
+    ncplane_move_yx(a->results, rows - 1, 0);
   }
   ncplane_resize_simple(a->status, 1, cols);
   ncplane_move_yx(a->status, rows - 1, 0);
@@ -162,7 +127,7 @@ void draw_topbar(App* a) {
   ncplane_printf_yx(a->topbar, 0, 0, "%*s", (int)cols, "");
   const char* labels[] = {"F1 Run Query", "F2 Make", "F3 Status",
                           "F4 Generate", "F5 Config"};
-  const int active = static_cast<int>(a->screen);  // enum order matches labels
+  const int active = static_cast<int>(a->screen);
   int x = 1;
   for (int ti = 0; ti < 5; ++ti) {
     const char* label = labels[ti];
@@ -226,8 +191,6 @@ size_t modal_field_count(App* a) {
              : a->presets[a->preset_idx].fields.size();
 }
 
-// Confirm the modal: parse each box back into its field. Preset fields then run
-// the query; generate params just commit the values (g runs the subprocess).
 void confirm_modal(App* a) {
   if (a->modal_kind == ModalKind::Warehouse) {
     std::string path = a->modal_buf.empty() ? "" : a->modal_buf[0];
@@ -259,7 +222,6 @@ void confirm_modal(App* a) {
   start_query(a);
 }
 
-// A single wide free-text box (the warehouse path editor).
 void draw_path_modal(App* a) {
   unsigned trows, tcols;
   notcurses_term_dim_yx(a->nc, &trows, &tcols);
@@ -277,7 +239,6 @@ void draw_path_modal(App* a) {
   ncplane_set_styles(a->modal, NCSTYLE_BOLD);
   ncplane_printf_yx(a->modal, 0, 2, "┤ warehouse path ├");
   ncplane_set_styles(a->modal, NCSTYLE_NONE);
-  // Right-anchor the text so the end of a long path stays visible while typing.
   static const std::string kEmpty;
   const std::string& buf = a->modal_buf.empty() ? kEmpty : a->modal_buf[0];
   int boxw = (int)w - 6;
@@ -394,11 +355,11 @@ void redraw(App* a) {
   draw_status(a);
   if (a->modal_on) draw_modal(a);
   else if (a->disp_on) draw_dispatch(a);
-  else ncplane_erase(a->modal);  // transparent when closed
+  else ncplane_erase(a->modal);
   notcurses_render(a->nc);
 }
 
-std::vector<Preset> built_in_presets() {  // fallback if the Lua file is missing
+std::vector<Preset> built_in_presets() {
   return {
       Preset{"by-k", "primes where k == {k}, p in [{p_lo},{p_hi}], LIMIT {limit}",
              "by_k", {{"k", 0}, {"p_lo", 0}, {"p_hi", 0}, {"limit", 10}},
@@ -408,11 +369,8 @@ std::vector<Preset> built_in_presets() {  // fallback if the Lua file is missing
   };
 }
 
-// Load presets from the Lua file, validate each via the reader, keep the valid
-// ones; fall back to the built-ins if the file is missing/empty/all-invalid.
 void load_presets(App* a) {
   std::vector<std::string> errs;
-  // Config file if it exists, else the shipped seed (binary-relative).
   fs::path src = fs::exists(a->presets_path) ? fs::path(a->presets_path)
                                              : binary_seed_path();
   std::vector<Preset> loaded;
@@ -425,7 +383,7 @@ void load_presets(App* a) {
     return false;
   };
   for (auto& p : loaded) {
-    if (have(p.id)) continue;  // dedup by id (first wins)
+    if (have(p.id)) continue;
     std::string ve;
     if (a->qs && a->qs->ValidatePreset(p, &ve)) valid.push_back(std::move(p));
     else ++rejected;
@@ -447,7 +405,6 @@ void load_presets(App* a) {
   a->cursor = 0;
 }
 
-// Save the current preset (with its current field values) to the Lua file.
 void save_current(App* a) {
   if (a->presets.empty()) return;
   const Preset& p = a->presets[a->preset_idx];
@@ -458,8 +415,6 @@ void save_current(App* a) {
     return;
   }
   std::string se;
-  // Rewrite the whole (id-unique) table -> deduped, persists field edits, and
-  // lands in the config path (created if needed).
   if (LuaPresets::SaveAll(a->presets, a->presets_path, &se)) {
     a->status_glyph = 'k';
     a->status_msg = "saved " + std::to_string(a->presets.size()) +
@@ -475,17 +430,16 @@ void save_current(App* a) {
 int main(int argc, char** argv) {
   using namespace primeparts::tui;
   App app;
-  app.presets_path = config_presets_path().string();  // ~/.config/primeparts/...
+  app.presets_path = config_presets_path().string();
   app.config_path = config_file_path().string();
-  load_config(&app);  // config.lua if present (may set app.warehouse), else defaults
+  app.ns = primeparts::catalog::ResolveNamespace("");
+  load_config(&app);
 
-  // Warehouse precedence: an explicit argv[1] always wins; otherwise the path
-  // persisted in config.lua; otherwise the compiled default.
   std::string warehouse = argc >= 2          ? argv[1]
                           : !app.warehouse.empty() ? app.warehouse
                                                    : kDefaultWarehouse;
   std::string err;
-  auto qs = QueryService::Open(warehouse, &err);
+  auto qs = QueryService::Open(warehouse, app.ns, &err);
   if (!qs) {
     std::fprintf(stderr, "QueryService::Open(%s): %s\n", warehouse.c_str(), err.c_str());
     return 1;
@@ -499,14 +453,14 @@ int main(int argc, char** argv) {
   app.qs_owned = std::move(qs);
   app.qs = app.qs_owned.get();
   app.warehouse = warehouse;
-  load_presets(&app);  // config file, else shipped seed, else built-ins
+  load_presets(&app);
   struct ncplane* std_ = notcurses_stdplane(nc);
   ncplane_options po{}; po.rows = 1; po.cols = 1;
   app.topbar = ncplane_create(std_, &po);
   app.query = ncplane_create(std_, &po);
   app.results = ncplane_create(std_, &po);
   app.status = ncplane_create(std_, &po);
-  app.modal = ncplane_create(std_, &po);  // created last -> top z-order
+  app.modal = ncplane_create(std_, &po);
   if (!app.topbar || !app.query || !app.results || !app.status || !app.modal ||
       layout(&app) < 0) {
     notcurses_stop(nc);
@@ -517,10 +471,8 @@ int main(int argc, char** argv) {
 
   bool running = true;
   while (running) {
-    // While a query runs on the worker thread, poll input non-blocking so the
-    // UI stays live: show progress, let Esc cancel.
     if (app.q_running.load()) {
-      struct timespec ts{0, 60'000'000};  // 60 ms
+      struct timespec ts{0, 60'000'000};
       ncinput pin;
       uint32_t pk = notcurses_get(nc, &ts, &pin);
       if (pk != 0 && pin.evtype != NCTYPE_RELEASE && pk == NCKEY_ESC)
@@ -533,7 +485,7 @@ int main(int argc, char** argv) {
         app.status_glyph = app.worker_glyph;
         app.res_sel = app.result_rows.size() > 1 ? 1 : 0;
         app.res_top = 1;
-        push_query_history(&app);  // becomes the newest page ([ / ] to step back)
+        push_query_history(&app);
       } else if (app.q_cancel.load()) {
         app.status_glyph = '.'; app.status_msg = "cancelling...";
       } else {
@@ -550,10 +502,8 @@ int main(int argc, char** argv) {
       continue;
     }
 
-    // While generation runs, poll non-blocking: stream output, scroll, Esc
-    // terminates the subprocess (SIGTERM).
     if (app.gen_running.load()) {
-      struct timespec ts{0, 60'000'000};  // 60 ms
+      struct timespec ts{0, 60'000'000};
       ncinput pin;
       uint32_t pk = notcurses_get(nc, &ts, &pin);
       if (pk != 0 && pin.evtype != NCTYPE_RELEASE) {
@@ -596,8 +546,6 @@ int main(int argc, char** argv) {
       else app.confirm_quit = false;
       redraw(&app); continue;
     }
-    // Warehouse path editor: free-text box (Esc cancels, Enter applies), so
-    // letters / punctuation / j / k / b / - are all literal path characters.
     if (app.modal_on && app.modal_kind == ModalKind::Warehouse) {
       if (key == NCKEY_ESC) app.modal_on = false;
       else if (key == NCKEY_ENTER || key == '\n' || key == '\r') confirm_modal(&app);
@@ -610,7 +558,6 @@ int main(int argc, char** argv) {
       }
       redraw(&app); continue;
     }
-    // Numeric field editor captures input while open.
     if (app.modal_on) {
       const size_t nf = modal_field_count(&app);
       if (key == NCKEY_ESC || key == 'b') app.modal_on = false;
@@ -626,11 +573,10 @@ int main(int argc, char** argv) {
         if (app.modal_buf[app.modal_field].size() < 18)
           app.modal_buf[app.modal_field].push_back((char)key);
       } else if (key == '-' && app.modal_buf[app.modal_field].empty()) {
-        app.modal_buf[app.modal_field].push_back('-');  // allow negative entry
+        app.modal_buf[app.modal_field].push_back('-');
       }
       redraw(&app); continue;
     }
-    // Dispatch chooser captures input while open.
     if (app.disp_on) {
       const size_t ncd = app.disp_cands.size();
       if (key == NCKEY_ESC || key == 'b') app.disp_on = false;
@@ -639,7 +585,6 @@ int main(int argc, char** argv) {
       else if (key == 'k' || key == NCKEY_UP)   app.disp_sel = ncd ? (app.disp_sel + ncd - 1) % ncd : 0;
       redraw(&app); continue;
     }
-    // Global: F1..F5 switch screens; q quits; resize relayouts.
     if (key == NCKEY_F01 || key == NCKEY_F02 || key == NCKEY_F03 ||
         key == NCKEY_F04 || key == NCKEY_F05) {
       app.screen = key == NCKEY_F01   ? Screen::RunQuery
@@ -652,7 +597,6 @@ int main(int argc, char** argv) {
     }
     if (key == 'q') { app.confirm_quit = true; redraw(&app); continue; }
     if (key == NCKEY_RESIZE) { layout(&app); redraw(&app); continue; }
-    // Config screen input.
     if (app.screen == Screen::Config) {
       const size_t n = cfg_count();
       if ((key == 'j' || key == NCKEY_DOWN) && app.cfg_cursor + 1 < n) ++app.cfg_cursor;
@@ -665,8 +609,6 @@ int main(int argc, char** argv) {
       else if (key == 's') save_config(&app);
       redraw(&app); continue;
     }
-    // Generate screen input: Query focus edits params, Results focus scrolls
-    // the output; g runs the subprocess.
     if (app.screen == Screen::Generate) {
       switch (key) {
         case NCKEY_TAB:
@@ -698,7 +640,6 @@ int main(int argc, char** argv) {
       }
       redraw(&app); continue;
     }
-    // Stub screens consume nothing but the globals above.
     if (app.screen != Screen::RunQuery) { redraw(&app); continue; }
     switch (key) {
       case 'q': app.confirm_quit = true; break;
@@ -712,28 +653,26 @@ int main(int argc, char** argv) {
       case '-':                  cycle_value(&app, -1); break;
       case ' ': case NCKEY_PGDOWN: page_results(&app, +1); break;
       case 'b': case NCKEY_PGUP:   page_results(&app, -1); break;
-      // Enter = select: on the query panel, open the field-edit modal (which
-      // runs on confirm). In results, reserved for `c`-dispatch later.
       case NCKEY_ENTER: case '\n': case '\r':
         if (app.focus == Focus::Query) open_modal(&app);
         break;
-      case 'c':  // dispatch the cursored result value into a compatible query
+      case 'c':
         if (app.focus == Focus::Results) open_dispatch(&app);
         break;
-      case '[': history_back(&app); break;   // step to previous query page
-      case ']': history_fwd(&app); break;    // step to next query page
-      case 's': save_current(&app); break;   // save current query to Lua
-      case 'R': load_presets(&app); break;   // reload presets from Lua
+      case '[': history_back(&app); break;
+      case ']': history_fwd(&app); break;
+      case 's': save_current(&app); break;
+      case 'R': load_presets(&app); break;
       default: break;
     }
     redraw(&app);
   }
 
-  if (app.worker.joinable()) {  // cancel + join any in-flight query
+  if (app.worker.joinable()) {
     app.q_cancel.store(true);
     app.worker.join();
   }
-  if (app.gen_worker.joinable()) {  // terminate + join any running generation
+  if (app.gen_worker.joinable()) {
     int pid = app.gen_pid.load();
     if (pid > 0) ::kill(pid, SIGTERM);
     app.gen_worker.join();

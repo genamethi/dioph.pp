@@ -1,4 +1,5 @@
 #include "primeparts/writer.h"
+#include "primeparts/schemas.h"
 
 #include <arrow/api.h>
 
@@ -10,6 +11,10 @@
 
 #include "iceberg/expression/literal.h"
 #include "iceberg/manifest/manifest_entry.h"
+#include "iceberg/partition_spec.h"
+#include "iceberg/row/partition_values.h"
+#include "iceberg/sort_field.h"
+#include "iceberg/sort_order.h"
 #include "iceberg/type.h"
 
 namespace {
@@ -36,7 +41,7 @@ std::shared_ptr<arrow::RecordBatch> MakePrimesBatch(
   for (int64_t value : {3, 5, 7}) {
     if (!p.Append(value).ok()) std::exit(1);
   }
-  for (int32_t value : {1, 1, 1}) {
+  for (int32_t value : {2, 1, 3}) {
     if (!k.Append(value).ok()) std::exit(1);
   }
   for (int64_t value : {0, 1, 2}) {
@@ -63,6 +68,48 @@ bool Check(bool condition, const std::string& message) {
   return true;
 }
 
+int64_t BoundI64(const std::map<int32_t, std::vector<uint8_t>>& bounds,
+                 int32_t field_id) {
+  auto lit = iceberg::Literal::Deserialize(bounds.at(field_id), iceberg::int64());
+  if (!lit.has_value()) {
+    std::cerr << lit.error().message << "\n";
+    std::exit(1);
+  }
+  return std::get<int64_t>(lit.value().value());
+}
+
+int32_t BoundI32(const std::map<int32_t, std::vector<uint8_t>>& bounds,
+                 int32_t field_id) {
+  auto lit = iceberg::Literal::Deserialize(bounds.at(field_id), iceberg::int32());
+  if (!lit.has_value()) {
+    std::cerr << lit.error().message << "\n";
+    std::exit(1);
+  }
+  return std::get<int32_t>(lit.value().value());
+}
+
+primeparts::WriterConfig BaseConfig(
+    const std::filesystem::path& out,
+    const std::shared_ptr<iceberg::Schema>& schema,
+    const std::shared_ptr<iceberg::PartitionSpec>& spec) {
+  primeparts::WriterConfig cfg;
+  cfg.output_dir = out / "primeparts" / "primes" / "data" /
+                   "p_bucket_version=1" / "p_bucket=2";
+  cfg.schema = schema;
+  cfg.table_name = "primes";
+  cfg.filename_prefix = "primes";
+  cfg.delta_columns = {"p", "prime_rank"};
+  cfg.partition_spec = spec;
+  cfg.partition_values = std::make_shared<iceberg::PartitionValues>(
+      std::vector<iceberg::Literal>{iceberg::Literal::Int(1),
+                                    iceberg::Literal::Int(2)});
+  cfg.bucket_version = 1;
+  cfg.bucket = 2;
+  cfg.compression_level = 1;
+  cfg.data_pagesize = 1024;
+  return cfg;
+}
+
 }  // namespace
 
 int main() {
@@ -73,24 +120,46 @@ int main() {
 
   std::string error;
   auto schema = primeparts::PrimesSchema();
+  auto spec = primeparts::BucketPartitionSpec(*schema, &error);
+  if (!spec) {
+    std::cerr << error << "\n";
+    return 1;
+  }
   auto arrow_schema = primeparts::IcebergToArrowSchemaWithFieldIds(*schema, &error);
   if (!arrow_schema) {
     std::cerr << error << "\n";
     return 1;
   }
 
-  primeparts::WriterConfig cfg;
-  cfg.output_dir = out / "primeparts" / "primes" / "data" /
-                   "p_bucket_version=1" / "p_bucket=2";
-  cfg.schema = schema;
-  cfg.table_name = "primes";
-  cfg.filename_prefix = "primes";
-  cfg.delta_columns = {"p", "prime_rank"};
-  cfg.bucket_version = 1;
-  cfg.bucket = 2;
-  cfg.compression_level = 1;
-  cfg.data_pagesize = 1024;
+  {
+    auto cfg = BaseConfig(out, schema, spec);
+    cfg.stat_columns = {{"nope", true}};
+    auto w = primeparts::BucketParquetWriter::Make(std::move(cfg), &error);
+    if (!Check(w == nullptr, "expected Make to reject unknown stat column")) {
+      return 1;
+    }
+  }
+  {
+    auto cfg = BaseConfig(out, schema, spec);
+    cfg.partition_values.reset();
+    auto w = primeparts::BucketParquetWriter::Make(std::move(cfg), &error);
+    if (!Check(w == nullptr,
+               "expected Make to reject partitioned spec without "
+               "partition_values")) {
+      return 1;
+    }
+  }
+  {
+    auto cfg = BaseConfig(out, schema, spec);
+    cfg.partition_spec.reset();
+    auto w = primeparts::BucketParquetWriter::Make(std::move(cfg), &error);
+    if (!Check(w == nullptr, "expected Make to reject null partition_spec")) {
+      return 1;
+    }
+  }
 
+  auto cfg = BaseConfig(out, schema, spec);
+  cfg.stat_columns = {{"p", true}, {"prime_rank", true}, {"k", false}};
   auto writer = primeparts::BucketParquetWriter::Make(std::move(cfg), &error);
   if (!writer) {
     std::cerr << error << "\n";
@@ -98,8 +167,7 @@ int main() {
   }
 
   auto batch = MakePrimesBatch(arrow_schema);
-  if (!writer->Write(*batch, {.p_min = 3, .p_max = 7, .rank_min = 0, .rank_max = 2},
-                     &error)) {
+  if (!writer->Write(*batch, &error)) {
     std::cerr << error << "\n";
     return 1;
   }
@@ -113,6 +181,9 @@ int main() {
   if (!Check(files.size() == 1, "expected one written file")) return 1;
   const auto& file = files.front();
   if (!Check(file.rows == 3, "expected WrittenFile rows=3")) return 1;
+  if (!Check(file.bounds.size() == 3, "expected bounds for 3 stat columns")) {
+    return 1;
+  }
   if (!Check(file.data_file != nullptr, "expected Iceberg DataFile metadata")) {
     return 1;
   }
@@ -153,25 +224,53 @@ int main() {
              "expected p null_count=0")) {
     return 1;
   }
-  auto lower = iceberg::Literal::Deserialize(
-      file.data_file->lower_bounds.at(1), iceberg::int64());
-  if (!lower.has_value()) {
-    std::cerr << lower.error().message << "\n";
-    return 1;
-  }
-  auto upper = iceberg::Literal::Deserialize(
-      file.data_file->upper_bounds.at(1), iceberg::int64());
-  if (!upper.has_value()) {
-    std::cerr << upper.error().message << "\n";
-    return 1;
-  }
-  if (!Check(std::get<int64_t>(lower.value().value()) == 3,
+  if (!Check(BoundI64(file.data_file->lower_bounds, 1) == 3,
              "expected p lower_bound=3")) {
     return 1;
   }
-  if (!Check(std::get<int64_t>(upper.value().value()) == 7,
+  if (!Check(BoundI64(file.data_file->upper_bounds, 1) == 7,
              "expected p upper_bound=7")) {
     return 1;
+  }
+  if (!Check(BoundI64(file.data_file->lower_bounds, 3) == 0,
+             "expected prime_rank lower_bound=0")) {
+    return 1;
+  }
+  if (!Check(BoundI64(file.data_file->upper_bounds, 3) == 2,
+             "expected prime_rank upper_bound=2")) {
+    return 1;
+  }
+  if (!Check(BoundI32(file.data_file->lower_bounds, 2) == 1,
+             "expected k lower_bound=1 (int32, unsorted scan)")) {
+    return 1;
+  }
+  if (!Check(BoundI32(file.data_file->upper_bounds, 2) == 3,
+             "expected k upper_bound=3 (int32, unsorted scan)")) {
+    return 1;
+  }
+  if (!Check(file.data_file->lower_bounds.at(2).size() == 4,
+             "expected int32 bound serialized as 4 bytes")) {
+    return 1;
+  }
+
+  {
+    auto parts = primeparts::PartitionsSchema();
+    auto order = primeparts::AscendingSortOrder(*parts, {"p", "m_k"}, &error);
+    if (!Check(order != nullptr, "AscendingSortOrder(p, m_k): " + error)) {
+      return 1;
+    }
+    auto fields = order->fields();
+    if (!Check(order->order_id() == 1 && fields.size() == 2 &&
+                   fields[0].source_id() == 1 && fields[1].source_id() == 2 &&
+                   fields[0].direction() == iceberg::SortDirection::kAscending &&
+                   fields[1].direction() == iceberg::SortDirection::kAscending,
+               "expected two-field ascending order (p=1, m_k=2)")) {
+      return 1;
+    }
+    auto bad = primeparts::AscendingSortOrder(*parts, {"p", "nope"}, &error);
+    if (!Check(bad == nullptr, "expected unknown sort field to error")) {
+      return 1;
+    }
   }
 
   std::filesystem::remove_all(out, ec);

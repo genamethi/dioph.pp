@@ -1,18 +1,15 @@
-// primeparts/query/query_service.cc — see header.
-
 #include "primeparts/query/query_service.h"
 
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
-#include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <thread>
 #include <utility>
+#include <variant>
 
 #include <arrow/array.h>
 #include <arrow/record_batch.h>
@@ -27,28 +24,75 @@
 #include "iceberg/snapshot.h"
 #include "iceberg/table.h"
 #include "iceberg/table_identifier.h"
+#include "iceberg/table_metadata.h"
 #include "iceberg/table_scan.h"
+#include "iceberg/type.h"
 
 #include "primeparts/catalog/pp_iceberg_rest.h"
 #include "primeparts/query/materialize.h"
+#include "primeparts/scan/column_binder.h"
+#include "primeparts/scan/scan_planner.h"
 #include "primeparts/source_scan.h"
 
 namespace primeparts::query {
 
 namespace {
-const iceberg::Namespace kNs{{"primeparts"}};
+
+struct WidenedColumn {
+  const int64_t* i64 = nullptr;
+  const int32_t* i32 = nullptr;
+
+  int64_t Value(int64_t row) const { return i64 ? i64[row] : i32[row]; }
+
+  static bool Bind(const arrow::RecordBatch& batch, const std::string& name,
+                   WidenedColumn* out, std::string* error) {
+    *out = WidenedColumn{};
+    auto col = batch.GetColumnByName(name);
+    if (!col) {
+      if (error) *error = "column not in batch: " + name;
+      return false;
+    }
+    if (col->type_id() == arrow::Type::INT64) {
+      out->i64 = scan::BindInt64(batch, name, error);
+      return out->i64 != nullptr;
+    }
+    if (col->type_id() == arrow::Type::INT32) {
+      out->i32 = scan::BindInt32(batch, name, error);
+      return out->i32 != nullptr;
+    }
+    if (error) {
+      *error = "column " + name + " is not an integer type: " +
+               col->type()->ToString();
+    }
+    return false;
+  }
+};
+
+bool RequireSorted(const primeparts::SourceTableReader& reader,
+                   const std::string& table, const char* what,
+                   std::string* error) {
+  if (reader.traits().sorted() && reader.traits().sort_keys.front().ascending) {
+    return true;
+  }
+  if (error) {
+    *error = "table '" + table +
+             "' declares no ascending sort order in the catalog; " + what +
+             " requires one";
+  }
+  return false;
+}
+
 }  // namespace
 
 struct QueryService::Impl {
   std::shared_ptr<iceberg::Catalog> catalog;
-  fs::path warehouse;  // root, for materialize (CommitFiles needs it)
-  std::vector<std::string> schema_fields;  // cached union of base-table fields
+  fs::path warehouse;
+  iceberg::Namespace ns;
+  std::vector<std::string> schema_fields;
   bool schema_loaded = false;
 
-  // Resolve a table's current metadata.json path through the catalog seam
-  // (LoadTable). Empty + *error on failure.
   fs::path ResolveMeta(const std::string& table, std::string* error) {
-    auto t = catalog->LoadTable(iceberg::TableIdentifier{.ns = kNs, .name = table});
+    auto t = catalog->LoadTable(iceberg::TableIdentifier{.ns = ns, .name = table});
     if (!t.has_value()) {
       if (error) *error = "LoadTable(" + table + "): " + t.error().message;
       return {};
@@ -61,13 +105,14 @@ QueryService::QueryService(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) 
 QueryService::~QueryService() = default;
 
 std::unique_ptr<QueryService> QueryService::Open(const fs::path& warehouse,
+                                                 const iceberg::Namespace& ns,
                                                  std::string* error) {
   auto impl = std::make_unique<Impl>();
-  // REST-default via PRIMEPARTS_REST_URI, transparent local fallback.
   std::string mode;
-  impl->catalog = catalog::OpenCatalog(warehouse, /*rest_uri=*/"", &mode, error);
+  impl->catalog = catalog::OpenCatalog(warehouse, "", &mode, error);
   if (!impl->catalog) return nullptr;
   impl->warehouse = warehouse;
+  impl->ns = ns;
   return std::unique_ptr<QueryService>(new QueryService(std::move(impl)));
 }
 
@@ -84,7 +129,7 @@ std::optional<PrimeInfo> QueryService::LookupPrime(int64_t p, std::string* error
     if (error) *error = "open primes: " + e;
     return std::nullopt;
   }
-  const int64_t total = reader->total_records();
+  const int64_t total = reader->planned_records();
   int64_t scanned = 0;
 
   std::shared_ptr<arrow::RecordBatch> batch;
@@ -94,20 +139,23 @@ std::optional<PrimeInfo> QueryService::LookupPrime(int64_t p, std::string* error
       if (error) *error = "scan primes: " + e;
       return std::nullopt;
     }
-    if (!batch) break;  // EOF
-    auto pa = std::static_pointer_cast<arrow::Int64Array>(batch->GetColumnByName("p"));
-    auto ka = std::static_pointer_cast<arrow::Int32Array>(batch->GetColumnByName("k"));
-    auto ra = std::static_pointer_cast<arrow::Int64Array>(
-        batch->GetColumnByName("prime_rank"));
+    if (!batch) break;
+    const int64_t* pa = scan::BindInt64(*batch, "p", &e);
+    const int32_t* ka = scan::BindInt32(*batch, "k", &e);
+    const int64_t* ra = scan::BindInt64(*batch, "prime_rank", &e);
+    if (!pa || !ka || !ra) {
+      if (error) *error = "primes batch: " + e;
+      return std::nullopt;
+    }
     for (int64_t i = 0; i < batch->num_rows(); ++i) {
-      if (pa->Value(i) == p) {
-        return PrimeInfo{.p = p, .k = ka->Value(i), .prime_rank = ra->Value(i)};
+      if (pa[i] == p) {
+        return PrimeInfo{.p = p, .k = ka[i], .prime_rank = ra[i]};
       }
     }
     scanned += batch->num_rows();
     if (ctl.progress) ctl.progress(scanned, total);
   }
-  return std::nullopt;  // not present
+  return std::nullopt;
 }
 
 std::vector<PartitionTuple> QueryService::LookupPartitions(
@@ -133,14 +181,17 @@ std::vector<PartitionTuple> QueryService::LookupPartitions(
       return out;
     }
     if (!batch) break;
-    auto pa = std::static_pointer_cast<arrow::Int64Array>(batch->GetColumnByName("p"));
-    auto ma = std::static_pointer_cast<arrow::Int32Array>(batch->GetColumnByName("m_k"));
-    auto na = std::static_pointer_cast<arrow::Int32Array>(batch->GetColumnByName("n_k"));
-    auto qa = std::static_pointer_cast<arrow::Int64Array>(batch->GetColumnByName("q_k"));
+    const int64_t* pa = scan::BindInt64(*batch, "p", &e);
+    const int32_t* ma = scan::BindInt32(*batch, "m_k", &e);
+    const int32_t* na = scan::BindInt32(*batch, "n_k", &e);
+    const int64_t* qa = scan::BindInt64(*batch, "q_k", &e);
+    if (!pa || !ma || !na || !qa) {
+      if (error) *error = "partitions batch: " + e;
+      return out;
+    }
     for (int64_t i = 0; i < batch->num_rows(); ++i) {
-      if (pa->Value(i) == p) {
-        out.push_back(PartitionTuple{
-            .m_k = ma->Value(i), .n_k = na->Value(i), .q_k = qa->Value(i)});
+      if (pa[i] == p) {
+        out.push_back(PartitionTuple{.m_k = ma[i], .n_k = na[i], .q_k = qa[i]});
       }
     }
   }
@@ -155,10 +206,6 @@ std::vector<ScanHit> QueryService::ScanByK(int32_t k, int64_t p_lo, int64_t p_hi
   fs::path meta = impl_->ResolveMeta("primes", error);
   if (meta.empty()) return out;
 
-  // Pushdown: k == K, bounded by the p-window [p_lo, p_hi] (open ends when <= 0).
-  // TODO(lua-preset): this predicate is the execution seam a Lua preset would
-  // drive — e.g. preset.run(f) -> pp.scan_k(f.k, f.p_lo, f.p_hi, f.limit); the
-  // hardcoded build here is the provisional stand-in (markdown/arch/tui_app_design.md).
   std::shared_ptr<iceberg::Expression> filter =
       iceberg::Expressions::Equal("k", iceberg::Literal::Int(k));
   if (p_lo > 0) {
@@ -179,31 +226,29 @@ std::vector<ScanHit> QueryService::ScanByK(int32_t k, int64_t p_lo, int64_t p_hi
     if (error) *error = "open primes: " + e;
     return out;
   }
-  const int64_t total = reader->total_records();
+  if (!RequireSorted(*reader, "primes", "ScanByK", error)) return out;
+  const int64_t total = reader->planned_records();
 
   int64_t scanned = 0;
-  bool past_window = false;  // p is streamed ascending; stop once p > p_hi
   std::shared_ptr<arrow::RecordBatch> batch;
-  while ((int64_t)out.size() < limit && !past_window) {
-    if (ctl.cancel && ctl.cancel->load()) break;  // cooperative cancel
+  while ((int64_t)out.size() < limit) {
+    if (ctl.cancel && ctl.cancel->load()) break;
     if (!reader->Next(&batch, &e)) {
       if (error) *error = "scan primes: " + e;
       return out;
     }
-    if (!batch) break;  // EOF
-    auto pa = std::static_pointer_cast<arrow::Int64Array>(batch->GetColumnByName("p"));
-    auto ka = std::static_pointer_cast<arrow::Int32Array>(batch->GetColumnByName("k"));
-    auto ra = std::static_pointer_cast<arrow::Int64Array>(
-        batch->GetColumnByName("prime_rank"));
-    for (int64_t i = 0; i < batch->num_rows() && (int64_t)out.size() < limit; ++i) {
-      const int64_t pv = pa->Value(i);
-      // iceberg-cpp prunes whole files by the predicate but does NOT enforce a
-      // row-level residual, so enforce both k and the p-window in C++. p is
-      // sorted ascending across the stream -> early-stop once past p_hi.
-      if (p_hi > 0 && pv > p_hi) { past_window = true; break; }
-      if (p_lo > 0 && pv < p_lo) continue;
-      if (ka->Value(i) == k) {
-        out.push_back(ScanHit{.p = pv, .prime_rank = ra->Value(i)});
+    if (!batch) break;
+    const int64_t* pa = scan::BindInt64(*batch, "p", &e);
+    const int32_t* ka = scan::BindInt32(*batch, "k", &e);
+    const int64_t* ra = scan::BindInt64(*batch, "prime_rank", &e);
+    if (!pa || !ka || !ra) {
+      if (error) *error = "primes batch: " + e;
+      return out;
+    }
+    for (int64_t i = 0; i < batch->num_rows() && (int64_t)out.size() < limit;
+         ++i) {
+      if (ka[i] == k) {
+        out.push_back(ScanHit{.p = pa[i], .prime_rank = ra[i]});
       }
     }
     scanned += batch->num_rows();
@@ -213,13 +258,21 @@ std::vector<ScanHit> QueryService::ScanByK(int32_t k, int64_t p_lo, int64_t p_hi
 }
 
 std::vector<GroupCountRow> QueryService::GroupCount(
-    const std::string& table, const std::string& column, int64_t p_lo,
-    int64_t p_hi, int threads, std::string* error, const ScanControl& ctl) {
+    const std::string& table, const GroupKey& key, int64_t p_lo, int64_t p_hi,
+    int threads, std::string* error, const ScanControl& ctl) {
   std::vector<GroupCountRow> out;
+  if (!key.derived() && key.column.empty()) {
+    if (error) *error = "GroupCount: empty group key";
+    return out;
+  }
+  if (key.derived() && key.inputs.empty()) {
+    if (error) *error = "GroupCount: derived group key declares no inputs";
+    return out;
+  }
   fs::path meta = impl_->ResolveMeta(table, error);
   if (meta.empty()) return out;
 
-  // Optional p-window pushdown (file pruning only; both base tables carry `p`).
+  const bool windowed = (p_lo > 0 || p_hi > 0);
   std::shared_ptr<iceberg::Expression> filter;
   if (p_lo > 0) {
     filter = iceberg::Expressions::GreaterThanOrEqual(
@@ -236,37 +289,28 @@ std::vector<GroupCountRow> QueryService::GroupCount(
     threads = hw == 0 ? 4 : std::max(1, std::min(8, static_cast<int>(hw)));
   }
 
-  // Grouping key. Besides a raw integer column, a small set of derived
-  // ("virtual") keys is supported, computed per row in C++ from `primes`:
-  //   "bits" = floor(log2(p))       — the candidate-position count max_m
-  //   "r"    = floor(log2(p)) - k   — the # of m where p-2^m is NOT a prime
-  //            power (the "misses"); r >= 0 since k <= max_m (one soln per m).
-  enum class Key { kColumn, kBits, kR };
-  Key key = Key::kColumn;
-  if (column == "bits") key = Key::kBits;
-  else if (column == "r") key = Key::kR;
+  std::vector<std::string> cols =
+      key.derived() ? key.inputs : std::vector<std::string>{key.column};
 
-  // iceberg prunes whole files by the predicate but does NOT enforce a
-  // row-level residual, so a p-window means we read `p` too and bound each row
-  // in C++ (mirrors ScanByK). Derived keys also pull their inputs (p, k).
-  const bool windowed = (p_lo > 0 || p_hi > 0);
-  const bool need_p = windowed || key == Key::kBits || key == Key::kR;
-  const bool need_k = key == Key::kR;
-  std::vector<std::string> cols;
-  auto add_col = [&](const std::string& c) {
-    if (std::find(cols.begin(), cols.end(), c) == cols.end()) cols.push_back(c);
-  };
-  if (key == Key::kColumn) add_col(column);
-  if (need_p) add_col("p");
-  if (need_k) add_col("k");
-
-  // Total (for progress) via a cheap manifest read on a probe reader.
   int64_t total = 0;
   {
     std::string pe;
     auto probe =
         primeparts::SourceTableReader::OpenMetadata(meta, cols, filter, &pe);
-    if (probe) total = probe->total_records();
+    if (!probe) {
+      if (error) *error = "open " + table + ": " + pe;
+      return out;
+    }
+    if (windowed && !RequireSorted(*probe, table, "a p-window", error)) {
+      return out;
+    }
+    if (windowed) {
+      const std::string& key_col = probe->traits().sort_keys.front().name;
+      if (std::find(cols.begin(), cols.end(), key_col) == cols.end()) {
+        cols.push_back(key_col);
+      }
+    }
+    total = probe->planned_records();
   }
 
   std::vector<std::map<int64_t, int64_t>> partials(threads);
@@ -284,70 +328,44 @@ std::vector<GroupCountRow> QueryService::GroupCount(
   auto worker = [&](int t) {
     std::string e;
     auto reader = primeparts::SourceTableReader::OpenMetadata(
-        meta, cols, filter, &e, /*shard_index=*/t, /*shard_count=*/threads);
-    if (!reader) { fail("open " + table + ": " + e); return; }
+        meta, cols, filter, &e, t, threads);
+    if (!reader) {
+      fail("open " + table + ": " + e);
+      return;
+    }
     auto& acc = partials[static_cast<size_t>(t)];
-    auto bits = [](int64_t p) {
-      return static_cast<int64_t>(
-          63 - __builtin_clzll(static_cast<unsigned long long>(p)));
-    };
     std::shared_ptr<arrow::RecordBatch> batch;
+    std::vector<WidenedColumn> bound(key.derived() ? key.inputs.size() : 1);
+    std::vector<int64_t> vals(bound.size());
     while (true) {
       if (ctl.cancel && ctl.cancel->load()) return;
-      if (!reader->Next(&batch, &e)) { fail("scan " + table + ": " + e); return; }
-      if (!batch) break;  // EOF
+      if (!reader->Next(&batch, &e)) {
+        fail("scan " + table + ": " + e);
+        return;
+      }
+      if (!batch) break;
       const int64_t n = batch->num_rows();
 
-      std::shared_ptr<arrow::Int64Array> pa;
-      std::shared_ptr<arrow::Int32Array> ka;
-      if (need_p) {
-        pa = std::static_pointer_cast<arrow::Int64Array>(
-            batch->GetColumnByName("p"));
-        if (!pa) { fail("p column missing on " + table); return; }
-      }
-      if (need_k) {
-        ka = std::static_pointer_cast<arrow::Int32Array>(
-            batch->GetColumnByName("k"));
-        if (!ka) { fail("k column missing on " + table); return; }
-      }
-      auto in_window = [&](int64_t i) {
-        if (!windowed) return true;
-        const int64_t pv = pa->Value(i);
-        if (p_lo > 0 && pv < p_lo) return false;
-        if (p_hi > 0 && pv > p_hi) return false;
-        return true;
-      };
-
-      if (key == Key::kBits) {
-        for (int64_t i = 0; i < n; ++i)
-          if (in_window(i)) acc[bits(pa->Value(i))]++;
-      } else if (key == Key::kR) {
-        for (int64_t i = 0; i < n; ++i)
-          if (in_window(i)) acc[bits(pa->Value(i)) - ka->Value(i)]++;
-      } else {
-        auto arr = batch->GetColumnByName(column);
-        if (!arr) { fail("column not found: " + column); return; }
-        switch (arr->type_id()) {
-          case arrow::Type::INT32: {
-            auto a = std::static_pointer_cast<arrow::Int32Array>(arr);
-            for (int64_t i = 0; i < n; ++i)
-              if (in_window(i)) acc[a->Value(i)]++;
-            break;
-          }
-          case arrow::Type::INT64: {
-            auto a = std::static_pointer_cast<arrow::Int64Array>(arr);
-            for (int64_t i = 0; i < n; ++i)
-              if (in_window(i)) acc[a->Value(i)]++;
-            break;
-          }
-          default:
-            fail("unsupported (non-integer) column for group: " + column);
+      if (key.derived()) {
+        for (size_t j = 0; j < key.inputs.size(); ++j) {
+          if (!WidenedColumn::Bind(*batch, key.inputs[j], &bound[j], &e)) {
+            fail(table + ": " + e);
             return;
+          }
         }
+        for (int64_t i = 0; i < n; ++i) {
+          for (size_t j = 0; j < bound.size(); ++j) vals[j] = bound[j].Value(i);
+          acc[key.fn(vals.data())]++;
+        }
+      } else {
+        if (!WidenedColumn::Bind(*batch, key.column, &bound[0], &e)) {
+          fail(table + ": " + e);
+          return;
+        }
+        for (int64_t i = 0; i < n; ++i) acc[bound[0].Value(i)]++;
       }
+
       const int64_t s = scanned.fetch_add(n) + n;
-      // Only thread 0 reports progress, so the (possibly non-thread-safe)
-      // callback is never invoked concurrently.
       if (t == 0 && ctl.progress) ctl.progress(s, total);
     }
   };
@@ -375,8 +393,8 @@ bool QueryService::Materialize(const std::string& name,
                                const std::vector<std::vector<int64_t>>& columns,
                                std::string* metadata_location,
                                std::string* error) {
-  return MaterializeIntColumns(impl_->catalog, impl_->warehouse, name, col_names,
-                               columns, metadata_location, error);
+  return MaterializeIntColumns(impl_->catalog, impl_->ns, impl_->warehouse, name,
+                               col_names, columns, metadata_location, error);
 }
 
 TableRows QueryService::ReadTable(const std::string& table,
@@ -384,7 +402,7 @@ TableRows QueryService::ReadTable(const std::string& table,
                                   int64_t limit, std::string* error) {
   TableRows out;
   auto t = impl_->catalog->LoadTable(
-      iceberg::TableIdentifier{.ns = kNs, .name = table});
+      iceberg::TableIdentifier{.ns = impl_->ns, .name = table});
   if (!t.has_value()) {
     if (error) *error = "LoadTable(" + table + "): " + t.error().message;
     return out;
@@ -405,39 +423,27 @@ TableRows QueryService::ReadTable(const std::string& table,
   out.cols = cols;
 
   std::shared_ptr<arrow::RecordBatch> batch;
+  std::vector<WidenedColumn> bound(cols.size());
   while (true) {
     if (!reader->Next(&batch, &e)) {
       if (error) *error = "scan " + table + ": " + e;
       out.rows.clear();
       return out;
     }
-    if (!batch) break;  // EOF
+    if (!batch) break;
     const int64_t n = batch->num_rows();
-    std::vector<std::shared_ptr<arrow::Array>> arrs;
-    for (const auto& c : cols) {
-      auto a = batch->GetColumnByName(c);
-      if (!a) {
-        if (error) *error = "column not found: " + c;
+    for (size_t j = 0; j < cols.size(); ++j) {
+      if (!WidenedColumn::Bind(*batch, cols[j], &bound[j], &e)) {
+        if (error) *error = table + ": " + e;
         out.rows.clear();
         return out;
       }
-      arrs.push_back(std::move(a));
     }
     for (int64_t i = 0; i < n; ++i) {
       if (limit > 0 && static_cast<int64_t>(out.rows.size()) >= limit) return out;
       std::vector<int64_t> row;
       row.reserve(cols.size());
-      for (const auto& a : arrs) {
-        if (a->type_id() == arrow::Type::INT32) {
-          row.push_back(std::static_pointer_cast<arrow::Int32Array>(a)->Value(i));
-        } else if (a->type_id() == arrow::Type::INT64) {
-          row.push_back(std::static_pointer_cast<arrow::Int64Array>(a)->Value(i));
-        } else {
-          if (error) *error = "non-integer column in read: " + table;
-          out.rows.clear();
-          return out;
-        }
-      }
+      for (const auto& b : bound) row.push_back(b.Value(i));
       out.rows.push_back(std::move(row));
     }
   }
@@ -449,7 +455,7 @@ const std::vector<std::string>& QueryService::SchemaFields() {
   std::vector<std::string>& out = impl_->schema_fields;
   for (const char* tbl : {"primes", "partitions"}) {
     auto t = impl_->catalog->LoadTable(
-        iceberg::TableIdentifier{.ns = kNs, .name = tbl});
+        iceberg::TableIdentifier{.ns = impl_->ns, .name = tbl});
     if (!t.has_value()) continue;
     auto sch = t.value()->schema();
     if (!sch.has_value()) continue;
@@ -466,8 +472,6 @@ bool QueryService::ValidatePreset(const QueryPreset& p, std::string* error) {
   if (p.id.empty()) return fail("preset id is empty");
   if (p.kind != "by_k" && p.kind != "lookup")
     return fail("unknown query kind: '" + p.kind + "'");
-  // No live schema (no catalog/tables loaded) -> validate accepts/target against
-  // the preset's own declared fields instead of the base-table columns.
   const auto& schema = SchemaFields();
   auto declared = [&](const std::string& n) {
     for (const auto& f : p.fields)
@@ -491,7 +495,7 @@ bool QueryService::ValidatePreset(const QueryPreset& p, std::string* error) {
 }
 
 std::vector<std::string> QueryService::ListTables(std::string* error) {
-  auto r = impl_->catalog->ListTables(kNs);
+  auto r = impl_->catalog->ListTables(impl_->ns);
   if (!r.has_value()) {
     if (error) *error = "ListTables: " + r.error().message;
     return {};
@@ -503,12 +507,12 @@ std::vector<std::string> QueryService::ListTables(std::string* error) {
   return out;
 }
 
-TableExtent QueryService::Extent(const std::string& table, bool with_max_p,
+TableExtent QueryService::Extent(const std::string& table, bool with_key_max,
                                  std::string* error, const ScanControl& ctl) {
   TableExtent e;
   e.table = table;
   auto t = impl_->catalog->LoadTable(
-      iceberg::TableIdentifier{.ns = kNs, .name = table});
+      iceberg::TableIdentifier{.ns = impl_->ns, .name = table});
   if (!t.has_value()) {
     if (error) *error = "LoadTable(" + table + "): " + t.error().message;
     return e;
@@ -516,7 +520,6 @@ TableExtent QueryService::Extent(const std::string& table, bool with_max_p,
   auto tbl = t.value();
   e.snapshots = static_cast<int64_t>(tbl->snapshots().size());
 
-  // Summary facts come straight from the current snapshot — no scan.
   if (auto snap = tbl->current_snapshot(); snap.has_value() && snap.value()) {
     const auto& s = *snap.value();
     e.snapshot_id = s.snapshot_id;
@@ -531,51 +534,55 @@ TableExtent QueryService::Extent(const std::string& table, bool with_max_p,
     e.file_bytes = num(iceberg::SnapshotSummaryFields::kTotalFileSize);
   }
 
-  // Frontier: max of the "p" column's per-file upper bounds (manifest aggregate,
-  // not a row scan). Only for tables that actually have a "p" column.
-  if (with_max_p) {
-    int32_t pid = -1;
-    if (auto sch = tbl->schema(); sch.has_value()) {
-      for (const auto& f : sch.value()->fields())
-        if (f.name() == "p") { pid = f.field_id(); break; }
+  const auto& metadata = tbl->metadata();
+  scan::TableReadTraits traits;
+  std::string te;
+  if (metadata && scan::TableReadTraits::FromMetadata(*metadata, &traits, &te) &&
+      traits.sorted()) {
+    e.key_name = traits.sort_keys.front().name;
+  }
+
+  if (with_key_max && !e.key_name.empty() && e.snapshot_id >= 0) {
+    const auto& key = traits.sort_keys.front();
+    scan::ScanPlanRequest request;
+    request.select = {key.name};
+    request.stats_fields = {key.name};
+    scan::ScanPlan plan;
+    std::string pe;
+    if (!scan::PlanTableScan(metadata, tbl->io(), request, &plan, &pe)) {
+      if (error) *error = "plan " + table + ": " + pe;
+      return e;
     }
-    const bool dbg = std::getenv("PP_EXTENT_DEBUG") != nullptr;
-    if (dbg) std::fprintf(stderr, "[ext] pid(p)=%d\n", pid);
-    if (pid >= 0) {
-      auto scan_b = tbl->NewScan();
-      if (scan_b.has_value()) {
-        auto scan = scan_b.value()->Build();
-        if (scan.has_value()) {
-          auto tasks = scan.value()->PlanFiles();
-          if (dbg && !tasks.has_value())
-            std::fprintf(stderr, "[ext] PlanFiles err: %s\n", tasks.error().message.c_str());
-          if (tasks.has_value()) {
-            if (dbg) std::fprintf(stderr, "[ext] %zu tasks\n", tasks.value().size());
-            int64_t mx = INT64_MIN;
-            int shown = 0;
-            for (const auto& task : tasks.value()) {
-              if (ctl.cancel && ctl.cancel->load()) break;
-              const auto& ub = task->data_file()->upper_bounds;
-              if (dbg && shown < 3) {
-                std::fprintf(stderr, "[ext] file ub_size=%zu:", ub.size());
-                for (auto& kv : ub) std::fprintf(stderr, " [%d]=%zuB", kv.first, kv.second.size());
-                std::fprintf(stderr, "\n"); ++shown;
-              }
-              auto it = ub.find(pid);
-              if (it != ub.end() && it->second.size() >= sizeof(int64_t)) {
-                int64_t v;  // iceberg `long` bound: 8-byte little-endian
-                std::memcpy(&v, it->second.data(), sizeof(int64_t));
-                if (v > mx) mx = v;
-              }
-            }
-            if (mx != INT64_MIN) e.max_p = mx;
-          }
-        } else if (dbg) {
-          std::fprintf(stderr, "[ext] Build err: %s\n", scan.error().message.c_str());
+    const iceberg::SchemaField* field = nullptr;
+    if (plan.table_schema) {
+      for (const auto& f : plan.table_schema->fields()) {
+        if (f.field_id() == key.field_id) {
+          field = &f;
+          break;
         }
-      } else if (dbg) {
-        std::fprintf(stderr, "[ext] NewScan err: %s\n", scan_b.error().message.c_str());
       }
+    }
+    if (field) {
+      const auto type = field->type()->type_id();
+      auto prim = type == iceberg::TypeId::kInt
+                      ? std::static_pointer_cast<iceberg::PrimitiveType>(
+                            iceberg::int32())
+                      : std::static_pointer_cast<iceberg::PrimitiveType>(
+                            iceberg::int64());
+      int64_t mx = INT64_MIN;
+      for (const auto& task : plan.tasks) {
+        if (ctl.cancel && ctl.cancel->load()) break;
+        const auto& ub = task.inner->data_file()->upper_bounds;
+        auto it = ub.find(key.field_id);
+        if (it == ub.end()) continue;
+        auto lit = iceberg::Literal::Deserialize(it->second, prim);
+        if (!lit.has_value()) continue;
+        int64_t v = type == iceberg::TypeId::kInt
+                        ? std::get<int32_t>(lit.value().value())
+                        : std::get<int64_t>(lit.value().value());
+        if (v > mx) mx = v;
+      }
+      if (mx != INT64_MIN) e.key_max = mx;
     }
   }
   e.ok = true;

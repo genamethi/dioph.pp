@@ -1,6 +1,3 @@
-// primeparts TUI — F5 Config screen: config rows (+/- and a warehouse-path
-// modal), plus the Lua config load/save + log janitor. See tui_app.h.
-
 #include "primeparts/tui/tui_app.h"
 
 #include <algorithm>
@@ -11,11 +8,10 @@
 #include <system_error>
 #include <vector>
 
+#include "primeparts/catalog/pp_iceberg_rest.h"
+
 namespace primeparts::tui {
 
-// --- Config screen ---------------------------------------------------------
-// Row kCfgWarehouse is a free-text path (Enter opens a text modal); the rest are
-// numeric / toggle rows driven by +/-.
 size_t cfg_count() { return 6; }
 std::string cfg_name(size_t i) {
   static const char* n[] = {"log limit", "gen threads", "default limit",
@@ -40,7 +36,7 @@ void cfg_adjust(App* a, size_t i, int d) {
     case 2: a->cfg.default_limit = std::max<int64_t>(1, a->cfg.default_limit + d * 5); break;
     case 3: a->cfg.log_format = (a->cfg.log_format == "flat") ? "json" : "flat"; break;
     case 4: a->cfg.autosave = !a->cfg.autosave; break;
-    case kCfgWarehouse: break;  // edited via Enter (text modal), not +/-
+    case kCfgWarehouse: break;
   }
 }
 
@@ -61,7 +57,6 @@ void draw_config(App* a) {
   }
 }
 
-// Open the single-box free-text modal bound to the warehouse path.
 void open_warehouse_modal(App* a) {
   a->modal_kind = ModalKind::Warehouse;
   a->modal_buf = {a->warehouse};
@@ -69,16 +64,11 @@ void open_warehouse_modal(App* a) {
   a->modal_on = true;
 }
 
-// Re-point the warehouse at `path`: try to reopen QueryService; on success swap
-// the live service (so F1 queries hit the new warehouse) and adopt the path. On
-// failure keep the existing service but still adopt the path for generation —
-// timing a from-scratch build means pointing at a dir with no tables to query
-// yet. Returns whether queries are now live against `path`.
 bool reopen_warehouse(App* a, const std::string& path) {
   a->warehouse = path;
   a->warehouse_dirty = true;
   std::string err;
-  auto qs = QueryService::Open(path, &err);
+  auto qs = QueryService::Open(path, a->ns, &err);
   if (qs) {
     a->qs_owned = std::move(qs);
     a->qs = a->qs_owned.get();
@@ -91,7 +81,6 @@ bool reopen_warehouse(App* a, const std::string& path) {
   return false;
 }
 
-// --- Config load / save / janitor ------------------------------------------
 void apply_config_kv(App* a, const std::map<std::string, std::string>& kv) {
   auto geti = [&](const char* k, int64_t d) {
     auto it = kv.find(k);
@@ -107,6 +96,9 @@ void apply_config_kv(App* a, const std::map<std::string, std::string>& kv) {
   if (bit != kv.end()) a->cfg.autosave = (bit->second == "true");
   auto wit = kv.find("warehouse");
   if (wit != kv.end() && !wit->second.empty()) a->warehouse = wit->second;
+  auto nit = kv.find("namespace");
+  if (nit != kv.end() && !nit->second.empty())
+    a->ns = catalog::ResolveNamespace(nit->second);
 }
 
 std::map<std::string, std::string> config_to_kv(const Config& c) {
@@ -117,7 +109,6 @@ std::map<std::string, std::string> config_to_kv(const Config& c) {
           {"autosave", c.autosave ? "true" : "false"}};
 }
 
-// Prune the run-log dir (<config>/logs) to the most-recent log_limit files.
 void run_janitor(App* a) {
   std::error_code ec;
   fs::path logs = fs::path(a->config_path).parent_path() / "logs";
@@ -135,7 +126,7 @@ void run_janitor(App* a) {
 }
 
 void load_config(App* a) {
-  if (!fs::exists(a->config_path)) return;  // keep defaults
+  if (!fs::exists(a->config_path)) return;
   std::vector<std::string> errs;
   apply_config_kv(a, a->lua.LoadConfig(a->config_path, &errs));
 }
@@ -143,7 +134,7 @@ void load_config(App* a) {
 void save_config(App* a) {
   std::string se;
   auto kv = config_to_kv(a->cfg);
-  kv["warehouse"] = a->warehouse;  // persisted alongside the numeric/toggle cfg
+  kv["warehouse"] = a->warehouse;
   if (LuaPresets::SaveConfig(kv, a->config_path, &se)) {
     a->warehouse_dirty = false;
     a->status_glyph = 'k';

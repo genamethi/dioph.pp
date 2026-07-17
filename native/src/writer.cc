@@ -1,5 +1,4 @@
 #include "primeparts/writer.h"
-#include "primeparts/schemas.h"
 
 #include <arrow/api.h>
 #include <arrow/io/file.h>
@@ -32,13 +31,6 @@ namespace primeparts {
 
 namespace {
 
-constexpr std::string_view kTmpDotPrefix = ".";
-
-// A per-file random token. Iceberg writers give every data file a unique name
-// so a fresh CreateTable+append after a DropTable never collides with an
-// orphaned file (and parallel writers never race on a path). Placed BEFORE the
-// trailing seq field so NextFileSeq, which reads the last '_'-delimited number,
-// still recovers the sequence for resume.
 uint32_t FileToken() {
   static thread_local std::mt19937 rng(
       std::random_device{}() ^
@@ -63,22 +55,12 @@ fs::path FilePathFor(const fs::path& dir, std::string_view prefix,
   return dir / name;
 }
 
-int32_t FieldIdByName(const iceberg::Schema& schema, std::string_view name) {
-  for (const auto& field : schema.fields()) {
-    if (field.name() == name) return field.field_id();
-  }
-  return -1;
-}
-
 std::shared_ptr<parquet::WriterProperties> ParquetWriterProperties(
     const WriterConfig& config, const arrow::Schema& arrow_schema) {
   parquet::WriterProperties::Builder builder;
   builder.compression(parquet::Compression::ZSTD);
   builder.compression_level(config.compression_level);
   builder.data_pagesize(config.data_pagesize);
-  // Row-group size is caller policy (see WriterConfig.max_row_group_rows). Base
-  // tables use ~240M rows (~256 MiB at ~1.1 B/row); sorted derived tables use a
-  // smaller value so each row group is a narrow sort-key band for pruning.
   builder.max_row_group_length(config.max_row_group_rows);
   for (const auto& col : config.delta_columns) {
     if (arrow_schema.GetFieldByName(col)) {
@@ -87,6 +69,44 @@ std::shared_ptr<parquet::WriterProperties> ParquetWriterProperties(
     }
   }
   return builder.build();
+}
+
+struct ResolvedStatColumn {
+  int32_t field_id = -1;
+  iceberg::TypeId type = iceberg::TypeId::kLong;
+  int arrow_index = -1;
+  bool sorted = false;
+};
+
+std::pair<int64_t, int64_t> BatchColumnBounds(const arrow::Array& array,
+                                              iceberg::TypeId type,
+                                              bool sorted) {
+  const int64_t n = array.length();
+  if (type == iceberg::TypeId::kInt) {
+    const auto& a = static_cast<const arrow::Int32Array&>(array);
+    if (sorted) return {a.Value(0), a.Value(n - 1)};
+    int32_t lo = a.Value(0), hi = a.Value(0);
+    for (int64_t i = 1; i < n; ++i) {
+      lo = std::min(lo, a.Value(i));
+      hi = std::max(hi, a.Value(i));
+    }
+    return {lo, hi};
+  }
+  const auto& a = static_cast<const arrow::Int64Array&>(array);
+  if (sorted) return {a.Value(0), a.Value(n - 1)};
+  int64_t lo = a.Value(0), hi = a.Value(0);
+  for (int64_t i = 1; i < n; ++i) {
+    lo = std::min(lo, a.Value(i));
+    hi = std::max(hi, a.Value(i));
+  }
+  return {lo, hi};
+}
+
+iceberg::Literal TypedLiteral(iceberg::TypeId type, int64_t value) {
+  if (type == iceberg::TypeId::kInt) {
+    return iceberg::Literal::Int(static_cast<int32_t>(value));
+  }
+  return iceberg::Literal::Long(value);
 }
 
 bool PutBound(std::map<int32_t, std::vector<uint8_t>>* bounds, int32_t field_id,
@@ -105,28 +125,18 @@ bool BuildDataFile(const WriterConfig& config,
                    const WrittenFile& file,
                    std::shared_ptr<iceberg::DataFile>* out,
                    std::string* error) {
-  if (!config.schema) {
-    if (error) *error = "WriterConfig.schema is null";
-    return false;
-  }
   auto data_file = std::make_shared<iceberg::DataFile>();
   data_file->content = iceberg::DataFile::Content::kData;
   data_file->file_path = file.path.string();
   data_file->file_format = iceberg::FileFormatType::kParquet;
   if (config.partition_values) {
     data_file->partition = *config.partition_values;
-  } else if (spec && spec->fields().empty()) {
-    // Unpartitioned table: the manifest partition tuple is empty.
-    data_file->partition = iceberg::PartitionValues();
   } else {
-    data_file->partition = iceberg::PartitionValues({
-        iceberg::Literal::Int(config.bucket_version),
-        iceberg::Literal::Int(config.bucket),
-    });
+    data_file->partition = iceberg::PartitionValues();
   }
   data_file->record_count = file.rows;
   data_file->file_size_in_bytes = file.bytes;
-  if (spec) data_file->partition_spec_id = spec->spec_id();
+  data_file->partition_spec_id = spec->spec_id();
 
   for (const auto& field : config.schema->fields()) {
     data_file->value_counts[field.field_id()] = file.rows;
@@ -135,22 +145,9 @@ bool BuildDataFile(const WriterConfig& config,
     }
   }
 
-  const int32_t p_id = FieldIdByName(*config.schema, "p");
-  if (p_id >= 0 && file.rows > 0) {
-    if (!PutBound(&data_file->lower_bounds, p_id,
-                  iceberg::Literal::Long(file.p_min), error) ||
-        !PutBound(&data_file->upper_bounds, p_id,
-                  iceberg::Literal::Long(file.p_max), error)) {
-      return false;
-    }
-  }
-
-  const int32_t rank_id = FieldIdByName(*config.schema, "prime_rank");
-  if (rank_id >= 0 && file.rows > 0) {
-    if (!PutBound(&data_file->lower_bounds, rank_id,
-                  iceberg::Literal::Long(file.rank_min), error) ||
-        !PutBound(&data_file->upper_bounds, rank_id,
-                  iceberg::Literal::Long(file.rank_max), error)) {
+  for (const auto& [field_id, bounds] : file.bounds) {
+    if (!PutBound(&data_file->lower_bounds, field_id, bounds.first, error) ||
+        !PutBound(&data_file->upper_bounds, field_id, bounds.second, error)) {
       return false;
     }
   }
@@ -194,8 +191,6 @@ std::shared_ptr<arrow::Schema> IcebergToArrowSchemaWithFieldIds(
     }
     auto kv = arrow::key_value_metadata(
         {{"PARQUET:field_id", std::to_string(f.field_id())}});
-    // Iceberg's required flag is the truth; mirror it on arrow side so
-    // parquet stops emitting null bitmaps for required columns.
     const bool nullable = f.optional();
     fields.push_back(
         arrow::field(std::string(f.name()), at, nullable, kv));
@@ -203,45 +198,22 @@ std::shared_ptr<arrow::Schema> IcebergToArrowSchemaWithFieldIds(
   return arrow::schema(fields);
 }
 
-int32_t NextFileSeq(const fs::path& output_dir, std::string_view prefix) {
-  std::error_code ec;
-  if (!fs::exists(output_dir, ec)) return 0;
-  int32_t max_seq = -1;
-  for (auto& entry : fs::directory_iterator(output_dir, ec)) {
-    if (ec || !entry.is_regular_file()) continue;
-    auto name = entry.path().filename().string();
-    if (name.size() <= prefix.size() ||
-        name.compare(0, prefix.size(), prefix) != 0) {
-      continue;
-    }
-    auto pos = name.rfind('_');
-    auto dot = name.find('.', pos == std::string::npos ? 0 : pos);
-    if (pos == std::string::npos || dot == std::string::npos) continue;
-    try {
-      int32_t seq = static_cast<int32_t>(
-          std::stoi(name.substr(pos + 1, dot - pos - 1)));
-      if (seq > max_seq) max_seq = seq;
-    } catch (...) {}
-  }
-  return max_seq + 1;
-}
-
 struct BucketParquetWriter::Impl {
   WriterConfig config;
   std::shared_ptr<arrow::Schema> arrow_schema;
   std::shared_ptr<iceberg::PartitionSpec> partition_spec;
   std::shared_ptr<parquet::WriterProperties> props;
+  std::vector<ResolvedStatColumn> stat_columns;
   int32_t next_seq = 0;
   bool closed = false;
 
-  // Current open file (none when between rolls).
   std::shared_ptr<arrow::io::FileOutputStream> sink;
   std::unique_ptr<parquet::arrow::FileWriter> writer;
   fs::path tmp_path;
   fs::path final_path;
   WrittenFile current_record;
+  std::vector<std::pair<int64_t, int64_t>> current_bounds;
 
-  // Lifetime accumulator.
   std::vector<WrittenFile> done;
 
   bool OpenIfNeeded(std::string* error);
@@ -289,6 +261,7 @@ bool BucketParquetWriter::Impl::OpenIfNeeded(std::string* error) {
   current_record.table = config.table_name;
   current_record.bucket_version = config.bucket_version;
   current_record.bucket = config.bucket;
+  current_bounds.assign(stat_columns.size(), {0, 0});
   return true;
 }
 
@@ -298,8 +271,6 @@ bool BucketParquetWriter::Impl::CutRowGroup(int64_t* flushed_bytes,
     if (error) *error = "CutRowGroup with no open row group";
     return false;
   }
-  // The current row group's batches are still buffered, so the sink position is
-  // this row group's start offset. Record it, then flush by starting a new one.
   auto start_r = sink->Tell();
   if (!start_r.ok()) {
     if (error) *error = start_r.status().ToString();
@@ -323,8 +294,6 @@ bool BucketParquetWriter::Impl::CutRowGroup(int64_t* flushed_bytes,
 
 bool BucketParquetWriter::Impl::CloseCurrent(std::string* error) {
   if (!writer) return true;
-  // If explicit cuts happened, the final (still-buffered) row group's start is
-  // the current sink position — record it so split_offsets covers every group.
   if (!current_record.split_offsets.empty()) {
     auto pos = sink->Tell();
     if (!pos.ok()) {
@@ -352,6 +321,15 @@ bool BucketParquetWriter::Impl::CloseCurrent(std::string* error) {
     return false;
   }
   current_record.path = final_path;
+  if (current_record.rows > 0) {
+    for (size_t i = 0; i < stat_columns.size(); ++i) {
+      const auto& rs = stat_columns[i];
+      current_record.bounds.emplace(
+          rs.field_id,
+          std::make_pair(TypedLiteral(rs.type, current_bounds[i].first),
+                         TypedLiteral(rs.type, current_bounds[i].second)));
+    }
+  }
   if (!BuildDataFile(config, partition_spec, current_record,
                      &current_record.data_file, error)) {
     return false;
@@ -371,18 +349,56 @@ std::unique_ptr<BucketParquetWriter> BucketParquetWriter::Make(
     if (error) *error = "WriterConfig.schema is null";
     return nullptr;
   }
-  if (config.partition_spec) {
-      impl->partition_spec = config.partition_spec;
-  } else {
-      impl->partition_spec = BucketPartitionSpec(*config.schema, error);
-      if (!impl->partition_spec) return nullptr;
+  if (!config.partition_spec) {
+    if (error) *error = "WriterConfig.partition_spec is null";
+    return nullptr;
   }
-  // Identity-partition source fields live in the manifest's partition tuple
-  // and are synthesized by readers at scan time. Pass the spec so the helper
-  // omits them from the physical arrow/parquet schema.
+  impl->partition_spec = config.partition_spec;
+  if (!impl->partition_spec->fields().empty() && !config.partition_values) {
+    if (error) {
+      *error = "WriterConfig.partition_values required for partitioned table " +
+               config.table_name;
+    }
+    return nullptr;
+  }
   impl->arrow_schema = IcebergToArrowSchemaWithFieldIds(
       *config.schema, error, impl->partition_spec.get());
   if (!impl->arrow_schema) return nullptr;
+
+  for (const auto& sc : config.stat_columns) {
+    ResolvedStatColumn rs;
+    rs.sorted = sc.sorted;
+    std::string type_name;
+    for (const auto& f : config.schema->fields()) {
+      if (f.name() == sc.name) {
+        rs.field_id = f.field_id();
+        rs.type = f.type()->type_id();
+        type_name = f.type()->ToString();
+        break;
+      }
+    }
+    if (rs.field_id < 0) {
+      if (error) *error = "stat column not in schema: " + sc.name;
+      return nullptr;
+    }
+    if (rs.type != iceberg::TypeId::kInt && rs.type != iceberg::TypeId::kLong) {
+      if (error) {
+        *error = "NotImplemented: declared stat column '" + sc.name +
+                 "' has type " + type_name +
+                 "; bound capture is implemented for int and long only — "
+                 "honoring this declaration requires computing min/max as an "
+                 "iceberg::Literal of that type and serializing it via "
+                 "Literal::Serialize";
+      }
+      return nullptr;
+    }
+    rs.arrow_index = impl->arrow_schema->GetFieldIndex(sc.name);
+    if (rs.arrow_index < 0) {
+      if (error) *error = "stat column not physical (partition-identity): " + sc.name;
+      return nullptr;
+    }
+    impl->stat_columns.push_back(rs);
+  }
 
   impl->props = ParquetWriterProperties(config, *impl->arrow_schema);
   impl->next_seq = config.starting_file_seq;
@@ -396,8 +412,6 @@ BucketParquetWriter::BucketParquetWriter(std::unique_ptr<Impl> impl)
     : impl_(std::move(impl)) {}
 
 BucketParquetWriter::~BucketParquetWriter() {
-  // Best-effort cleanup if user forgot to call Close(). We can't return
-  // the WrittenFile records here, but we can at least flush bytes.
   if (impl_ && !impl_->closed && impl_->writer) {
     std::string ignored;
     impl_->CloseCurrent(&ignored);
@@ -405,24 +419,17 @@ BucketParquetWriter::~BucketParquetWriter() {
 }
 
 bool BucketParquetWriter::Write(const arrow::RecordBatch& batch,
-                                BatchStats stats, std::string* error) {
+                                std::string* error) {
   if (impl_->closed) {
     if (error) *error = "Write after Close";
     return false;
   }
-  // Roll-before-write: if the current file is full, close it first so
-  // this batch lands at the head of the next file.
   if (impl_->writer && impl_->config.target_rows_per_file > 0 &&
       impl_->current_record.rows >= impl_->config.target_rows_per_file) {
     if (!impl_->CloseCurrent(error)) return false;
   }
   if (!impl_->OpenIfNeeded(error)) return false;
 
-  // Project the input batch onto the writer's target schema by column
-  // name. Callers can pass the full iceberg-shaped batch (e.g. with
-  // p_bucket_version / p_bucket columns); identity-partition source
-  // columns get dropped here since they live in the manifest's
-  // partition tuple, not on disk.
   std::vector<std::shared_ptr<arrow::Array>> projected;
   projected.reserve(impl_->arrow_schema->num_fields());
   for (const auto& f : impl_->arrow_schema->fields()) {
@@ -443,18 +450,20 @@ bool BucketParquetWriter::Write(const arrow::RecordBatch& batch,
     return false;
   }
 
-  // Accumulate into the current file's record.
   auto& cur = impl_->current_record;
-  if (cur.rows == 0) {
-    cur.p_min = stats.p_min;
-    cur.p_max = stats.p_max;
-    cur.rank_min = stats.rank_min;
-    cur.rank_max = stats.rank_max;
-  } else {
-    cur.p_min = std::min(cur.p_min, stats.p_min);
-    cur.p_max = std::max(cur.p_max, stats.p_max);
-    cur.rank_min = std::min(cur.rank_min, stats.rank_min);
-    cur.rank_max = std::max(cur.rank_max, stats.rank_max);
+  if (batch.num_rows() > 0) {
+    for (size_t i = 0; i < impl_->stat_columns.size(); ++i) {
+      const auto& rs = impl_->stat_columns[i];
+      auto [lo, hi] = BatchColumnBounds(*rb->column(rs.arrow_index), rs.type,
+                                        rs.sorted);
+      if (cur.rows == 0) {
+        impl_->current_bounds[i] = {lo, hi};
+      } else {
+        auto& acc = impl_->current_bounds[i];
+        acc.first = std::min(acc.first, lo);
+        acc.second = std::max(acc.second, hi);
+      }
+    }
   }
   cur.rows += batch.num_rows();
   return true;

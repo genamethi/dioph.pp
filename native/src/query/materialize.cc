@@ -1,5 +1,3 @@
-// primeparts/query/materialize.cc — see header.
-
 #include "primeparts/query/materialize.h"
 
 #include <arrow/api.h>
@@ -23,7 +21,8 @@
 namespace primeparts::query {
 
 bool MaterializeIntColumns(
-    const std::shared_ptr<iceberg::Catalog>& catalog, const fs::path& warehouse,
+    const std::shared_ptr<iceberg::Catalog>& catalog,
+    const iceberg::Namespace& ns, const fs::path& warehouse,
     const std::string& name, const std::vector<std::string>& col_names,
     const std::vector<std::vector<int64_t>>& columns,
     std::string* metadata_location, std::string* error) {
@@ -35,7 +34,6 @@ bool MaterializeIntColumns(
     if (static_cast<int64_t>(col.size()) != nrows)
       return fail("materialize: ragged columns");
 
-  // Ad-hoc iceberg schema: all int64, field ids 1..n.
   std::vector<iceberg::SchemaField> fields;
   fields.reserve(col_names.size());
   for (size_t i = 0; i < col_names.size(); ++i)
@@ -44,7 +42,6 @@ bool MaterializeIntColumns(
   auto schema = std::make_shared<iceberg::Schema>(std::move(fields), 0);
   auto spec = iceberg::PartitionSpec::Unpartitioned();
 
-  // Arrow batch (column names match the iceberg schema; writer stamps field-ids).
   std::vector<std::shared_ptr<arrow::Field>> afields;
   std::vector<std::shared_ptr<arrow::Array>> aarrays;
   for (size_t i = 0; i < col_names.size(); ++i) {
@@ -57,15 +54,12 @@ bool MaterializeIntColumns(
   }
   auto batch = arrow::RecordBatch::Make(arrow::schema(afields), nrows, aarrays);
 
-  // Replace semantics: drop the catalog entry and purge old files through the
-  // catalog seam (the only sanctioned file-removal path).
-  if (!primeparts::catalog::DropTable(catalog, warehouse, name, /*purge=*/true,
-                                      error))
+  if (!primeparts::catalog::DropTable(catalog, ns, warehouse, name,
+                                      true, error))
     return false;
 
   primeparts::WriterConfig cfg;
-  // Staging dir outside the warehouse; CommitFiles moves into place (seam).
-  cfg.output_dir = primeparts::catalog::StagingDataDir(warehouse, name);
+  cfg.output_dir = primeparts::catalog::StagingDataDir(warehouse, ns, name);
   cfg.schema = schema;
   cfg.table_name = name;
   cfg.filename_prefix = name;
@@ -77,8 +71,7 @@ bool MaterializeIntColumns(
 
   auto writer = primeparts::BucketParquetWriter::Make(cfg, error);
   if (!writer) return false;
-  primeparts::BucketParquetWriter::BatchStats st{};  // no p column -> zeros
-  if (!writer->Write(*batch, st, error)) return false;
+  if (!writer->Write(*batch, error)) return false;
   std::vector<primeparts::WrittenFile> written;
   if (!writer->Close(&written, error)) return false;
 
@@ -86,7 +79,9 @@ bool MaterializeIntColumns(
   for (const auto& wf : written)
     if (wf.data_file) files.push_back(wf.data_file);
 
-  return primeparts::catalog::CommitFiles(catalog, warehouse, name, schema, spec,
+  return primeparts::catalog::CommitFiles(catalog, ns, warehouse, name, schema,
+                                          spec,
+                                          primeparts::catalog::TableDeclaration{},
                                           files, metadata_location, error);
 }
 
