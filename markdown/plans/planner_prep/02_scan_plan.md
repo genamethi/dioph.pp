@@ -10,3 +10,4 @@ grep gate: `grep -rn 'kPColumnFieldId' native/src` → only source_scan.cc (dies
 
 - PlanTableScan not unit-covered (needs TableMetadata fixture); exercised via source_scan in 03.
 - Makefile: SCAN_OBJS (`table_traits.o scan_planner.o`) defined; consumers link in 03.
+- rework (post-review): FromMetadata no longer quietly resolves non-identity sort transforms to unsorted; loud NotImplemented naming the field, transform, and what resolving it requires. Unsorted remains valid only when the catalog declares no order.

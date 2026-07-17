@@ -34,7 +34,16 @@ bool TableReadTraits::FromMetadata(const iceberg::TableMetadata& metadata,
   for (const auto& sf : order->fields()) {
     if (!sf.transform() ||
         sf.transform()->transform_type() != iceberg::TransformType::kIdentity) {
-      return true;
+      if (error) {
+        *error = "NotImplemented: declared sort order field " +
+                 std::to_string(sf.source_id()) + " uses transform '" +
+                 (sf.transform() ? sf.transform()->ToString()
+                                 : std::string("null")) +
+                 "'; TableReadTraits resolves identity transforms only — "
+                 "resolving this order requires applying the transform to "
+                 "source values when ordering tasks and slicing batches";
+      }
+      return false;
     }
     SortKey key;
     key.field_id = sf.source_id();
