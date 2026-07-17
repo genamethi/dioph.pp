@@ -1,6 +1,6 @@
 # 09_merge
 
-deps: all | status: gates done; merge pending user call
+deps: all | status: done
 
 Testing overhaul (gtest migration, scrap all current smokes + hand-rolled tests, e2e harness, sanitizer/CI-adjacent cleanup) is a SEPARATE follow-up PR off tui-query after this merges — NOT in scope here. Do not author or extend tests in 09; the interim hand-rolled tests (test_core, test_iceberg_writer, test_scan_planner) ride along as-is and get replaced there.
 
@@ -9,7 +9,7 @@ Testing overhaul (gtest migration, scrap all current smokes + hand-rolled tests,
 - [x] 00 holes registry audited: each hole loud + named. One correction: 03's "MOR path serves identity-partition selects" was FALSE — both read paths error "Missing required field with id: N" (no constant-column synthesis in iceberg-cpp); registry entry rewritten
 - [x] zero-comment check: 8 legacy-commented files stripped (~136 lines), rebuild green
 - [x] verifiable e2e on promix against live warehouse (reads only): catalogd 4x plan routes 406 spec body; pget/LookupPartitions ok; unwindowed hist 17 groups; column-subset reads ok both tables; Extent summary ok with key_max correctly absent (unsorted declared); ScanByK + windowed hist fail LOUD with no-sort-order error; generate --temp --count 1e9: 1e9 prime rows + 1.884B partition rows, 4 files, 8.8GB, 199s, 5.03M primes/s, exit 0
-- [ ] merge `planner-prep` → `tui-query` — user call
+- [x] merge `planner-prep` → `tui-query` — merged 0bb87bd (no-ff), pushed
 
 NOT a merge gate: `make smoke` (all smokes scrapped in the testing PR; generate-smoke already red pre-branch — kMinCount 1e9 vs --count 1000).
 
