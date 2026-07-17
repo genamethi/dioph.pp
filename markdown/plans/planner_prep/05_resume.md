@@ -1,17 +1,12 @@
 # 05_resume
 
-deps: 01 | status: done (reworked twice post-review)
+status: done (merged 0bb87bd; reworked three times post-review)
 
-done: resume rides spec partition statistics, not private conventions. New module `catalog/partition_stats.{h,cc}`: `PartitionStatsRow`/`PartitionStatsSet` (spec schema: partition tuple, spec_id, data_record_count, data_file_count, total_data_file_size_in_bytes, delete counts, total_record_count, last_updated_at/snapshot_id; field ids 1–12), `PartitionStatsFields` (identity int/long partition fields only, loud otherwise), `ComputePartitionStats` (ground truth from manifests; delete manifests ⇒ loud NotImplemented), `MergePartitionStats` (incremental, appended DataFiles), `WritePartitionStatsFile`/`ReadPartitionStatsFile` (parquet, PARQUET:field_id tagged, tmp+rename), `LoadPartitionStats` (registered file for current snapshot ⇒ read; unregistered ⇒ compute — bootstraps pre-stats warehouses), `BuildPartitionStatsForAppend` (previous stats + appended ⇒ new file in table metadata dir). pp_commit `AssembleChange` writes the stats file after `Apply` and pushes `SetPartitionStatistics` into the same atomic updateTable alongside AddSnapshot/SetSnapshotRef (serde + catalogd ApplyTo already in vendored lib). `LoadAlignedResume(catalog, ns, tables, reference_table, BucketFields, bucket_version, out, error)`: per table LoadPartitionStats ⇒ frontier = max bucket at version with files; reference row gives bucket + bucket_bytes; per-table next_seq = frontier row data_file_count (file seqs dense from 0 per bucket by construction); version above requested or non-reference frontier past reference ⇒ loud error. Test: `tests/test_partition_stats.cc` (fields from spec, merge aggregates, parquet round-trip, incremental second merge) in `make test`.
+Resume rides spec partition statistics files. Module `catalog/partition_stats.{h,cc}` (the PartitionStatsHandler iceberg-cpp lacks): compute-from-manifests bootstrap, incremental merge, write/read via vendored Writer/Reader registries through FileIO (atomicity from the catalog transaction, no rename); pp_commit registers `SetPartitionStatistics` in the same atomic updateTable as AddSnapshot/SetSnapshotRef. `LoadAlignedResume` reads stats rows: frontier bucket, bucket bytes, next_seq = frontier row data_file_count.
 
-history: v1 reconstructed resume from a bespoke manifest walk (`git show 1cba8a9~1:native/src/aligned_writer.cc`); v2 declared `pp.aligned.*` snapshot-summary keys (`git show 1cba8a9`) — private convention where a spec artifact exists. v3 replaces both with the spec's partition statistics file; the manifest walk survives only as `ComputePartitionStats`, the spec-defined ground-truth/bootstrap computation.
+Load-bearing invariants:
+- next_seq = data_file_count leans on file seqs dense from 0 per bucket; only the aligned writer commits into these tables.
+- Resume reflects COMMITTED files only; failed transactions can orphan stats parquets (registry: no expiry/cleanup surface); a retried same-snapshot commit overwrites its orphan (deterministic filename).
+- Pre-stats warehouses self-heal: unregistered snapshot ⇒ compute from manifests, next commit registers a real file.
 
-grep gate: `grep -rn 'pp\.aligned\|AlignedResumeSummary\|next_file_seq\|SeqFromFilename\|directory_iterator' native/src native/include native/tests` → 0
-
-## notes
-
-- Resume reflects only COMMITTED files; staged debris from a crashed run cannot collide (writer filename tokens).
-- A failed transaction can orphan an unregistered partition-stats parquet in the metadata dir — same debris class as the manifests Apply writes; no cleanup pass exists. A retried commit of the same snapshot id overwrites the orphan (deterministic filename).
-- Stats registration is per snapshot; superseded stats files accumulate like old metadata.json versions (no expiry surface).
-- next_seq = data_file_count leans on the dense-from-0 per-bucket seq invariant; only the aligned writer commits into these tables.
-- rework (post-review): stats file write/read moved onto the vendored `Writer`/`Reader` registries through FileIO — `StatsFileSchema` (iceberg schema, field ids 1–12) drives both sides; hand-rolled `parquet::arrow::WriteTable`/`OpenFile`, `PARQUET:field_id` tagging, `StripFileScheme`, and tmp+rename all deleted. Atomicity comes from the catalog transaction (the file is unreferenced until SetPartitionStatistics lands), matching object stores with no rename. `WritePartitionStatsFile`/`ReadPartitionStatsFile` signatures gained `io`; descriptor size from `Writer::length()`.
+History: v1 bespoke manifest walk, v2 `pp.aligned.*` summary keys, v3 spec stats file, v3.1 FileIO-native via vendored registries — git log on partition_stats.cc / aligned_writer.cc.
