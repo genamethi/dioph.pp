@@ -217,14 +217,14 @@ TEST_F(E2ETest, WindowedGroupCountErrorsWithoutSortOrder) {
   EXPECT_NE(error.find("no ascending sort order"), std::string::npos) << error;
 }
 
-TEST_F(E2ETest, FullTableReadErrorsOnIdentityColumns) {
+TEST_F(E2ETest, FullTableReadSynthesizesIdentityColumns) {
   std::string error;
   auto qs = ppq::QueryService::Open(warehouse_, ns_, &error);
   ASSERT_NE(qs, nullptr) << error;
   error.clear();
   auto rows = qs->ReadTable("primes", {}, 100, &error);
-  EXPECT_TRUE(rows.rows.empty());
-  EXPECT_NE(error.find("Missing required field"), std::string::npos) << error;
+  EXPECT_TRUE(error.empty()) << error;
+  EXPECT_EQ(rows.rows.size(), 6u);
 }
 
 TEST_F(E2ETest, ColumnSubsetReadWorks) {
@@ -250,31 +250,6 @@ TEST_F(E2ETest, PartitionStatsPresentAfterCommit) {
   ASSERT_NE(row, nullptr) << "no partition stats row for (1, 2)";
   EXPECT_EQ(row->data_file_count, 2);
   EXPECT_EQ(row->data_record_count, 6);
-}
-
-TEST_F(E2ETest, NonIntStatColumnNotImplemented) {
-  std::vector<iceberg::SchemaField> fields;
-  fields.push_back(iceberg::SchemaField::MakeRequired(1, "p", iceberg::int64()));
-  fields.push_back(
-      iceberg::SchemaField::MakeRequired(2, "label", iceberg::string()));
-  auto schema = std::make_shared<iceberg::Schema>(std::move(fields), 0);
-
-  primeparts::WriterConfig cfg;
-  cfg.output_dir = warehouse_ / "scratch-nonint";
-  cfg.schema = schema;
-  cfg.table_name = "t";
-  cfg.filename_prefix = "t";
-  cfg.delta_columns = {"p"};
-  cfg.stat_columns = {{"label", true}};
-  cfg.partition_spec = iceberg::PartitionSpec::Unpartitioned();
-  cfg.simple_filename = true;
-  cfg.compression_level = 1;
-
-  std::string error;
-  auto writer = primeparts::BucketParquetWriter::Make(std::move(cfg), &error);
-  EXPECT_EQ(writer, nullptr);
-  EXPECT_NE(error.find("NotImplemented"), std::string::npos) << error;
-  EXPECT_NE(error.find("string"), std::string::npos) << error;
 }
 
 TEST_F(E2ETest, PlanRoutesReturn406) {

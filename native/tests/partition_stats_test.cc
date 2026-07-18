@@ -14,9 +14,12 @@
 #include "iceberg/expression/literal.h"
 #include "iceberg/file_io.h"
 #include "iceberg/manifest/manifest_entry.h"
+#include "iceberg/partition_spec.h"
 #include "iceberg/row/partition_values.h"
+#include "iceberg/schema.h"
 #include "iceberg/snapshot.h"
 #include "iceberg/statistics_file.h"
+#include "iceberg/transform.h"
 #include "iceberg/util/timepoint.h"
 
 namespace ppc = primeparts::catalog;
@@ -157,6 +160,38 @@ TEST_F(PartitionStatsTest, RoundTripAndIncrementalMerge) {
   EXPECT_EQ(r0->last_updated_snapshot_id.value_or(-1), 41);
 
   std::filesystem::remove_all(out, ec);
+}
+
+TEST_F(PartitionStatsTest, BucketTransformResolves) {
+  const int32_t p_id = 1;
+  auto spec_r = iceberg::PartitionSpec::Make(
+      *schema_, iceberg::PartitionSpec::kInitialSpecId,
+      {iceberg::PartitionField(p_id, 1000, "p_bucketed",
+                               iceberg::Transform::Bucket(16))},
+      false);
+  ASSERT_TRUE(spec_r.has_value()) << spec_r.error().message;
+
+  ppc::PartitionStatsSet stats;
+  std::string error;
+  EXPECT_TRUE(ppc::PartitionStatsFields(*schema_, *spec_r.value(), &stats,
+                                        &error))
+      << error;
+}
+
+TEST_F(PartitionStatsTest, TruncateTransformResolves) {
+  const int32_t p_id = 1;
+  auto spec_r = iceberg::PartitionSpec::Make(
+      *schema_, iceberg::PartitionSpec::kInitialSpecId,
+      {iceberg::PartitionField(p_id, 1000, "p_truncated",
+                               iceberg::Transform::Truncate(1000))},
+      false);
+  ASSERT_TRUE(spec_r.has_value()) << spec_r.error().message;
+
+  ppc::PartitionStatsSet stats;
+  std::string error;
+  EXPECT_TRUE(ppc::PartitionStatsFields(*schema_, *spec_r.value(), &stats,
+                                        &error))
+      << error;
 }
 
 }  // namespace

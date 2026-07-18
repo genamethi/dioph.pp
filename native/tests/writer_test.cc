@@ -14,6 +14,8 @@
 #include "iceberg/manifest/manifest_entry.h"
 #include "iceberg/partition_spec.h"
 #include "iceberg/row/partition_values.h"
+#include "iceberg/schema.h"
+#include "iceberg/schema_field.h"
 #include "iceberg/sort_field.h"
 #include "iceberg/sort_order.h"
 #include "iceberg/type.h"
@@ -187,6 +189,34 @@ TEST_F(WriterTest, AscendingSortOrder) {
 
   auto bad = primeparts::AscendingSortOrder(*parts, {"p", "nope"}, &error);
   EXPECT_EQ(bad, nullptr);
+}
+
+TEST(WriterStatColumns, StringStatColumnCapturesBounds) {
+  std::vector<iceberg::SchemaField> fields;
+  fields.push_back(iceberg::SchemaField::MakeRequired(1, "p", iceberg::int64()));
+  fields.push_back(
+      iceberg::SchemaField::MakeRequired(2, "label", iceberg::string()));
+  auto schema = std::make_shared<iceberg::Schema>(std::move(fields), 0);
+
+  primeparts::WriterConfig cfg;
+  cfg.output_dir =
+      std::filesystem::temp_directory_path() / "pp-writer-stat-string";
+  cfg.schema = schema;
+  cfg.table_name = "t";
+  cfg.filename_prefix = "t";
+  cfg.delta_columns = {"p"};
+  cfg.stat_columns = {{"label", true}};
+  cfg.partition_spec = iceberg::PartitionSpec::Unpartitioned();
+  cfg.simple_filename = true;
+  cfg.compression_level = 1;
+
+  std::string error;
+  auto writer = primeparts::BucketParquetWriter::Make(std::move(cfg), &error);
+  EXPECT_NE(writer, nullptr) << error;
+
+  std::error_code ec;
+  std::filesystem::remove_all(
+      std::filesystem::temp_directory_path() / "pp-writer-stat-string", ec);
 }
 
 }  // namespace

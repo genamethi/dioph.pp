@@ -21,7 +21,9 @@ struct ScanPlanRequest {
   std::optional<int64_t> snapshot_id;
   std::vector<std::string> select;
   std::shared_ptr<iceberg::Expression> filter;
+  std::optional<int64_t> min_rows_requested;
   bool case_sensitive = true;
+  bool use_snapshot_schema = false;
   std::optional<int64_t> start_snapshot_id;
   std::optional<int64_t> end_snapshot_id;
   std::vector<std::string> stats_fields;
