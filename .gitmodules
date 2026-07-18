@@ -35,3 +35,7 @@
 	branch = master
 	shallow = true
 
+[submodule "iceberg-spec"]
+	path = docs/vendor/iceberg
+	url = https://github.com/apache/iceberg
+	branch = main

@@ -1,6 +1,6 @@
 # planner_prep — DONE, merged to tui-query (0bb87bd, 2026-07-17)
 
-Descriptor prep toward query/file-scan planner: spec types (`native/vendor/iceberg-refs/rest-catalog-open-api.yaml`) drive shapes; callers/catalog declare what middle layers assumed; plan atom = spec FileScanTask + `iceberg::Split`, client-side, liftable behind catalogd. Phase files hold one-paragraph summaries + surviving invariants; full detail in git history (one commit per phase, message = phase file; reworks named in messages). Verification record: `09_merge.md`.
+Descriptor prep toward query/file-scan planner: spec types (`docs/vendor/iceberg/open-api/rest-catalog-open-api.yaml`) drive shapes; callers/catalog declare what middle layers assumed; plan atom = spec FileScanTask + `iceberg::Split`, client-side, liftable behind catalogd. Phase files hold one-paragraph summaries + surviving invariants; full detail in git history (one commit per phase, message = phase file; reworks named in messages). Verification record: `09_merge.md`.
 
 ## phases (all done)
 

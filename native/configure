@@ -106,6 +106,25 @@ vendor_sync() {
 
 vendor_sync lmdb # no install: make compiles it into build/liblmdb.a
 
+# docs/vendor/iceberg is the apache/iceberg spec source, sparse-checked-out to
+# open-api/ only. Sparse config lives in .git and does not survive a fresh
+# clone, so (re)apply it here; without it the submodule materializes the whole
+# Java tree.
+SPEC_SM="$REPO/docs/vendor/iceberg"
+if [ ! -e "$SPEC_SM/.git" ]; then
+  git -C "$REPO" submodule update --init --depth 1 -- docs/vendor/iceberg
+fi
+if [ -e "$SPEC_SM/.git" ] && [ "$(git -C "$SPEC_SM" config core.sparseCheckout)" != "true" ]; then
+  git -C "$SPEC_SM" sparse-checkout init --cone
+  git -C "$SPEC_SM" sparse-checkout set open-api
+fi
+if [ -f "$SPEC_SM/open-api/rest-catalog-open-api.yaml" ]; then
+  echo "iceberg openapi spec present"
+else
+  echo "iceberg openapi spec missing ($SPEC_SM/open-api/rest-catalog-open-api.yaml)"
+  exit 1
+fi
+
 if [ ! -f "$PREFIX/lib/pkgconfig/flint.pc" ]; then
   vendor_sync flint
   cd "$VENDOR/flint"

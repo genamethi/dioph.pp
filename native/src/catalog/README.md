@@ -23,4 +23,4 @@ write/commit model, and `HANDOFF.md` §6 for the verified Phase 0/1 state.
 
 The next build (Phase 2) is `pp-catalogd`, a native IRC HTTP server that wraps
 this same `MakeLocalCatalog` engine behind the REST routes from
-`native/vendor/iceberg-refs/rest-catalog-open-api.yaml`.
+`docs/vendor/iceberg/open-api/rest-catalog-open-api.yaml`.

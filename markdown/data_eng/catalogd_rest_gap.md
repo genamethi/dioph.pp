@@ -1,7 +1,7 @@
 # pp-catalogd — Iceberg REST spec conformance
 
 Route surface of `native/src/catalog/pp_catalogd.cc` against the OpenAPI spec at
-`native/vendor/iceberg-refs/rest-catalog-open-api.yaml` (anchors are line numbers
+`docs/vendor/iceberg/open-api/rest-catalog-open-api.yaml` (anchors are line numbers
 of each `path:` entry). Companion docs: `irc_catalog_design.md`,
 `clients_rest_gap.md` (the client side of the same seam), `iceberg_data_setup.md`,
 `../misc/HANDOFF.md`.
