@@ -14,7 +14,16 @@ mr3/
 **/*.rs.bk
 
 **/mutants.out*/
-<RightMouse># Byte-compiled / optimized / DLL files
+
+# vendored third-party submodules and build output (12.5G, not our source)
+native/vendor/
+native/build/
+
+# agent tooling, not primeparts source
+.claude/
+.agents/
+
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
 *$py.class
@@ -113,6 +122,3 @@ native/bin/nth_prime_boundaries
 native/vendor/lua-5.5.0/
 native/vendor/lua-5.5.0.tar.gz
 markdown/math/.speculative
-
-# graphify knowledge-graph output (regenerable)
-graphify-out/
