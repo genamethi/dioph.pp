@@ -30,6 +30,6 @@ rationale recorded per phase; one commit per phase, message = phase file name, e
 - [x] 02 re-express hand-rolled tests
 - [x] 03 scrap smokes
 - [x] 04 e2e fixture harness
-- [ ] 05 sanitizer build
+- [x] 05 sanitizer build
 - [ ] 06 CI
 - [ ] 07 gates + merge

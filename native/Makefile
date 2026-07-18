@@ -10,9 +10,9 @@ CC ?= /usr/bin/gcc
 CXX ?= /usr/bin/g++
 
 CPPFLAGS += -Iinclude -I$(PREFIX)/include
-CFLAGS += -std=c11 -D_POSIX_C_SOURCE=200809L -O3 -g -fPIC -Wall -Wextra -Wpedantic
-CXXFLAGS += -std=c++23 -O3 -g -fPIC -Wall -Wextra -Wpedantic
-LDFLAGS += -L$(PREFIX)/lib -Wl,-rpath,$(abspath $(PREFIX)/lib)
+CFLAGS += -std=c11 -D_POSIX_C_SOURCE=200809L -O3 -g -fPIC -Wall -Wextra -Wpedantic $(SANITIZE)
+CXXFLAGS += -std=c++23 -O3 -g -fPIC -Wall -Wextra -Wpedantic $(SANITIZE)
+LDFLAGS += -L$(PREFIX)/lib -Wl,-rpath,$(abspath $(PREFIX)/lib) $(SANITIZE)
 EXE_LDFLAGS += -no-pie
 LDLIBS += $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --libs primecount primesieve gmp flint) -lpari -lm
 NOTCURSES_LDLIBS ?= $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --libs notcurses-core 2>/dev/null || PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --libs notcurses 2>/dev/null)
