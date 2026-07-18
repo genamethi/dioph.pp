@@ -1,0 +1,17 @@
+name: native
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  native:
+    runs-on: [self-hosted, promix]
+    steps:
+      - uses: actions/checkout@v4
+      - name: vendored lmdb
+        run: git submodule update --init native/vendor/lmdb
+      - name: unit suite
+        run: make -C native -j test
+      - name: e2e
+        run: make -C native e2e

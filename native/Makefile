@@ -10,9 +10,9 @@ CC ?= /usr/bin/gcc
 CXX ?= /usr/bin/g++
 
 CPPFLAGS += -Iinclude -I$(PREFIX)/include
-CFLAGS += -std=c11 -D_POSIX_C_SOURCE=200809L -O3 -g -fPIC -Wall -Wextra -Wpedantic
-CXXFLAGS += -std=c++23 -O3 -g -fPIC -Wall -Wextra -Wpedantic
-LDFLAGS += -L$(PREFIX)/lib -Wl,-rpath,$(abspath $(PREFIX)/lib)
+CFLAGS += -std=c11 -D_POSIX_C_SOURCE=200809L -O3 -g -fPIC -Wall -Wextra -Wpedantic $(SANITIZE)
+CXXFLAGS += -std=c++23 -O3 -g -fPIC -Wall -Wextra -Wpedantic $(SANITIZE)
+LDFLAGS += -L$(PREFIX)/lib -Wl,-rpath,$(abspath $(PREFIX)/lib) $(SANITIZE)
 EXE_LDFLAGS += -no-pie
 LDLIBS += $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --libs primecount primesieve gmp flint) -lpari -lm
 NOTCURSES_LDLIBS ?= $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --libs notcurses-core 2>/dev/null || PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --libs notcurses 2>/dev/null)
@@ -35,6 +35,9 @@ ICEBERG_LDLIBS += \
 	$(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --libs --static parquet arrow | sed -e 's/-lparquet[ ]//g' -e 's/-larrow[ ]//g' -e 's/-L[^ ]*[ ]//g') \
 	-lcurl -lssl -lcrypto -ldl -lrt
 
+GTEST_CPPFLAGS := -I$(PREFIX)/include/arrow-gtest
+GTEST_LDLIBS := -larrow_gtest_main -larrow_gmock -larrow_gtest
+
 LMDB_DIR := vendor/lmdb/libraries/liblmdb
 LMDB_CPPFLAGS += -I$(LMDB_DIR)
 LMDB_CFLAGS := -O3 -g -fPIC -pthread
@@ -53,23 +56,27 @@ SOURCE_SCAN_OBJ := $(BUILD_DIR)/source_scan.o
 TABLE_TRAITS_OBJ := $(BUILD_DIR)/table_traits.o
 SCAN_PLANNER_OBJ := $(BUILD_DIR)/scan_planner.o
 SCAN_OBJS := $(TABLE_TRAITS_OBJ) $(SCAN_PLANNER_OBJ)
-TEST_SCAN_PLANNER_OBJ := $(BUILD_DIR)/test_scan_planner.o
 PP_ICEBERG_REST_OBJ := $(BUILD_DIR)/pp_iceberg_rest.o
 PP_LMDB_STORE_OBJ := $(BUILD_DIR)/pp_lmdb_store.o
-PP_LMDB_SMOKE_OBJ := $(BUILD_DIR)/pp_lmdb_smoke.o
 LMDB_LIB := $(BUILD_DIR)/liblmdb.a
 PP_CATALOGD_OBJ := $(BUILD_DIR)/pp_catalogd.o
 PP_CATALOGD_MAIN_OBJ := $(BUILD_DIR)/pp_catalogd_main.o
 PP_COMMIT_OBJ := $(BUILD_DIR)/pp_commit.o
 PARTITION_STATS_OBJ := $(BUILD_DIR)/partition_stats.o
 ICEBERG_SRC_CPPFLAGS := -Ivendor/iceberg-cpp/src
-TEST_OBJ := $(BUILD_DIR)/test_core.o
-TEST_ICEBERG_WRITER_OBJ := $(BUILD_DIR)/test_iceberg_writer.o
-TEST_PARTITION_STATS_OBJ := $(BUILD_DIR)/test_partition_stats.o
 VERIFY_OBJ := $(BUILD_DIR)/verify.o
 VERIFY_MAIN_OBJ := $(BUILD_DIR)/verify_main.o
 
-.PHONY: all clean test smoke install
+TEST_SUITE_BIN := $(BUILD_DIR)/primeparts-tests
+TEST_SUITE_OBJS := $(BUILD_DIR)/core_test.o $(BUILD_DIR)/writer_test.o \
+                   $(BUILD_DIR)/scan_planner_test.o $(BUILD_DIR)/partition_stats_test.o
+TEST_SUITE_LIBOBJS := $(WRITER_OBJ) $(SCHEMAS_OBJ) $(SCAN_OBJS) $(PARTITION_STATS_OBJ) $(CORE_OBJ)
+
+E2E_BIN := $(BUILD_DIR)/primeparts-e2e
+E2E_OBJ := $(BUILD_DIR)/e2e_test.o
+E2E_LIBOBJS := $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(PARTITION_STATS_OBJ) $(LMDB_LIB)
+
+.PHONY: all clean test e2e install
 
 PP_INSTALL_PATH ?= $(HOME)/.local/bin
 
@@ -165,9 +172,6 @@ $(SOURCE_SCAN_OBJ): src/source_scan.cc include/primeparts/source_scan.h include/
 $(BUILD_DIR)/query_service.o: src/query/query_service.cc include/primeparts/query/query_service.h include/primeparts/source_scan.h include/primeparts/catalog/pp_iceberg_rest.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/query_service_smoke.o: src/query/query_service_smoke.cc include/primeparts/query/query_service.h | $(BUILD_DIR)
-	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
-
 TUI_APP_HDR := include/primeparts/tui/tui_app.h include/primeparts/query/query_service.h include/primeparts/tui/lua_presets.h
 
 $(BUILD_DIR)/tui_main.o: src/tui/tui_main.cc $(TUI_APP_HDR) | $(BUILD_DIR)
@@ -185,14 +189,8 @@ $(BUILD_DIR)/tui_config.o: src/tui/tui_config.cc $(TUI_APP_HDR) | $(BUILD_DIR)
 $(BUILD_DIR)/lua_presets.o: src/tui/lua_presets.cc include/primeparts/tui/lua_presets.h include/primeparts/query/query_preset.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(LUA_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/lua_presets_smoke.o: src/tui/lua_presets_smoke.cc include/primeparts/tui/lua_presets.h include/primeparts/query/query_service.h include/primeparts/catalog/pp_iceberg_rest.h | $(BUILD_DIR)
-	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
-
 $(BUILD_DIR)/lua_query_module.o: src/query/lua_query_module.cc include/primeparts/query/lua_query_module.h include/primeparts/query/query_service.h include/primeparts/core.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(LUA_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
-
-$(BUILD_DIR)/lua_query_smoke.o: src/query/lua_query_smoke.cc include/primeparts/query/lua_query_module.h include/primeparts/query/query_service.h include/primeparts/catalog/pp_iceberg_rest.h | $(BUILD_DIR)
-	$(CXX) $(CPPFLAGS) $(LUA_CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/pp_main.o: src/query/pp_main.cc include/primeparts/query/lua_query_module.h include/primeparts/query/query_service.h include/primeparts/catalog/pp_iceberg_rest.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(LUA_CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
@@ -215,9 +213,6 @@ $(LMDB_LIB): $(BUILD_DIR)/lmdb_mdb.o $(BUILD_DIR)/lmdb_midl.o
 
 $(PP_LMDB_STORE_OBJ): src/catalog/pp_lmdb_store.cc include/primeparts/catalog/pp_lmdb_store.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(LMDB_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
-
-$(PP_LMDB_SMOKE_OBJ): src/catalog/pp_lmdb_smoke.cc include/primeparts/catalog/pp_lmdb_store.h | $(BUILD_DIR)
-	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 # --- LMDB CLI tools ------------------------------------------------------
 # Build the vendored mdb_* tools so inspection/dump/load use the same library
@@ -247,29 +242,14 @@ $(PP_COMMIT_OBJ): src/catalog/pp_commit.cc include/primeparts/catalog/pp_commit.
 $(PARTITION_STATS_OBJ): src/catalog/partition_stats.cc include/primeparts/catalog/partition_stats.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(TEST_PARTITION_STATS_OBJ): tests/test_partition_stats.cc include/primeparts/catalog/partition_stats.h include/primeparts/schemas.h | $(BUILD_DIR)
-	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
-
 $(PP_CATALOGD_MAIN_OBJ): src/catalog/pp_catalogd_main.cc include/primeparts/catalog/pp_catalogd.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
-
-$(BUILD_DIR)/generate_smoke.o: src/generate_smoke.cc include/primeparts/catalog/pp_catalogd.h include/primeparts/catalog/pp_iceberg_rest.h | $(BUILD_DIR)
-	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
-
-$(TEST_OBJ): tests/test_core.c include/primeparts/core.h | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
-
-$(TEST_ICEBERG_WRITER_OBJ): tests/test_iceberg_writer.cc include/primeparts/writer.h include/primeparts/schemas.h | $(BUILD_DIR)
-	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(TABLE_TRAITS_OBJ): src/scan/table_traits.cc include/primeparts/scan/table_traits.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(SCAN_PLANNER_OBJ): src/scan/scan_planner.cc include/primeparts/scan/scan_planner.h include/primeparts/scan/scan_plan.h include/primeparts/scan/table_traits.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(ICEBERG_SRC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
-
-$(TEST_SCAN_PLANNER_OBJ): tests/test_scan_planner.cc include/primeparts/scan/scan_planner.h include/primeparts/writer.h | $(BUILD_DIR)
-	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/libprimeparts_core.so: $(CORE_OBJ)
 	$(CC) -shared $(LDFLAGS) $^ $(LDLIBS) -o $@
@@ -286,13 +266,6 @@ $(BUILD_DIR)/primeparts-generate: $(CORE_OBJ) $(GENERATE_OBJ) $(CONFIG_OBJ) $(WR
 $(BUILD_DIR)/primeparts-catalogd: $(PP_CATALOGD_MAIN_OBJ) $(PP_CATALOGD_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
 
-$(BUILD_DIR)/primeparts-generate-smoke: $(BUILD_DIR)/generate_smoke.o $(PP_CATALOGD_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB) | $(BUILD_DIR)/primeparts-generate
-	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $(BUILD_DIR)/generate_smoke.o $(PP_CATALOGD_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB) $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
-
-$(BUILD_DIR)/primeparts-lmdb-smoke: $(PP_LMDB_SMOKE_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
-	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $(PP_LMDB_SMOKE_OBJ) $(PP_LMDB_STORE_OBJ) \
-		$(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(LMDB_LIB) -pthread -o $@
-
 $(VERIFY_OBJ): src/verify/verify.cc include/primeparts/verify/verify.h include/primeparts/source_scan.h include/primeparts/core.h include/primeparts/common/thread_pool.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
@@ -302,47 +275,29 @@ $(VERIFY_MAIN_OBJ): src/verify/verify_main.cc include/primeparts/verify/verify.h
 $(BUILD_DIR)/primeparts-verify: $(VERIFY_MAIN_OBJ) $(VERIFY_OBJ) $(CORE_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
 
-$(BUILD_DIR)/query-service-smoke: $(BUILD_DIR)/query_service_smoke.o $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(LMDB_LIB)
-	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
-
-$(BUILD_DIR)/primeparts-test-iceberg-writer: $(TEST_ICEBERG_WRITER_OBJ) $(WRITER_OBJ) $(SCHEMAS_OBJ)
-	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(ICEBERG_LDLIBS) -pthread -o $@
-
-$(BUILD_DIR)/primeparts-test-scan-planner: $(TEST_SCAN_PLANNER_OBJ) $(SCAN_OBJS) $(WRITER_OBJ)
-	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(ICEBERG_LDLIBS) -pthread -o $@
-
-$(BUILD_DIR)/primeparts-test-partition-stats: $(TEST_PARTITION_STATS_OBJ) $(PARTITION_STATS_OBJ) $(SCHEMAS_OBJ)
-	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(ICEBERG_LDLIBS) -pthread -o $@
-
 $(BUILD_DIR)/primeparts-tui: $(BUILD_DIR)/tui_main.o $(BUILD_DIR)/tui_runquery.o $(BUILD_DIR)/tui_generate.o $(BUILD_DIR)/tui_config.o $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(BUILD_DIR)/lua_presets.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $(NOTCURSES_RPATH) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(NOTCURSES_LDLIBS) $(LUA_LDLIBS) -lsqlite3 -pthread -o $@
-
-$(BUILD_DIR)/primeparts-lua-presets-smoke: $(BUILD_DIR)/lua_presets_smoke.o $(BUILD_DIR)/lua_presets.o $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(LMDB_LIB)
-	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(LUA_LDLIBS) -lsqlite3 -pthread -o $@
-
-$(BUILD_DIR)/primeparts-lua-query-smoke: $(BUILD_DIR)/lua_query_smoke.o $(BUILD_DIR)/lua_query_module.o $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(CORE_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(LMDB_LIB)
-	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(LUA_LDLIBS) -lsqlite3 -pthread -o $@
 
 $(BUILD_DIR)/pp: $(BUILD_DIR)/pp_main.o $(BUILD_DIR)/lua_query_module.o $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(CORE_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(LUA_LDLIBS) -lsqlite3 -pthread -o $@
 
-$(BUILD_DIR)/test_core: $(CORE_OBJ) $(TEST_OBJ)
-	$(CC) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) -pthread -o $@
+$(BUILD_DIR)/%_test.o: tests/%_test.cc | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(GTEST_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-test: $(BUILD_DIR)/test_core $(BUILD_DIR)/primeparts-test-iceberg-writer $(BUILD_DIR)/primeparts-test-scan-planner $(BUILD_DIR)/primeparts-test-partition-stats
-	$(BUILD_DIR)/test_core
-	$(BUILD_DIR)/primeparts-test-iceberg-writer
-	$(BUILD_DIR)/primeparts-test-scan-planner
-	$(BUILD_DIR)/primeparts-test-partition-stats
+$(TEST_SUITE_BIN): $(TEST_SUITE_OBJS) $(TEST_SUITE_LIBOBJS)
+	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(ICEBERG_LDLIBS) $(GTEST_LDLIBS) -pthread -o $@
 
-smoke: $(BUILD_DIR)/primeparts-lmdb-smoke \
-       $(BUILD_DIR)/primeparts-generate-smoke \
-       $(BUILD_DIR)/primeparts-lua-presets-smoke \
-       $(BUILD_DIR)/primeparts-lua-query-smoke
-	$(BUILD_DIR)/primeparts-lmdb-smoke
-	$(BUILD_DIR)/primeparts-generate-smoke
-	cd .. && native/$(BUILD_DIR)/primeparts-lua-presets-smoke
-	cd .. && native/$(BUILD_DIR)/primeparts-lua-query-smoke
+test: $(TEST_SUITE_BIN)
+	$(TEST_SUITE_BIN)
+
+$(E2E_OBJ): e2e/e2e_test.cc | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(GTEST_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(E2E_BIN): $(E2E_OBJ) $(E2E_LIBOBJS)
+	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(GTEST_LDLIBS) -lsqlite3 -pthread -o $@
+
+e2e: $(E2E_BIN) $(BUILD_DIR)/primeparts-catalogd
+	$(E2E_BIN)
 
 clean:
 	rm -rf $(BUILD_DIR)
