@@ -1,12 +1,28 @@
-# pp clients — Iceberg REST access & behavior
+# pp REST client — Iceberg REST access & behavior
 
-New 2026-07-09. The client side of the IRC seam; companion to
-`catalogd_rest_gap.md` (server routes), `irc_catalog_design.md`,
+New 2026-07-09; framing corrected 2026-07-18. The client side of the IRC seam;
+companion to `catalogd_rest_gap.md` (server routes), `irc_catalog_design.md`,
 `iceberg_data_setup.md`.
 
-A client is any native tool/library that speaks IRC: `generate`, `covering-sieve`,
-`verify`, `query`/`tui` (`QueryService`), `pp-catalog`. All reach data through the
-catalog seam, never the filesystem directly.
+There is **one** REST client. It stands between the producers and catalogd;
+tools do not each speak IRC in their own way, and "a client" is not a synonym
+for "a tool". Perfecting that client and the server it talks to is the goal —
+what sits behind either is expected to move.
+
+- **producer:** `primeparts-generate`. Writes; resume is the only nontrivial
+  processing it needs today.
+- **server:** `primeparts-catalogd`, intended as a full realization of the IRC
+  server.
+- **consumers:** `pp` (query), `primeparts-tui`, `primeparts-verify` exist, but
+  the real consumers of `FileScanTask` and the query engine behind them are
+  substantially unwritten. Their interfaces are open ground.
+
+An earlier revision of this file listed `covering-sieve` and `pp-catalog` as
+clients. Neither is a binary in this repo — the built set is
+`primeparts-generate`, `pp`, `primeparts-catalogd`, `primeparts-tui`,
+`primeparts-verify`, and two benches (`native/Makefile`, `all:`).
+`covering-sieve` survives only as an aspirational name in a comment
+(`common/thread_pool.h:4`).
 
 ## Access path
 
