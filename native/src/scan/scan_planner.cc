@@ -506,16 +506,25 @@ bool PlanTableScan(const std::shared_ptr<iceberg::TableMetadata>& metadata,
     }
   }
 
+  int64_t guaranteed_rows = 0;
+  const auto min_rows_met = [&]() {
+    return request.min_rows_requested.has_value() &&
+           guaranteed_rows >= *request.min_rows_requested;
+  };
+
   out->tasks.reserve(tasks.size());
   for (auto& task : tasks) {
-    if (TrivialResidual(task->residual_filter()) ||
-        !task->delete_files().empty()) {
+    const bool trivial = TrivialResidual(task->residual_filter());
+    const bool has_deletes = !task->delete_files().empty();
+    if (trivial || has_deletes) {
       FileScanTask planned;
       planned.planned_rows =
           static_cast<int64_t>(task->data_file()->record_count);
       planned.inner = std::move(task);
       out->planned_rows += planned.planned_rows;
+      if (trivial && !has_deletes) guaranteed_rows += planned.planned_rows;
       out->tasks.push_back(std::move(planned));
+      if (min_rows_met()) break;
       continue;
     }
     const auto& df = task->data_file();

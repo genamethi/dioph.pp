@@ -3,6 +3,7 @@
 #include "primeparts/catalog/pp_iceberg_rest.h"
 #include "primeparts/common/arrow_init.h"
 #include "primeparts/query/query_service.h"
+#include "primeparts/scan/scan_planner.h"
 #include "primeparts/schemas.h"
 #include "primeparts/writer.h"
 
@@ -25,7 +26,9 @@
 #include <vector>
 
 #include "iceberg/catalog.h"
+#include "iceberg/expression/expressions.h"
 #include "iceberg/expression/literal.h"
+#include "iceberg/table_metadata.h"
 #include "iceberg/partition_spec.h"
 #include "iceberg/row/partition_values.h"
 #include "iceberg/schema.h"
@@ -138,6 +141,32 @@ void BuildPrimesWarehouse(const fs::path& warehouse,
 
 class E2ETest : public ::testing::Test {
  protected:
+  static std::shared_ptr<iceberg::TableMetadata> LoadPrimesMetadata() {
+    primeparts::common::EnsureArrowRegistration();
+    fs::path dir = warehouse_;
+    for (const auto& level : ns_.levels) dir /= level;
+    dir = dir / "primes" / "metadata";
+
+    fs::path latest;
+    std::error_code ec;
+    for (const auto& entry : fs::directory_iterator(dir, ec)) {
+      const std::string name = entry.path().filename().string();
+      if (name.size() > 14 &&
+          name.compare(name.size() - 14, 14, ".metadata.json") == 0 &&
+          name > latest.filename().string()) {
+        latest = entry.path();
+      }
+    }
+    EXPECT_FALSE(latest.empty()) << "no metadata json under " << dir;
+    if (latest.empty()) return nullptr;
+
+    auto io = ppc::LocalIO();
+    auto md = iceberg::TableMetadataUtil::Read(*io, latest.string());
+    EXPECT_TRUE(md.has_value()) << (md.has_value() ? "" : md.error().message);
+    if (!md.has_value()) return nullptr;
+    return std::move(md.value());
+  }
+
   static void SetUpTestSuite() {
     warehouse_ = fs::temp_directory_path() / "primeparts-e2e-warehouse";
     std::error_code ec;
@@ -306,6 +335,63 @@ TEST_F(E2ETest, ExistenceChecksReturn204) {
   auto missing_table = cli.Head("/v1/namespaces/primeparts/tables/no-such-table");
   ASSERT_TRUE(missing_table) << "HEAD missing table: no response";
   EXPECT_EQ(missing_table->status, 404);
+}
+
+TEST_F(E2ETest, MinRowsRequestedStopsPlanningEarly) {
+  auto metadata = LoadPrimesMetadata();
+  ASSERT_NE(metadata, nullptr);
+  auto io = ppc::LocalIO();
+  std::string error;
+
+  primeparts::scan::ScanPlanRequest full_request;
+  primeparts::scan::ScanPlan full;
+  ASSERT_TRUE(primeparts::scan::PlanTableScan(metadata, io, full_request, &full,
+                                              &error))
+      << error;
+  ASSERT_GT(full.tasks.size(), 1u) << "fixture must plan more than one task";
+
+  primeparts::scan::ScanPlanRequest capped_request;
+  capped_request.min_rows_requested = 1;
+  primeparts::scan::ScanPlan capped;
+  ASSERT_TRUE(primeparts::scan::PlanTableScan(metadata, io, capped_request,
+                                              &capped, &error))
+      << error;
+
+  EXPECT_LT(capped.tasks.size(), full.tasks.size());
+  EXPECT_GE(capped.planned_rows, 1);
+  EXPECT_LT(capped.planned_rows, full.planned_rows);
+}
+
+TEST_F(E2ETest, MinRowsRequestedDoesNotStopOnUnprovenRowCounts) {
+  auto metadata = LoadPrimesMetadata();
+  ASSERT_NE(metadata, nullptr);
+  auto io = ppc::LocalIO();
+  std::string error;
+
+  auto filter = iceberg::Expressions::Equal("k", iceberg::Literal::Int(1));
+
+  primeparts::scan::ScanPlanRequest unbounded;
+  unbounded.filter = filter;
+  primeparts::scan::ScanPlan unbounded_plan;
+  ASSERT_TRUE(primeparts::scan::PlanTableScan(metadata, io, unbounded,
+                                              &unbounded_plan, &error))
+      << error;
+  ASSERT_GT(unbounded_plan.tasks.size(), 1u)
+      << "fixture must plan more than one task, or the comparison below is "
+         "vacuous";
+
+  primeparts::scan::ScanPlanRequest bounded;
+  bounded.filter = filter;
+  bounded.min_rows_requested = 1;
+  primeparts::scan::ScanPlan bounded_plan;
+  ASSERT_TRUE(primeparts::scan::PlanTableScan(metadata, io, bounded,
+                                              &bounded_plan, &error))
+      << error;
+
+  EXPECT_EQ(bounded_plan.tasks.size(), unbounded_plan.tasks.size())
+      << "row counts under a non-trivial residual are upper bounds, so "
+         "min-rows-requested must not stop planning early";
+  EXPECT_EQ(bounded_plan.planned_rows, unbounded_plan.planned_rows);
 }
 
 TEST_F(E2ETest, ConfigAdvertisesSupersetOfSpecDefaultEndpoints) {
