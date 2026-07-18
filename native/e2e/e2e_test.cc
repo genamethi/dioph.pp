@@ -1,3 +1,5 @@
+#include "primeparts/catalog/partition_stats.h"
+#include "primeparts/catalog/pp_commit.h"
 #include "primeparts/catalog/pp_iceberg_rest.h"
 #include "primeparts/common/arrow_init.h"
 #include "primeparts/query/query_service.h"
@@ -20,11 +22,13 @@
 #include <thread>
 #include <vector>
 
+#include "iceberg/catalog.h"
 #include "iceberg/expression/literal.h"
 #include "iceberg/partition_spec.h"
 #include "iceberg/row/partition_values.h"
 #include "iceberg/schema.h"
 #include "iceberg/schema_field.h"
+#include "iceberg/table.h"
 #include "iceberg/type.h"
 
 namespace ppc = primeparts::catalog;
@@ -54,19 +58,12 @@ std::shared_ptr<arrow::RecordBatch> MakePrimesBatch(
   return arrow::RecordBatch::Make(schema, 3, {pa, ka, ra, va, ba});
 }
 
-void BuildPrimesWarehouse(const fs::path& warehouse,
-                          const iceberg::Namespace& ns) {
+std::vector<std::shared_ptr<iceberg::DataFile>> WritePrimesFiles(
+    const fs::path& warehouse, const iceberg::Namespace& ns,
+    const std::shared_ptr<iceberg::Schema>& schema,
+    const std::shared_ptr<iceberg::PartitionSpec>& spec,
+    const std::shared_ptr<arrow::Schema>& arrow_schema) {
   std::string error;
-  auto catalog = ppc::MakeLocalCatalog(warehouse, &error);
-  ASSERT_NE(catalog, nullptr) << error;
-
-  auto schema = primeparts::PrimesSchema();
-  auto spec = primeparts::BucketPartitionSpec(*schema, &error);
-  ASSERT_NE(spec, nullptr) << error;
-  auto arrow_schema =
-      primeparts::IcebergToArrowSchemaWithFieldIds(*schema, &error);
-  ASSERT_NE(arrow_schema, nullptr) << error;
-
   primeparts::WriterConfig cfg;
   cfg.output_dir = ppc::StagingDataDir(warehouse, ns, "primes") /
                    "p_bucket_version=1" / "p_bucket=2";
@@ -83,20 +80,57 @@ void BuildPrimesWarehouse(const fs::path& warehouse,
   cfg.bucket = 2;
   cfg.compression_level = 1;
 
-  auto writer = primeparts::BucketParquetWriter::Make(std::move(cfg), &error);
-  ASSERT_NE(writer, nullptr) << error;
-  auto batch = MakePrimesBatch(arrow_schema);
-  ASSERT_TRUE(writer->Write(*batch, &error)) << error;
-  std::vector<primeparts::WrittenFile> written;
-  ASSERT_TRUE(writer->Close(&written, &error)) << error;
-
   std::vector<std::shared_ptr<iceberg::DataFile>> files;
+  auto writer = primeparts::BucketParquetWriter::Make(std::move(cfg), &error);
+  EXPECT_NE(writer, nullptr) << error;
+  if (!writer) return files;
+  auto batch = MakePrimesBatch(arrow_schema);
+  EXPECT_TRUE(writer->Write(*batch, &error)) << error;
+  std::vector<primeparts::WrittenFile> written;
+  EXPECT_TRUE(writer->Close(&written, &error)) << error;
   for (auto& wf : written) files.push_back(wf.data_file);
+  return files;
+}
+
+void BuildPrimesWarehouse(const fs::path& warehouse,
+                          const iceberg::Namespace& ns,
+                          ppc::PartitionStatsSet* out_stats) {
+  std::string error;
+  auto local = ppc::MakeLocalCatalogWithStore(warehouse, &error);
+  ASSERT_NE(local.catalog, nullptr) << error;
+  ASSERT_NE(local.store, nullptr) << error;
+
+  auto schema = primeparts::PrimesSchema();
+  auto spec = primeparts::BucketPartitionSpec(*schema, &error);
+  ASSERT_NE(spec, nullptr) << error;
+  auto arrow_schema =
+      primeparts::IcebergToArrowSchemaWithFieldIds(*schema, &error);
+  ASSERT_NE(arrow_schema, nullptr) << error;
 
   ppc::TableDeclaration declare;
+  auto seed = WritePrimesFiles(warehouse, ns, schema, spec, arrow_schema);
+  ASSERT_FALSE(seed.empty());
   std::string meta;
-  ASSERT_TRUE(ppc::CommitFiles(catalog, ns, warehouse, "primes", schema, spec,
-                               declare, files, &meta, &error))
+  ASSERT_TRUE(ppc::CommitFiles(local.catalog, ns, warehouse, "primes", schema,
+                               spec, declare, seed, &meta, &error))
+      << error;
+
+  ppc::TableCommitSpec cspec;
+  cspec.table_name = "primes";
+  cspec.schema = schema;
+  cspec.spec = spec;
+  cspec.files = WritePrimesFiles(warehouse, ns, schema, spec, arrow_schema);
+  ASSERT_FALSE(cspec.files.empty());
+  std::vector<ppc::TableCommitSpec> specs;
+  specs.push_back(std::move(cspec));
+  ASSERT_TRUE(ppc::CommitFilesAtomic(local.catalog, local.store, "", ns,
+                                     warehouse, specs, &error))
+      << error;
+
+  auto table = local.catalog->LoadTable(
+      iceberg::TableIdentifier{.ns = ns, .name = "primes"});
+  ASSERT_TRUE(table.has_value()) << table.error().message;
+  ASSERT_TRUE(ppc::LoadPartitionStats(*table.value(), out_stats, &error))
       << error;
 }
 
@@ -109,7 +143,7 @@ class E2ETest : public ::testing::Test {
     fs::create_directories(warehouse_, ec);
     ns_ = ppc::ResolveNamespace("");
 
-    BuildPrimesWarehouse(warehouse_, ns_);
+    BuildPrimesWarehouse(warehouse_, ns_, &stats_);
     if (::testing::Test::HasFatalFailure()) return;
 
     const char* bin_env = std::getenv("PP_CATALOGD_BIN");
@@ -154,12 +188,14 @@ class E2ETest : public ::testing::Test {
   static iceberg::Namespace ns_;
   static pid_t pid_;
   static bool ready_;
+  static ppc::PartitionStatsSet stats_;
 };
 
 fs::path E2ETest::warehouse_;
 iceberg::Namespace E2ETest::ns_;
 pid_t E2ETest::pid_ = -1;
 bool E2ETest::ready_ = false;
+ppc::PartitionStatsSet E2ETest::stats_;
 
 TEST_F(E2ETest, ScanByKErrorsWithoutSortOrder) {
   std::string error;
@@ -198,7 +234,22 @@ TEST_F(E2ETest, ColumnSubsetReadWorks) {
   error.clear();
   auto rows = qs->ReadTable("primes", {"p", "k"}, 100, &error);
   EXPECT_TRUE(error.empty()) << error;
-  EXPECT_EQ(rows.rows.size(), 3u);
+  EXPECT_EQ(rows.rows.size(), 6u);
+}
+
+TEST_F(E2ETest, PartitionStatsPresentAfterCommit) {
+  ASSERT_FALSE(stats_.rows.empty())
+      << "partition statistics missing after commit";
+  const ppc::PartitionStatsRow* row = nullptr;
+  for (const auto& r : stats_.rows) {
+    if (r.partition == std::vector<int64_t>{1, 2}) {
+      row = &r;
+      break;
+    }
+  }
+  ASSERT_NE(row, nullptr) << "no partition stats row for (1, 2)";
+  EXPECT_EQ(row->data_file_count, 2);
+  EXPECT_EQ(row->data_record_count, 6);
 }
 
 TEST_F(E2ETest, NonIntStatColumnNotImplemented) {

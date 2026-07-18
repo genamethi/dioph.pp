@@ -17,5 +17,8 @@ Checked-in fixture builder + loud-by-design assertions against a scratch catalog
   - [x] full-table `read` (all columns) → "Missing required field with id: N"; column-subset read ok.
   - [x] catalogd plan routes → 406 UnsupportedOperationException, all four.
   - [x] non-int stat-column / sort-key declaration → loud NotImplemented naming the found type.
+  - [x] partition stats present after commit: fixture seeds via `CommitFiles` then appends via the
+        real `CommitFilesAtomic` (store path, writes `SetPartitionStatistics`); `LoadPartitionStats`
+        asserts the (1,2) row is registered with 2 files / 6 records — guards stats going missing.
 - [x] Makefile `.PHONY: e2e` target: build + run against fresh scratch catalogd each run; tear down after.
 - [x] boundary: `make e2e` green on promix.
