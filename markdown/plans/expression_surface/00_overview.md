@@ -25,7 +25,7 @@ design question, not a retype.
 
 - [x] 01 `ScanPlan`: complete residual, `Literal` key window, `DeriveKeyWindow` exposed
 - [x] 02 `SortTasksByLowerBound` over `Literal` bounds
-- [ ] 03 registry corrections + merge
+- [x] 03 registry corrections + merge
 
 ## decisions taken (user, 2026-07-18)
 
