@@ -715,16 +715,12 @@ std::shared_ptr<iceberg::PartitionStatisticsFile> BuildPartitionStatsForAppend(
     std::string* error) {
   if (!SingleSpecOnly(table, error)) return nullptr;
   PartitionStatsSet stats;
-  auto current_r = table.current_snapshot();
-  if (!current_r.has_value()) {
-    if (error) *error = "current snapshot: " + current_r.error().message;
+  const auto& metadata = table.metadata();
+  if (!metadata) {
+    if (error) *error = "table has no metadata";
     return nullptr;
   }
-  if (current_r.value()) {
-    if (!StatsForSnapshot(table, *current_r.value(), &stats, error)) {
-      return nullptr;
-    }
-  } else {
+  if (metadata->snapshots.empty()) {
     auto schema_r = table.schema();
     if (!schema_r.has_value()) {
       if (error) *error = "schema: " + schema_r.error().message;
@@ -737,6 +733,19 @@ std::shared_ptr<iceberg::PartitionStatisticsFile> BuildPartitionStatsForAppend(
     }
     if (!PartitionStatsFields(*schema_r.value(), *spec_r.value(), &stats,
                               error)) {
+      return nullptr;
+    }
+  } else {
+    auto current_r = table.current_snapshot();
+    if (!current_r.has_value()) {
+      if (error) *error = "current snapshot: " + current_r.error().message;
+      return nullptr;
+    }
+    if (!current_r.value()) {
+      if (error) *error = "table has snapshots but no current snapshot";
+      return nullptr;
+    }
+    if (!StatsForSnapshot(table, *current_r.value(), &stats, error)) {
       return nullptr;
     }
   }

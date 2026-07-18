@@ -309,4 +309,44 @@ TEST_F(E2ETest, PlanRoutesReturn406) {
   }
 }
 
+TEST(E2EFreshCommit, PartitionStatsPresentOnFirstCommit) {
+  const fs::path wh = fs::temp_directory_path() / "primeparts-e2e-fresh";
+  std::error_code ec;
+  fs::remove_all(wh, ec);
+  fs::create_directories(wh, ec);
+  const auto ns = ppc::ResolveNamespace("");
+
+  std::string error;
+  auto local = ppc::MakeLocalCatalogWithStore(wh, &error);
+  ASSERT_NE(local.catalog, nullptr) << error;
+  ASSERT_NE(local.store, nullptr) << error;
+  auto schema = primeparts::PrimesSchema();
+  auto spec = primeparts::BucketPartitionSpec(*schema, &error);
+  ASSERT_NE(spec, nullptr) << error;
+  auto arrow_schema =
+      primeparts::IcebergToArrowSchemaWithFieldIds(*schema, &error);
+  ASSERT_NE(arrow_schema, nullptr) << error;
+
+  ppc::TableCommitSpec cspec;
+  cspec.table_name = "primes";
+  cspec.schema = schema;
+  cspec.spec = spec;
+  cspec.files = WritePrimesFiles(wh, ns, schema, spec, arrow_schema);
+  ASSERT_FALSE(cspec.files.empty());
+  std::vector<ppc::TableCommitSpec> specs;
+  specs.push_back(std::move(cspec));
+  ASSERT_TRUE(ppc::CommitFilesAtomic(local.catalog, local.store, "", ns, wh,
+                                     specs, &error))
+      << error;
+
+  auto table = local.catalog->LoadTable(
+      iceberg::TableIdentifier{.ns = ns, .name = "primes"});
+  ASSERT_TRUE(table.has_value()) << table.error().message;
+  ppc::PartitionStatsSet stats;
+  ASSERT_TRUE(ppc::LoadPartitionStats(*table.value(), &stats, &error)) << error;
+  ASSERT_FALSE(stats.rows.empty())
+      << "partition statistics missing on first commit to a fresh table";
+  fs::remove_all(wh, ec);
+}
+
 }  // namespace
