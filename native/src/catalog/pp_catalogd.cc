@@ -265,6 +265,45 @@ bool FieldUpperBound(const std::shared_ptr<iceberg::Catalog>& catalog,
   return true;
 }
 
+class RouteTable {
+ public:
+  explicit RouteTable(httplib::Server& server) : svr_(server) {}
+
+  void Get(const std::string& pattern, const std::string& spec_path,
+           const std::vector<std::string>& advertise,
+           httplib::Server::Handler handler) {
+    Record(spec_path, advertise);
+    svr_.Get(pattern, std::move(handler));
+  }
+
+  void Post(const std::string& pattern, const std::string& spec_path,
+            const std::vector<std::string>& advertise,
+            httplib::Server::Handler handler) {
+    Record(spec_path, advertise);
+    svr_.Post(pattern, std::move(handler));
+  }
+
+  void Delete(const std::string& pattern, const std::string& spec_path,
+              const std::vector<std::string>& advertise,
+              httplib::Server::Handler handler) {
+    Record(spec_path, advertise);
+    svr_.Delete(pattern, std::move(handler));
+  }
+
+  const json& endpoints() const { return endpoints_; }
+
+ private:
+  void Record(const std::string& spec_path,
+              const std::vector<std::string>& advertise) {
+    for (const auto& method : advertise) {
+      endpoints_.push_back(method + " " + spec_path);
+    }
+  }
+
+  httplib::Server& svr_;
+  json endpoints_ = json::array();
+};
+
 }  // namespace
 
 int RunCatalogd(const CatalogdOptions& opts) {
@@ -278,13 +317,10 @@ int RunCatalogd(const CatalogdOptions& opts) {
   auto store = local.store;
 
   httplib::Server svr;
+  RouteTable routes(svr);
 
-  svr.Get("/v1/config", [](const httplib::Request&, httplib::Response& res) {
-    SendJson(res, 200, json{{"defaults", json::object()},
-                            {"overrides", json::object()}});
-  });
-
-  svr.Get("/v1/namespaces", [catalog](const httplib::Request& req,
+  routes.Get("/v1/namespaces", "/v1/{prefix}/namespaces", {"GET"},
+             [catalog](const httplib::Request& req,
                                       httplib::Response& res) {
     iceberg::Namespace parent;
     if (req.has_param("parent")) parent = ParseNamespace(req.get_param_value("parent"));
@@ -294,7 +330,8 @@ int RunCatalogd(const CatalogdOptions& opts) {
     SendJson(res, 200, ir::ToJson(body));
   });
 
-  svr.Post("/v1/namespaces", [catalog](const httplib::Request& req,
+  routes.Post("/v1/namespaces", "/v1/{prefix}/namespaces", {"POST"},
+              [catalog](const httplib::Request& req,
                                        httplib::Response& res) {
     json body;
     if (!ParseBody(req, res, &body)) return;
@@ -308,7 +345,8 @@ int RunCatalogd(const CatalogdOptions& opts) {
     SendJson(res, 200, ir::ToJson(resp));
   });
 
-  svr.Get(R"(/v1/namespaces/([^/]+))", [catalog](const httplib::Request& req,
+  routes.Get(R"(/v1/namespaces/([^/]+))", "/v1/{prefix}/namespaces/{namespace}",
+             {"GET", "HEAD"}, [catalog](const httplib::Request& req,
                                                  httplib::Response& res) {
     auto ns = ParseNamespace(req.matches[1]);
     auto r = catalog->GetNamespaceProperties(ns);
@@ -318,15 +356,18 @@ int RunCatalogd(const CatalogdOptions& opts) {
   });
 
 
-  svr.Delete(R"(/v1/namespaces/([^/]+))", [catalog](const httplib::Request& req,
+  routes.Delete(R"(/v1/namespaces/([^/]+))",
+                "/v1/{prefix}/namespaces/{namespace}", {"DELETE"},
+                [catalog](const httplib::Request& req,
                                                     httplib::Response& res) {
     auto st = catalog->DropNamespace(ParseNamespace(req.matches[1]));
     if (!st.has_value()) return SendIcebergError(res, st.error());
     res.status = 204;
   });
 
-  svr.Post(R"(/v1/namespaces/([^/]+)/properties)",
-           [catalog](const httplib::Request& req, httplib::Response& res) {
+  routes.Post(R"(/v1/namespaces/([^/]+)/properties)",
+              "/v1/{prefix}/namespaces/{namespace}/properties", {"POST"},
+              [catalog](const httplib::Request& req, httplib::Response& res) {
              json body;
              if (!ParseBody(req, res, &body)) return;
              auto parsed = ir::UpdateNamespacePropertiesRequestFromJson(body);
@@ -344,16 +385,18 @@ int RunCatalogd(const CatalogdOptions& opts) {
              SendJson(res, 200, ir::ToJson(resp));
            });
 
-  svr.Get(R"(/v1/namespaces/([^/]+)/tables)",
-          [catalog](const httplib::Request& req, httplib::Response& res) {
+  routes.Get(R"(/v1/namespaces/([^/]+)/tables)",
+             "/v1/{prefix}/namespaces/{namespace}/tables", {"GET"},
+             [catalog](const httplib::Request& req, httplib::Response& res) {
             auto r = catalog->ListTables(ParseNamespace(req.matches[1]));
             if (!r.has_value()) return SendIcebergError(res, r.error());
             ir::ListTablesResponse body{.identifiers = std::move(r.value())};
             SendJson(res, 200, ir::ToJson(body));
           });
 
-  svr.Post(R"(/v1/namespaces/([^/]+)/tables)",
-           [catalog](const httplib::Request& req, httplib::Response& res) {
+  routes.Post(R"(/v1/namespaces/([^/]+)/tables)",
+              "/v1/{prefix}/namespaces/{namespace}/tables", {"POST"},
+              [catalog](const httplib::Request& req, httplib::Response& res) {
              json body;
              if (!ParseBody(req, res, &body)) return;
              auto parsed = ir::CreateTableRequestFromJson(body);
@@ -371,8 +414,9 @@ int RunCatalogd(const CatalogdOptions& opts) {
              SendTableResult(res, 200, r.value(), true);
            });
 
-  svr.Post(R"(/v1/namespaces/([^/]+)/register)",
-           [catalog](const httplib::Request& req, httplib::Response& res) {
+  routes.Post(R"(/v1/namespaces/([^/]+)/register)",
+              "/v1/{prefix}/namespaces/{namespace}/register", {"POST"},
+              [catalog](const httplib::Request& req, httplib::Response& res) {
              json body;
              if (!ParseBody(req, res, &body)) return;
              auto parsed = ir::RegisterTableRequestFromJson(body);
@@ -386,8 +430,10 @@ int RunCatalogd(const CatalogdOptions& opts) {
              SendTableResult(res, 200, r.value(), true);
            });
 
-  svr.Get(R"(/v1/namespaces/([^/]+)/tables/([^/]+))",
-          [catalog](const httplib::Request& req, httplib::Response& res) {
+  routes.Get(R"(/v1/namespaces/([^/]+)/tables/([^/]+))",
+             "/v1/{prefix}/namespaces/{namespace}/tables/{table}",
+             {"GET", "HEAD"},
+             [catalog](const httplib::Request& req, httplib::Response& res) {
             iceberg::TableIdentifier id{.ns = ParseNamespace(req.matches[1]),
                                         .name = req.matches[2]};
             auto r = catalog->LoadTable(id);
@@ -396,8 +442,10 @@ int RunCatalogd(const CatalogdOptions& opts) {
           });
 
 
-  svr.Get(R"(/v1/namespaces/([^/]+)/tables/([^/]+)/field-upper-bound)",
-          [catalog](const httplib::Request& req, httplib::Response& res) {
+  routes.Get(R"(/v1/namespaces/([^/]+)/tables/([^/]+)/field-upper-bound)",
+             "/v1/{prefix}/namespaces/{namespace}/tables/{table}/field-upper-bound",
+             {},
+             [catalog](const httplib::Request& req, httplib::Response& res) {
             if (!req.has_param("field"))
               return SendError(res, 400, "BadRequest", "missing field param");
             const std::string field = req.get_param_value("field");
@@ -420,15 +468,23 @@ int RunCatalogd(const CatalogdOptions& opts) {
               "server-side scan planning is not implemented; "
               "scan-planning-mode is 'client'");
   };
-  svr.Post(R"(/v1/namespaces/([^/]+)/tables/([^/]+)/plan)", planning_unsupported);
-  svr.Get(R"(/v1/namespaces/([^/]+)/tables/([^/]+)/plan/([^/]+))",
-          planning_unsupported);
-  svr.Delete(R"(/v1/namespaces/([^/]+)/tables/([^/]+)/plan/([^/]+))",
-             planning_unsupported);
-  svr.Post(R"(/v1/namespaces/([^/]+)/tables/([^/]+)/tasks)", planning_unsupported);
+  routes.Post(R"(/v1/namespaces/([^/]+)/tables/([^/]+)/plan)",
+              "/v1/{prefix}/namespaces/{namespace}/tables/{table}/plan",
+              {"POST"}, planning_unsupported);
+  routes.Get(R"(/v1/namespaces/([^/]+)/tables/([^/]+)/plan/([^/]+))",
+             "/v1/{prefix}/namespaces/{namespace}/tables/{table}/plan/{plan-id}",
+             {"GET"}, planning_unsupported);
+  routes.Delete(
+      R"(/v1/namespaces/([^/]+)/tables/([^/]+)/plan/([^/]+))",
+      "/v1/{prefix}/namespaces/{namespace}/tables/{table}/plan/{plan-id}",
+      {"DELETE"}, planning_unsupported);
+  routes.Post(R"(/v1/namespaces/([^/]+)/tables/([^/]+)/tasks)",
+              "/v1/{prefix}/namespaces/{namespace}/tables/{table}/tasks",
+              {"POST"}, planning_unsupported);
 
-  svr.Post(R"(/v1/namespaces/([^/]+)/tables/([^/]+))",
-           [catalog](const httplib::Request& req, httplib::Response& res) {
+  routes.Post(R"(/v1/namespaces/([^/]+)/tables/([^/]+))",
+              "/v1/{prefix}/namespaces/{namespace}/tables/{table}", {"POST"},
+              [catalog](const httplib::Request& req, httplib::Response& res) {
              json body;
              if (!ParseBody(req, res, &body)) return;
              iceberg::TableIdentifier id{.ns = ParseNamespace(req.matches[1]),
@@ -443,8 +499,10 @@ int RunCatalogd(const CatalogdOptions& opts) {
              SendTableResult(res, 200, r.value(), false);
            });
 
-  svr.Delete(R"(/v1/namespaces/([^/]+)/tables/([^/]+))",
-             [catalog](const httplib::Request& req, httplib::Response& res) {
+  routes.Delete(R"(/v1/namespaces/([^/]+)/tables/([^/]+))",
+                "/v1/{prefix}/namespaces/{namespace}/tables/{table}",
+                {"DELETE"},
+                [catalog](const httplib::Request& req, httplib::Response& res) {
                iceberg::TableIdentifier id{.ns = ParseNamespace(req.matches[1]),
                                            .name = req.matches[2]};
                bool purge = req.has_param("purgeRequested") &&
@@ -454,7 +512,8 @@ int RunCatalogd(const CatalogdOptions& opts) {
                res.status = 204;
              });
 
-  svr.Post("/v1/tables/rename", [catalog](const httplib::Request& req,
+  routes.Post("/v1/tables/rename", "/v1/{prefix}/tables/rename", {"POST"},
+              [catalog](const httplib::Request& req,
                                           httplib::Response& res) {
     json body;
     if (!ParseBody(req, res, &body)) return;
@@ -466,11 +525,14 @@ int RunCatalogd(const CatalogdOptions& opts) {
     res.status = 200;
   });
 
-  svr.Post(R"(/v1/namespaces/([^/]+)/tables/([^/]+)/metrics)",
-           [](const httplib::Request&, httplib::Response& res) { res.status = 204; });
+  routes.Post(R"(/v1/namespaces/([^/]+)/tables/([^/]+)/metrics)",
+              "/v1/{prefix}/namespaces/{namespace}/tables/{table}/metrics",
+              {"POST"},
+              [](const httplib::Request&, httplib::Response& res) { res.status = 204; });
 
-  svr.Post("/v1/transactions/commit",
-           [catalog, store](const httplib::Request& req, httplib::Response& res) {
+  routes.Post("/v1/transactions/commit", "/v1/{prefix}/transactions/commit",
+              {"POST"},
+              [catalog, store](const httplib::Request& req, httplib::Response& res) {
              json body;
              if (!ParseBody(req, res, &body)) return;
              auto tc = body.find("table-changes");
@@ -502,6 +564,14 @@ int RunCatalogd(const CatalogdOptions& opts) {
              if (!st.has_value()) return SendIcebergError(res, st.error());
              res.status = 204;
            });
+
+  svr.Get("/v1/config", [endpoints = routes.endpoints()](
+                            const httplib::Request&, httplib::Response& res) {
+    SendJson(res, 200,
+             json{{"defaults", json::object()},
+                  {"overrides", json::object()},
+                  {"endpoints", endpoints}});
+  });
 
   svr.set_exception_handler(
       [](const httplib::Request&, httplib::Response& res, std::exception_ptr ep) {
