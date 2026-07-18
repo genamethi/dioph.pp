@@ -97,3 +97,25 @@ while there is no planner. Real planning is server-side `planTableScan`, which
 catalogd fulfills by **invoking** a planner module and returning the plan as if the
 catalog produced it (`catalogd_rest_gap.md`). Client-side planning is transitional;
 keeping the plan atom API-shaped makes the lift mechanical.
+
+## The scan plan a consumer receives
+
+`ScanPlan` (`scan/scan_plan.h`) is the shape handed to a consumer of file scan
+tasks. Two properties are contractual, and both exist so an unwritten consumer
+cannot be trapped by them:
+
+- **`residual` is complete.** It carries every conjunct the caller supplied.
+  `key_lo`/`key_hi` are *derived* from it, not subtracted out of it, so a
+  consumer that ignores the key window is slower but never wrong. Before
+  2026-07-18 the window was load-bearing and ignoring it silently returned too
+  many rows.
+- **the key window may over-include, never under-include.** It is an
+  ordered-data acceleration: `SliceToKeyWindow` binary-searches a batch sorted
+  on the key. This is why a strict `>` folds to an *inclusive* bound — no
+  type-specific successor function is needed, and the fold works for any
+  comparable type. `DeriveKeyWindow` (`scan/scan_planner.h`) is public so a
+  consumer can compute the window itself.
+
+`SourceTableReader` returns a **superset**: it slices by the window and does not
+evaluate the residual. Consumers filter for themselves — `ScanByK` re-tests `k`
+per row. A consumer that wants exact rows must evaluate `residual`.

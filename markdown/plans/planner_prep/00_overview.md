@@ -24,12 +24,14 @@ A hole is a gap between our surface and `rest-catalog-open-api.yaml`, or an unim
 
 - server-side scan planning is unimplemented: only one of the spec's two planning modes exists. `scan-planning-mode: client` is advertised, so client-side planning is conformant — filed-by 08 — owner: future server-side lift invoking the 02 planner module
 - branch-schema resolution is unimplemented. `use-snapshot-schema: false` against a snapshot whose schema id differs from the table's current schema id errors loudly (`scan_planner.cc`, `CheckSnapshotSchemaSupported`). The vendored `TableScanBuilder` resolves the snapshot's schema whenever a snapshot-id is set and exposes no override — `snapshot_schema_` is private (`table_scan.h:398`) — so the request's `false` is unreachable through the builder. Tables whose schema has never evolved are unaffected: every flag combination coincides there — filed-by irc_spec_surface 03 — owner: unassigned
-- `ScanPlan.key_lo`/`key_hi` are `optional<int64_t>` on a structure whose spec counterpart carries a general `Expression` residual. The key window is derived from the filter but typed more narrowly than it, so no predicate over a non-int column can fold or prune — filed-by spec-diff audit 2026-07-18 — owner: unassigned
+- `table_traits.cc` rejects declared sort orders with non-identity transforms, so a transform-sorted table cannot be planned even though task ordering itself now handles any totally-ordered key type. Filed under transform coverage below; noted here because the two guards compose — clearing one does not reach the other — filed-by expression_surface 02 — owner: unassigned
 - `createTable` answers 500 when the table's parent directory does not exist: FileIO does not create it, and the IOError surfaces as `IcebergError`. Our own tools pre-create the tree, so `generate` and the sieve never reach it; it is on the path a third-party IRC client takes to create a table, which is the interop `irc_catalog_design.md` claims. 5XX is a listed status for the route, so this is reachability rather than status conformance — filed-by irc_spec_surface 02 — owner: unassigned
 
 **type narrowing (one cause, five sites)**
 
-- values are erased to `int64_t` at every seam instead of carried as `iceberg::Literal`. `DecodeIntegerBound` (`scan_planner.cc`) is the funnel: it deserializes a `Literal`, then discards the type through an `int64_t*`. Exits: `writer.cc` stat-column bounds (Make), `partition_stats.cc` tuple values and partition source types, `SortTasksByLowerBound` task-ordering bound decode, `ScanPlan.key_lo/key_hi`. Non-int declarations error loudly naming the found type; non-int predicates do not fold or prune (inclusive, correct) — filed-by post-review rework, consolidated 2026-07-18 — owner: unassigned
+- values are erased to `int64_t` on the **producer** side. The plan path is done: `DecodeIntegerBound` is deleted, `ScanPlan.key_lo/key_hi` carry `iceberg::Literal`, and task ordering decodes bounds as `Literal` (irc `expression_surface` 01–02). Two sites remain, both behind the interface rather than on it — filed-by post-review rework, consolidated 2026-07-18, split 2026-07-18 — owner: unassigned
+  - `writer.cc` stat-column bounds: `BatchColumnBounds` reads an arrow array to `pair<int64_t,int64_t>` and `TypedLiteral` rebuilds a `Literal` from it, so a non-int stat column cannot record bounds. `WriterStatColumns.StringStatColumnCapturesBounds` is red pending this.
+  - `partition_stats.cc` tuple values and partition source types: partition tuples are `std::vector<int64_t>` and are used as `std::map` keys. A `Literal` tuple needs a **total** order, but `Literal::operator<=>` yields `std::partial_ordering` — `kUuid` compares distinct values as unordered (`literal.cc:537`) and unknown type ids fall through likewise. Choosing the map's ordering is a design question, not a retype.
 
 **transform coverage**
 
@@ -69,7 +71,7 @@ A hole is a gap between our surface and `rest-catalog-open-api.yaml`, or an unim
 
 | group | holes | hard | priority |
 |---|---|---|---|
-| type / expression narrowing | `Literal` erased to `int64_t` at five sites: writer stat bounds, stats tuple values, stats source types, task-order decode, `ScanPlan.key_lo/key_hi` | 4 | P1 — stated |
+| type / expression narrowing | plan path CLOSED by expression_surface 01–02 (residual complete, `Literal` key window, `Literal` task ordering, funnel deleted). Producer-side residue: writer stat bounds; stats tuple values + source types (needs a total-order decision) | 3 | P2 — behind the interface |
 | spec surface | CLOSED by irc_spec_surface 01–04. Residue filed separately: branch-schema resolution, `createTable` 500 on a missing directory, server-side planning | — | — |
 | read-path synthesis | identity-partition columns unreachable on both read paths | 2 | P2 — inferred |
 | transform coverage | `partition_stats` identity-only guard (over-broad); `table_traits` identity vs monotonicity; delete manifests; multi-spec tables | 3 | P2 — inferred |
@@ -89,7 +91,7 @@ Sketches only — each names the seam and the known blocker.
 
 **spec surface.** Done — see `../irc_spec_surface/`. The sketch that stood here proposed rewiring `ScanByK`'s early-stop to read `min-rows-requested`; that would have been a bug, for the reason recorded in the retired entry above.
 
-**the `Literal` collapse.** One change with five call sites. `DecodeIntegerBound` is where the type dies; carrying `Literal` through is the shared path. `ScanPlan.key_lo/key_hi` is the widest edit since the type crosses into the query surface, and it is the item that most directly gates arbitrary-predicate pushdown for a dropped-in engine.
+**the `Literal` collapse.** Plan path done — see `../expression_surface/`. The sketch that stood here treated the five sites as one change; in the event the plan-facing three were separable from the two producer-side ones, and the `partition_stats` site turned out to carry a design question (total order over `Literal` tuples) rather than a mechanical retype.
 
 **identity-partition synthesis.** Constant-array widen from `DataFile::partition` onto the batch inside `SourceTableReader::Next`, after `ReadNext` and before `SliceToKeyWindow`, so the batch matches `projected_schema` as early as possible. Width follows the schema (`PrimesSchema` declares both bucket columns `int32`), so it is not a choice. `FullTableReadSynthesizesIdentityColumns` (e2e) is red pending this.
 
