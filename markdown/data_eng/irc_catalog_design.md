@@ -16,12 +16,11 @@ into LMDB.
 
 ```mermaid
 flowchart TD
-    subgraph tools["native tools (client side — speak IRC)"]
+    subgraph tools["producers"]
       gen[generate]
-      sieve[covering-sieve]
-      rew[rewrite / clone / row-delta]
+      rew["rewrite / clone / row-delta<br/>(not built)"]
     end
-    tools -->|"iceberg-cpp RestCatalog client<br/>(pp_iceberg_rest)"| wire
+    tools -->|"the one REST client<br/>(pp_iceberg_rest)"| wire
     wire["HTTP — IRC /v1 routes"] --> server
     subgraph server["pp-catalogd — native IRC server"]
       router["cpp-httplib router"]
@@ -29,7 +28,7 @@ flowchart TD
       router --> engine
     end
     engine -->|"CatalogStore seam"| lmdb[("LMDB<br/>catalog txns")]
-    engine -->|"FileIO"| fs[("filesystem warehouse<br/>metadata.json + Parquet")]
+    engine -->|"FileIO"| fs[("warehouse storage<br/>metadata.json + Parquet")]
 ```
 
 The metadata engine (apply `TableUpdate`s, write `metadata.json`, CAS commit)
@@ -140,8 +139,8 @@ or neither does.
 
 ### Commit-contract interface
 
-The seam shared by `generate`, the sieve, and the server's engine. At the HTTP
-boundary it is the IRC contract; in-process it is the `iceberg::Catalog` API.
+The seam shared by the producers and the server's engine. At the HTTP boundary
+it is the IRC contract; in-process it is the `iceberg::Catalog` API.
 
 - **IRC contract.** Single-table commit is `POST .../tables/{table}` →
   `updateTable` with `CommitTableRequest { identifier, requirements[], updates[] }`.
