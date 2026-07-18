@@ -24,6 +24,7 @@
 #include "iceberg/manifest/manifest_entry.h"
 #include "iceberg/schema.h"
 #include "iceberg/schema_field.h"
+#include "iceberg/snapshot.h"
 #include "iceberg/table_metadata.h"
 #include "iceberg/table_scan.h"
 #include "iceberg/type.h"
@@ -151,6 +152,57 @@ void ExtractKeyWindow(const std::shared_ptr<iceberg::Expression>& filter,
     *residual = *residual ? iceberg::Expressions::And(*residual, expr)
                           : std::move(expr);
   }
+}
+
+bool CheckSnapshotSchemaSupported(const iceberg::TableMetadata& metadata,
+                                  const ScanPlanRequest& request,
+                                  std::string* error) {
+  std::shared_ptr<iceberg::Snapshot> snapshot;
+  if (request.snapshot_id.has_value() || request.end_snapshot_id.has_value()) {
+    const int64_t id = request.snapshot_id.value_or(
+        request.end_snapshot_id.value_or(0));
+    auto r = metadata.SnapshotById(id);
+    if (!r.has_value()) {
+      if (error) *error = "TableMetadata::SnapshotById: " + r.error().message;
+      return false;
+    }
+    snapshot = r.value();
+  } else {
+    auto r = metadata.Snapshot();
+    if (!r.has_value()) return true;
+    snapshot = r.value();
+  }
+  if (snapshot == nullptr) return true;
+
+  const int32_t snapshot_schema_id =
+      snapshot->schema_id.value_or(metadata.current_schema_id);
+  if (snapshot_schema_id == metadata.current_schema_id) return true;
+
+  const bool resolves_snapshot_schema = request.snapshot_id.has_value();
+  if (resolves_snapshot_schema == request.use_snapshot_schema) return true;
+
+  if (error) {
+    *error =
+        request.use_snapshot_schema
+            ? "NotImplemented: use-snapshot-schema is true and snapshot " +
+                  std::to_string(snapshot->snapshot_id) + " was written under "
+                  "schema " + std::to_string(snapshot_schema_id) +
+                  " rather than the current schema " +
+                  std::to_string(metadata.current_schema_id) + ", but no "
+                  "snapshot-id was given; the vendored TableScanBuilder "
+                  "resolves the snapshot schema only when a snapshot-id is "
+                  "set, so this scan would silently use the table schema"
+            : "NotImplemented: use-snapshot-schema is false but snapshot " +
+                  std::to_string(snapshot->snapshot_id) + " was written under "
+                  "schema " + std::to_string(snapshot_schema_id) +
+                  " rather than the current schema " +
+                  std::to_string(metadata.current_schema_id) + "; the vendored "
+                  "TableScanBuilder always resolves the snapshot schema when a "
+                  "snapshot-id is set, so branch-schema resolution is "
+                  "unreachable without building a TableScanContext and calling "
+                  "DataTableScan::Make directly";
+  }
+  return false;
 }
 
 template <typename ScanType>
@@ -403,6 +455,8 @@ bool PlanTableScan(const std::shared_ptr<iceberg::TableMetadata>& metadata,
     }
     return false;
   }
+
+  if (!CheckSnapshotSchemaSupported(*metadata, request, error)) return false;
 
   if (!TableReadTraits::FromMetadata(*metadata, &out->traits, error)) {
     return false;

@@ -24,6 +24,9 @@
 #include "iceberg/partition_spec.h"
 #include "iceberg/schema.h"
 #include "iceberg/schema_field.h"
+#include "iceberg/snapshot.h"
+#include "iceberg/sort_order.h"
+#include "iceberg/table_metadata.h"
 #include "iceberg/table_scan.h"
 #include "iceberg/type.h"
 
@@ -45,6 +48,36 @@ std::shared_ptr<iceberg::FileScanTask> TaskWithLowerBound(
     df->lower_bounds[1] = ser.value();
   }
   return std::make_shared<iceberg::FileScanTask>(std::move(df));
+}
+
+std::shared_ptr<iceberg::Schema> SchemaWithId(int32_t schema_id) {
+  std::vector<iceberg::SchemaField> fields;
+  fields.push_back(iceberg::SchemaField::MakeRequired(1, "p", iceberg::int64()));
+  fields.push_back(iceberg::SchemaField::MakeRequired(2, "k", iceberg::int32()));
+  return std::make_shared<iceberg::Schema>(std::move(fields), schema_id);
+}
+
+std::shared_ptr<iceberg::TableMetadata> MetadataWithSnapshotSchema(
+    int32_t snapshot_schema_id, int32_t current_schema_id) {
+  auto meta = std::make_shared<iceberg::TableMetadata>();
+  meta->format_version = 2;
+  meta->table_uuid = "00000000-0000-0000-0000-000000000001";
+  meta->location = "/nonexistent/table";
+  meta->schemas = {SchemaWithId(0), SchemaWithId(1)};
+  meta->current_schema_id = current_schema_id;
+  meta->partition_specs = {iceberg::PartitionSpec::Unpartitioned()};
+  meta->default_spec_id = 0;
+  meta->sort_orders = {iceberg::SortOrder::Unsorted()};
+  meta->default_sort_order_id = 0;
+
+  auto snapshot = std::make_shared<iceberg::Snapshot>();
+  snapshot->snapshot_id = 42;
+  snapshot->sequence_number = 1;
+  snapshot->schema_id = snapshot_schema_id;
+  snapshot->manifest_list = "/nonexistent/manifest-list.avro";
+  meta->snapshots = {snapshot};
+  meta->current_snapshot_id = 42;
+  return meta;
 }
 
 class ScanPlannerTest : public ::testing::Test {
@@ -218,6 +251,60 @@ TEST_F(ScanPlannerTest, SortsTasksByLowerBoundAndErrorsOnMissing) {
   tasks.push_back(TaskWithLowerBound("d", std::nullopt));
   EXPECT_FALSE(
       primeparts::scan::SortTasksByLowerBound(&tasks, *schema_, key, &error));
+}
+
+TEST_F(ScanPlannerTest, RefusesBranchSchemaWhenSnapshotSchemaDiffers) {
+  auto meta = MetadataWithSnapshotSchema(0, 1);
+  primeparts::scan::ScanPlanRequest request;
+  request.snapshot_id = 42;
+  request.use_snapshot_schema = false;
+
+  primeparts::scan::ScanPlan plan;
+  std::string error;
+  EXPECT_FALSE(
+      primeparts::scan::PlanTableScan(meta, io_, request, &plan, &error));
+  EXPECT_NE(error.find("use-snapshot-schema is false"), std::string::npos)
+      << error;
+}
+
+TEST_F(ScanPlannerTest, RefusesSnapshotSchemaWithoutSnapshotId) {
+  auto meta = MetadataWithSnapshotSchema(0, 1);
+  primeparts::scan::ScanPlanRequest request;
+  request.use_snapshot_schema = true;
+
+  primeparts::scan::ScanPlan plan;
+  std::string error;
+  EXPECT_FALSE(
+      primeparts::scan::PlanTableScan(meta, io_, request, &plan, &error));
+  EXPECT_NE(error.find("use-snapshot-schema is true"), std::string::npos)
+      << error;
+}
+
+TEST_F(ScanPlannerTest, AllowsSnapshotSchemaWhenRequestMatchesResolution) {
+  auto meta = MetadataWithSnapshotSchema(0, 1);
+  primeparts::scan::ScanPlanRequest request;
+  request.snapshot_id = 42;
+  request.use_snapshot_schema = true;
+
+  primeparts::scan::ScanPlan plan;
+  std::string error;
+  primeparts::scan::PlanTableScan(meta, io_, request, &plan, &error);
+  EXPECT_EQ(error.find("use-snapshot-schema"), std::string::npos) << error;
+}
+
+TEST_F(ScanPlannerTest, AllowsEitherFlagWhenSnapshotSchemaIsCurrent) {
+  auto meta = MetadataWithSnapshotSchema(1, 1);
+  primeparts::scan::ScanPlan plan;
+
+  for (bool use_snapshot_schema : {false, true}) {
+    primeparts::scan::ScanPlanRequest request;
+    request.snapshot_id = 42;
+    request.use_snapshot_schema = use_snapshot_schema;
+    std::string error;
+    primeparts::scan::PlanTableScan(meta, io_, request, &plan, &error);
+    EXPECT_EQ(error.find("use-snapshot-schema"), std::string::npos)
+        << "use_snapshot_schema=" << use_snapshot_schema << ": " << error;
+  }
 }
 
 }  // namespace
