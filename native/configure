@@ -8,15 +8,33 @@ JOBS=$(nproc 2>/dev/null || echo 4)
 CXX="${CXX:-g++}"
 
 SANITIZE=
+SANITIZE_VENDOR=
 for arg in "$@"; do
   case "$arg" in
     --sanitize) SANITIZE=1 ;;
+    --sanitize-vendor)
+      SANITIZE=1
+      SANITIZE_VENDOR=1
+      ;;
     *)
-      echo "unknown option: $arg (supported: --sanitize)"
+      echo "unknown option: $arg (supported: --sanitize, --sanitize-vendor)"
       exit 1
       ;;
   esac
 done
+
+if [ -n "$SANITIZE_VENDOR" ] && [ "$PREFIX" = "/usr/local" ]; then
+  echo "--sanitize-vendor builds instrumented arrow/iceberg and would overwrite the release prefix."
+  echo "set PREFIX to a separate prefix, e.g. PREFIX=\$HOME/.local/pp-asan ./configure --sanitize-vendor"
+  exit 1
+fi
+
+ARROW_SAN_FLAGS=
+ICEBERG_SAN_FLAGS=
+if [ -n "$SANITIZE_VENDOR" ]; then
+  ARROW_SAN_FLAGS="-DARROW_USE_ASAN=ON -DARROW_USE_UBSAN=ON"
+  ICEBERG_SAN_FLAGS="-DICEBERG_ENABLE_ASAN=ON -DICEBERG_ENABLE_UBSAN=ON"
+fi
 
 DISTRO=
 if command -v pacman >/dev/null 2>&1; then
@@ -160,8 +178,10 @@ if [ ! -f "$PREFIX/lib/libarrow.a" ]; then
   cd "$VENDOR/arrow/cpp"
   mkdir -p build
   cd build
-  cmake .. --preset ninja-release -DARROW_BUILD_STATIC=ON -DARROW_DEPENDENCY_SOURCE=BUNDLED \
-    -DARROW_WITH_SNAPPY=ON -DARROW_BUILD_UTILITIES=ON -DARROW_TESTING=ON
+  cmake .. --preset ninja-release -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+    -DARROW_BUILD_STATIC=ON -DARROW_DEPENDENCY_SOURCE=BUNDLED \
+    -DARROW_WITH_SNAPPY=ON -DARROW_BUILD_UTILITIES=ON -DARROW_TESTING=ON \
+    $ARROW_SAN_FLAGS
   ninja -j "$JOBS"
   sudo cmake --install .
   cd "$ROOT"
@@ -180,7 +200,10 @@ if [ ! -f "$PREFIX/lib/libiceberg_sql_catalog.a" ]; then
   cd "$VENDOR/iceberg-cpp"
   cmake -S . -B build -G Ninja \
     -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_PREFIX_PATH="$PREFIX" \
-    -DICEBERG_BUILD_BUNDLE=ON -DICEBERG_SQL_SQLITE=ON -DICEBERG_BUILD_SQL_CATALOG=ON
+    -DICEBERG_BUILD_BUNDLE=ON -DICEBERG_BUILD_SHARED=ON \
+    -DICEBERG_SQL_SQLITE=ON -DICEBERG_BUILD_SQL_CATALOG=ON \
+    -DICEBERG_BUILD_REST_INTEGRATION_TESTS=ON \
+    $ICEBERG_SAN_FLAGS
   cmake --build build -j "$JOBS"
   sudo cmake --install build
   cd "$ROOT"
