@@ -9,5 +9,5 @@ Delete all smokes; deleted capability is deleted (no port).
 - [x] remove Makefile `.PHONY: smoke` target, all smoke objects/recipes, and smoke binary rules
       (`primeparts-generate-smoke`, `query-service-smoke`, `primeparts-lmdb-smoke`,
       `primeparts-lua-{presets,query}-smoke`). Leave `lmdb-tools` (not a smoke).
-- [ ] log removed coverage as a holes line (deferred to 07).
+- [x] log removed coverage as a holes line (done in 07).
 - [x] boundary: `make all test` green; no smoke targets remain.

@@ -32,4 +32,4 @@ rationale recorded per phase; one commit per phase, message = phase file name, e
 - [x] 04 e2e fixture harness
 - [x] 05 sanitizer build
 - [x] 06 CI
-- [ ] 07 gates + merge
+- [x] 07 gates + merge (promix green; Debian + merge pending user)
