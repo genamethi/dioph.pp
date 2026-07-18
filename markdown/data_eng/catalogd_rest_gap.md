@@ -14,25 +14,25 @@ returns no prefix). HEAD existence checks are served by the GET handlers
 
 | Operation | Route | Spec | Status |
 |---|---|---|---|
-| getConfig | `GET /v1/config` | yaml:65 | done |
+| getConfig | `GET /v1/config` | yaml:65 | done; `endpoints` derived from the router |
 | getToken | `POST /v1/oauth/tokens` | yaml:181 | skip (deprecated in spec) |
 | listNamespaces | `GET .../namespaces` | yaml:250 | done; no pagination |
 | createNamespace | `POST .../namespaces` | yaml:250 | done |
 | loadNamespaceMetadata | `GET .../namespaces/{ns}` | yaml:351 | done |
-| namespaceExists | `HEAD .../namespaces/{ns}` | yaml:351 | done (HEAD→GET) |
+| namespaceExists | `HEAD .../namespaces/{ns}` | yaml:351 | done (HEAD→GET, 204) |
 | dropNamespace | `DELETE .../namespaces/{ns}` | yaml:351 | done |
 | updateProperties | `POST .../{ns}/properties` | yaml:460 | done |
 | listTables | `GET .../{ns}/tables` | yaml:525 | done; no pagination |
 | createTable | `POST .../{ns}/tables` | yaml:525 | done; no `stage-create` |
-| planTableScan | `POST .../tables/{t}/plan` | yaml:707 | not implemented |
-| fetchPlanningResult | `GET .../plan/{plan-id}` | yaml:796 | not implemented |
-| cancelPlanning | `DELETE .../plan/{plan-id}` | yaml:796 | not implemented |
-| fetchScanTasks | `POST .../tables/{t}/tasks` | yaml:919 | not implemented |
+| planTableScan | `POST .../tables/{t}/plan` | yaml:707 | not implemented; 406 (listed) |
+| fetchPlanningResult | `GET .../plan/{plan-id}` | yaml:796 | not implemented; 404 NoSuchPlanIdException |
+| cancelPlanning | `DELETE .../plan/{plan-id}` | yaml:796 | not implemented; 404 NoSuchPlanIdException |
+| fetchScanTasks | `POST .../tables/{t}/tasks` | yaml:919 | not implemented; 404 NoSuchPlanTaskException |
 | registerTable | `POST .../{ns}/register` | yaml:971 | done |
 | loadTable | `GET .../tables/{t}` | yaml:1027 | done; no `?snapshots=`, no ETag |
 | updateTable | `POST .../tables/{t}` | yaml:1027 | done |
 | dropTable | `DELETE .../tables/{t}` | yaml:1027 | done (`?purgeRequested=`) |
-| tableExists | `HEAD .../tables/{t}` | yaml:1027 | done (HEAD→GET) |
+| tableExists | `HEAD .../tables/{t}` | yaml:1027 | done (HEAD→GET, 204) |
 | unregisterTable | `POST .../tables/{t}/unregister` | yaml:1302 | not implemented |
 | loadCredentials | `GET .../tables/{t}/credentials` | yaml:1352 | skip (local fs) |
 | signRequest | `POST .../tables/{t}/sign` | yaml:1398 | skip (local fs) |
@@ -41,6 +41,24 @@ returns no prefix). HEAD existence checks are served by the GET handlers
 | commitTransaction | `POST /v1/transactions/commit` | yaml:1540 | done |
 | views (list/create/load/replace/drop/head/rename/register) | yaml:1657-2020 | not implemented |
 | `{prefix}` route segment | all | yaml:250+ | not parsed |
+
+## `endpoints` is load-bearing
+
+`GET /v1/config` advertises an `endpoints` array built by `RouteTable`
+(`pp_catalogd.cc`), which takes the spec path and advertised verbs at the same
+call that binds each handler — a route cannot be served without stating how it
+is advertised. Non-spec extension routes (`field-upper-bound`) pass an empty
+advertise list and stay out of the array.
+
+This is not decoration. The vendored `RestCatalog` client parses `endpoints`
+into `supported_endpoints_` and gates every call on it
+(`ICEBERG_ENDPOINT_CHECK`, `rest_catalog.cc`), and a server that sends the field
+*replaces* the client's assumed default set rather than extending it
+(yaml:105-135). Dropping an entry therefore disables that route for our own
+tools, not just for third parties. The advertised strings must match
+`Endpoint::` path templates in `catalog/rest/endpoint.h` exactly.
+`ConfigAdvertisesSupersetOfSpecDefaultEndpoints` (e2e) pins the superset
+property.
 
 ## commitTransaction
 

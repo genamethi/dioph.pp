@@ -17,7 +17,7 @@ live-warehouse mutations are user-only.
 - [x] 02 status conformance: plan-route typed 404s, `renameTable` 204, `HEAD` 204 + e2e ratchet
 - [x] 03 `use-snapshot-schema` honored for `true`, loud refusal for `false`
 - [x] 04 `min-rows-requested` as a planning early-stop
-- [ ] 05 registry corrections + merge
+- [x] 05 registry corrections + merge
 
 ## findings that amend the planner_prep registry
 

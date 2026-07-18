@@ -22,11 +22,10 @@ A hole is a gap between our surface and `rest-catalog-open-api.yaml`, or an unim
 
 **spec surface gaps**
 
-- `ScanPlanRequest` (`scan/scan_plan.h`) omits two `PlanTableScanRequest` fields: `min-rows-requested` and `use-snapshot-schema`. `ScanByK`'s LIMIT early-stop is the `min-rows-requested` capability implemented off-surface, so it is unreachable through the spec shape; `use-snapshot-schema` (time-travel vs branch schema resolution) has no representation at all — filed-by spec-diff audit 2026-07-18 — owner: unassigned
 - server-side scan planning is unimplemented: only one of the spec's two planning modes exists. `scan-planning-mode: client` is advertised, so client-side planning is conformant — filed-by 08 — owner: future server-side lift invoking the 02 planner module
-- three of the four plan routes answer with a status the spec does not list for them. `pp_catalogd.cc` binds one `planning_unsupported` handler to all four, returning 406 UnsupportedOperationException. The yaml lists 406 only on `planTableScan` (POST plan); `fetchPlanningResult` (GET plan/{plan-id}), `cancelPlanning` (DELETE plan/{plan-id}), and `fetchScanTasks` (POST tasks) list 200/204, 400, 401, 403, 404, 419, 503, 5XX and no 406. With no server-side planning, no plan-id or plan-task ever exists, which is the 404 case (NoSuchPlanIdException / NoSuchPlanTaskException) — filed-by spec-diff audit 2026-07-18 — owner: unassigned
-- the `/v1/config` response omits `endpoints`. `CatalogConfig` carries an optional `endpoints` array as the mechanism for advertising route support; absence makes clients assume the spec's default set, which excludes every route outside it — filed-by spec-diff audit 2026-07-18 — owner: unassigned
+- branch-schema resolution is unimplemented. `use-snapshot-schema: false` against a snapshot whose schema id differs from the table's current schema id errors loudly (`scan_planner.cc`, `CheckSnapshotSchemaSupported`). The vendored `TableScanBuilder` resolves the snapshot's schema whenever a snapshot-id is set and exposes no override — `snapshot_schema_` is private (`table_scan.h:398`) — so the request's `false` is unreachable through the builder. Tables whose schema has never evolved are unaffected: every flag combination coincides there — filed-by irc_spec_surface 03 — owner: unassigned
 - `ScanPlan.key_lo`/`key_hi` are `optional<int64_t>` on a structure whose spec counterpart carries a general `Expression` residual. The key window is derived from the filter but typed more narrowly than it, so no predicate over a non-int column can fold or prune — filed-by spec-diff audit 2026-07-18 — owner: unassigned
+- `createTable` answers 500 when the table's parent directory does not exist: FileIO does not create it, and the IOError surfaces as `IcebergError`. Our own tools pre-create the tree, so `generate` and the sieve never reach it; it is on the path a third-party IRC client takes to create a table, which is the interop `irc_catalog_design.md` claims. 5XX is a listed status for the route, so this is reachability rather than status conformance — filed-by irc_spec_surface 02 — owner: unassigned
 
 **type narrowing (one cause, five sites)**
 
@@ -55,23 +54,26 @@ A hole is a gap between our surface and `rest-catalog-open-api.yaml`, or an unim
 
 **test and build coverage**
 
-- the e2e suite asserted incompletenesses as expected behavior, tracing to the testing_overhaul kickoff brief's "behaviors e2e must ASSERT (loud-by-design, do not fix)" list, which did not distinguish spec-correct refusals from unimplemented capability. Reversed 2026-07-18 for the identity-column and non-int-Literal cases. Still standing: `PlanRoutesReturn406` asserts 406 on all four plan routes, which pins non-conformance on three of them — filed-by 2026-07-18 — owner: unassigned
+- the e2e suite asserted incompletenesses as expected behavior, tracing to the testing_overhaul kickoff brief's "behaviors e2e must ASSERT (loud-by-design, do not fix)" list, which did not distinguish spec-correct refusals from unimplemented capability. Reversed 2026-07-18 for the identity-column and non-int-Literal cases; `PlanRoutesReturn406` retired by irc_spec_surface 02. No known instance stands — this entry survives as the criterion, not as an open item — filed-by 2026-07-18 — owner: unassigned
 - sanitizer coverage is our-code-only: `./configure --sanitize` instruments every object primeparts compiles, but the vendored static arrow/iceberg in the prefix are release-built. Both trees expose sanitizers as build options — `ARROW_USE_ASAN`/`ARROW_USE_UBSAN` (`arrow/cpp/cmake_modules/DefineOptions.cmake`) and `ICEBERG_ENABLE_ASAN`/`ICEBERG_ENABLE_UBSAN` (`iceberg-cpp/CMakeLists.txt`), so this is a prefix-build gap, not a vendor-boundary limit — filed-by testing_overhaul 05, corrected 2026-07-18 — owner: unassigned
 - lua query module, lua presets, and pp_lmdb_store have no direct test coverage: their smokes were deleted in testing_overhaul and not re-expressed as gtest; these paths are exercised only indirectly by the gtest suite and e2e where reached — filed-by testing_overhaul 03 — owner: unassigned
 
 **retired**
 
 - generate-commit-smoke (`make smoke`) arg-parse failure — obsolete: all smokes deleted in testing_overhaul 03. `kMinCount` remains confined to `src/generate.cc`.
+- `ScanPlanRequest` missing `min-rows-requested` / `use-snapshot-schema` — closed by irc_spec_surface 03 and 04; `ScanPlanRequest` now matches `PlanTableScanRequest` field-for-field and both fields are read. **The entry's premise was wrong and should not be revived: `ScanByK`'s LIMIT is not `min-rows-requested` implemented off-surface.** One bounds rows produced by planning, the other bounds rows surviving a predicate after decode; the planner cannot know residual selectivity. `use-snapshot-schema` was likewise not absent but mis-defaulted — the vendored builder was already taking the `true` branch on every point-in-time scan. What remains of it is filed above as branch-schema resolution.
+- three of four plan routes answering 406 — closed by irc_spec_surface 02. `fetchPlanningResult`/`cancelPlanning` answer 404 NoSuchPlanIdException, `fetchScanTasks` 404 NoSuchPlanTaskException; 406 stays on `planTableScan`, where the yaml lists it.
+- `/v1/config` omitting `endpoints` — closed by irc_spec_surface 01, derived from the router. Two conformance defects surfaced while closing it and were fixed in 02: `renameTable` answered 200 (yaml lists 204), and `namespaceExists`/`tableExists` answered 200 (yaml lists 204) because cpp-httplib dispatches HEAD→GET.
 
 ## groups at a glance
 
 | group | holes | hard | priority |
 |---|---|---|---|
 | type / expression narrowing | `Literal` erased to `int64_t` at five sites: writer stat bounds, stats tuple values, stats source types, task-order decode, `ScanPlan.key_lo/key_hi` | 4 | P1 — stated |
-| spec surface | `ScanPlanRequest` missing `min-rows-requested` + `use-snapshot-schema` (both added 2026-07-18); 406 on three routes the yaml does not list it for; `/v1/config` omits `endpoints` | 2 | P1 — stated goal |
+| spec surface | CLOSED by irc_spec_surface 01–04. Residue filed separately: branch-schema resolution, `createTable` 500 on a missing directory, server-side planning | — | — |
 | read-path synthesis | identity-partition columns unreachable on both read paths | 2 | P2 — inferred |
 | transform coverage | `partition_stats` identity-only guard (over-broad); `table_traits` identity vs monotonicity; delete manifests; multi-spec tables | 3 | P2 — inferred |
-| test + build | e2e ratchet (`PlanRoutesReturn406` still standing); sanitizer prefix uninstrumented; lua/presets/lmdb uncovered | 2 | P2 — stated (sanitizers next) |
+| test + build | sanitizer prefix uninstrumented; lua/presets/lmdb uncovered (e2e ratchet cleared) | 2 | P2 — stated (sanitizers next) |
 | mutation + lifecycle | existing-table declaration surface; expiry unwired; orphan reconciliation; rollback surface | 4 | P3 — blocked on design |
 | writer shape | `ShapePolicy` uniform across all tables | 2 | P4 — inferred |
 
@@ -85,7 +87,7 @@ Format-version risk is confined to the delete-manifest and MOR items under trans
 
 Sketches only — each names the seam and the known blocker.
 
-**spec surface.** `min-rows-requested` and `use-snapshot-schema` are additive to `ScanPlanRequest`; the first wants `ScanByK`'s existing early-stop rewired to read from the field rather than a separate argument, so the capability becomes reachable through the spec shape. `use-snapshot-schema` needs a schema-resolution decision (snapshot schema vs table schema) before it means anything.
+**spec surface.** Done — see `../irc_spec_surface/`. The sketch that stood here proposed rewiring `ScanByK`'s early-stop to read `min-rows-requested`; that would have been a bug, for the reason recorded in the retired entry above.
 
 **the `Literal` collapse.** One change with five call sites. `DecodeIntegerBound` is where the type dies; carrying `Literal` through is the shared path. `ScanPlan.key_lo/key_hi` is the widest edit since the type crosses into the query surface, and it is the item that most directly gates arbitrary-predicate pushdown for a dropped-in engine.
 
@@ -99,6 +101,6 @@ Sketches only — each names the seam and the known blocker.
 
 **sanitizers.** A second instrumented prefix built by `vendor_sync` with the four options above, selected by `--sanitize`. Cost is build time and disk, not design.
 
-**plan routes.** The 02 planner module is the body for a future server-side lift; client-side planning stays correct meanwhile. Separately, the shared `planning_unsupported` handler wants splitting — 406 is right for `planTableScan`, the other three want 404 for an unknown plan-id/plan-task. `PlanRoutesReturn406` changes with it.
+**plan routes.** The 02 planner module is the body for a future server-side lift; client-side planning stays correct meanwhile. The handler split is done (irc_spec_surface 02).
 
-**test ratchet.** Before closing any hole, check whether a passing e2e case asserts it. Spec-correct assertions (missing-sort-order errors) stay; capability assertions retire with their holes; `PlanRoutesReturn406` is neither — it asserts a status the spec does not list for three of its routes.
+**test ratchet.** Before closing any hole, check whether a passing e2e case asserts it. Spec-correct assertions (missing-sort-order errors) stay; capability assertions retire with their holes. `PlanRoutesReturn406` was the standing instance and retired with its hole in irc_spec_surface 02.
