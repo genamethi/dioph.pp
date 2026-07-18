@@ -7,6 +7,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <limits>
@@ -30,6 +31,7 @@
 #include "iceberg/table_metadata.h"
 #include "iceberg/table_scan.h"
 #include "iceberg/type.h"
+#include "iceberg/util/uuid.h"
 
 namespace {
 
@@ -252,6 +254,65 @@ TEST_F(ScanPlannerTest, SortsTasksByLowerBoundAndErrorsOnMissing) {
   tasks.push_back(TaskWithLowerBound("d", std::nullopt));
   EXPECT_FALSE(
       primeparts::scan::SortTasksByLowerBound(&tasks, *schema_, key, &error));
+}
+
+std::shared_ptr<iceberg::FileScanTask> TaskWithLiteralBound(
+    const std::string& path, int32_t field_id,
+    const std::optional<iceberg::Literal>& bound) {
+  auto df = std::make_shared<iceberg::DataFile>();
+  df->file_path = path;
+  if (bound) {
+    auto ser = bound->Serialize();
+    EXPECT_TRUE(ser.has_value());
+    if (ser.has_value()) df->lower_bounds[field_id] = ser.value();
+  }
+  return std::make_shared<iceberg::FileScanTask>(std::move(df));
+}
+
+TEST(TaskOrdering, SortsByStringBounds) {
+  std::vector<iceberg::SchemaField> fields;
+  fields.push_back(
+      iceberg::SchemaField::MakeRequired(1, "name", iceberg::string()));
+  iceberg::Schema schema(std::move(fields), 0);
+
+  std::vector<std::shared_ptr<iceberg::FileScanTask>> tasks;
+  tasks.push_back(
+      TaskWithLiteralBound("mid", 1, iceberg::Literal::String("m")));
+  tasks.push_back(
+      TaskWithLiteralBound("first", 1, iceberg::Literal::String("a")));
+  tasks.push_back(
+      TaskWithLiteralBound("last", 1, iceberg::Literal::String("z")));
+
+  primeparts::scan::TableReadTraits::SortKey key{1, "name", true};
+  std::string error;
+  ASSERT_TRUE(
+      primeparts::scan::SortTasksByLowerBound(&tasks, schema, key, &error))
+      << error;
+  EXPECT_EQ(tasks[0]->data_file()->file_path, "first");
+  EXPECT_EQ(tasks[1]->data_file()->file_path, "mid");
+  EXPECT_EQ(tasks[2]->data_file()->file_path, "last");
+}
+
+TEST(TaskOrdering, RefusesASortKeyWithoutATotalOrder) {
+  std::vector<iceberg::SchemaField> fields;
+  fields.push_back(iceberg::SchemaField::MakeRequired(1, "id", iceberg::uuid()));
+  iceberg::Schema schema(std::move(fields), 0);
+
+  std::array<uint8_t, iceberg::Uuid::kLength> lhs{};
+  std::array<uint8_t, iceberg::Uuid::kLength> rhs{};
+  rhs[15] = 1;
+
+  std::vector<std::shared_ptr<iceberg::FileScanTask>> tasks;
+  tasks.push_back(
+      TaskWithLiteralBound("a", 1, iceberg::Literal::UUID(iceberg::Uuid(lhs))));
+  tasks.push_back(
+      TaskWithLiteralBound("b", 1, iceberg::Literal::UUID(iceberg::Uuid(rhs))));
+
+  primeparts::scan::TableReadTraits::SortKey key{1, "id", true};
+  std::string error;
+  EXPECT_FALSE(
+      primeparts::scan::SortTasksByLowerBound(&tasks, schema, key, &error));
+  EXPECT_NE(error.find("unordered"), std::string::npos) << error;
 }
 
 TEST(KeyWindow, FoldsInclusiveAndStrictBoundsInclusively) {

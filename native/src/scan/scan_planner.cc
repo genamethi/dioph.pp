@@ -45,27 +45,6 @@ const iceberg::SchemaField* FieldById(const iceberg::Schema& schema,
   return nullptr;
 }
 
-bool DecodeIntegerBound(const std::vector<uint8_t>& bytes,
-                        iceberg::TypeId type, int64_t* out,
-                        std::string* error) {
-  auto prim = type == iceberg::TypeId::kInt
-                  ? std::static_pointer_cast<iceberg::PrimitiveType>(
-                        iceberg::int32())
-                  : std::static_pointer_cast<iceberg::PrimitiveType>(
-                        iceberg::int64());
-  auto lit = iceberg::Literal::Deserialize(bytes, prim);
-  if (!lit.has_value()) {
-    if (error) *error = "Literal::Deserialize: " + lit.error().message;
-    return false;
-  }
-  if (type == iceberg::TypeId::kInt) {
-    *out = std::get<int32_t>(lit.value().value());
-  } else {
-    *out = std::get<int64_t>(lit.value().value());
-  }
-  return true;
-}
-
 bool StatsNames(const iceberg::TableMetadata& metadata,
                 const ScanPlanRequest& request, const TableReadTraits& traits,
                 std::vector<std::string>* out) {
@@ -267,18 +246,19 @@ bool SortTasksByLowerBound(
     }
     return false;
   }
-  const auto type = field->type()->type_id();
-  if (type != iceberg::TypeId::kInt && type != iceberg::TypeId::kLong) {
+  auto key_type =
+      std::dynamic_pointer_cast<iceberg::PrimitiveType>(field->type());
+  if (!key_type) {
     if (error) {
       *error = "NotImplemented: declared sort key '" + key.name +
-               "' has type " + field->type()->ToString() +
-               "; task ordering decodes int and long bounds only — ordering "
-               "on this key requires deserializing manifest bounds as "
-               "iceberg::Literal of that type and comparing literals";
+               "' has non-primitive type " + field->type()->ToString() +
+               "; manifest bounds are primitive literals";
     }
     return false;
   }
-  std::vector<std::pair<int64_t, std::shared_ptr<iceberg::FileScanTask>>> keyed;
+
+  std::vector<std::pair<iceberg::Literal, std::shared_ptr<iceberg::FileScanTask>>>
+      keyed;
   keyed.reserve(tasks->size());
   for (auto& task : *tasks) {
     const auto& lb = task->data_file()->lower_bounds;
@@ -290,14 +270,46 @@ bool SortTasksByLowerBound(
       }
       return false;
     }
-    int64_t v = 0;
-    if (!DecodeIntegerBound(it->second, type, &v, error)) return false;
-    keyed.emplace_back(v, std::move(task));
+    auto decoded = iceberg::Literal::Deserialize(it->second, key_type);
+    if (!decoded.has_value()) {
+      if (error) {
+        *error = "Literal::Deserialize lower bound of " +
+                 task->data_file()->file_path + " for sort key " + key.name +
+                 ": " + decoded.error().message;
+      }
+      return false;
+    }
+    auto value = std::move(decoded.value());
+    if (value.IsNull() || value.IsAboveMax() || value.IsBelowMin()) {
+      if (error) {
+        *error = "data file " + task->data_file()->file_path +
+                 " lower bound for sort key " + key.name + " decoded as " +
+                 value.ToString() + "; task ordering requires comparable bounds";
+      }
+      return false;
+    }
+    keyed.emplace_back(std::move(value), std::move(task));
   }
+
+  for (size_t i = 1; i < keyed.size(); ++i) {
+    if ((keyed[i].first <=> keyed[0].first) ==
+        std::partial_ordering::unordered) {
+      if (error) {
+        *error = "NotImplemented: declared sort key '" + key.name +
+                 "' has type " + key_type->ToString() +
+                 ", whose values " + keyed[0].first.ToString() + " and " +
+                 keyed[i].first.ToString() +
+                 " compare as unordered; task ordering requires a total order "
+                 "over the sort key";
+      }
+      return false;
+    }
+  }
+
   std::stable_sort(keyed.begin(), keyed.end(),
                    [&](const auto& a, const auto& b) {
-                     return key.ascending ? a.first < b.first
-                                          : a.first > b.first;
+                     const auto cmp = a.first <=> b.first;
+                     return key.ascending ? cmp < 0 : cmp > 0;
                    });
   tasks->clear();
   for (auto& [v, task] : keyed) tasks->push_back(std::move(task));

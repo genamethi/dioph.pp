@@ -24,7 +24,7 @@ design question, not a retype.
 ## phases
 
 - [x] 01 `ScanPlan`: complete residual, `Literal` key window, `DeriveKeyWindow` exposed
-- [ ] 02 `SortTasksByLowerBound` over `Literal` bounds
+- [x] 02 `SortTasksByLowerBound` over `Literal` bounds
 - [ ] 03 registry corrections + merge
 
 ## decisions taken (user, 2026-07-18)
