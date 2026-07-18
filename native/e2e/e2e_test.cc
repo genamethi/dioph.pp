@@ -9,6 +9,7 @@
 #include <arrow/api.h>
 #include <gtest/gtest.h>
 #include <httplib.h>
+#include <nlohmann/json.hpp>
 
 #include <sys/wait.h>
 #include <unistd.h>
@@ -18,6 +19,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -252,7 +254,7 @@ TEST_F(E2ETest, PartitionStatsPresentAfterCommit) {
   EXPECT_EQ(row->data_record_count, 6);
 }
 
-TEST_F(E2ETest, PlanRoutesReturn406) {
+TEST_F(E2ETest, PlanRoutesMatchSpecStatuses) {
   auto cli = Client();
   const char* body = "{}";
   const std::string base = "/v1/namespaces/primeparts/tables/primes";
@@ -260,12 +262,14 @@ TEST_F(E2ETest, PlanRoutesReturn406) {
   struct Route {
     std::string method;
     std::string path;
+    int status;
+    std::string type;
   };
   const std::vector<Route> routes = {
-      {"POST", base + "/plan"},
-      {"GET", base + "/plan/some-plan-id"},
-      {"DELETE", base + "/plan/some-plan-id"},
-      {"POST", base + "/tasks"},
+      {"POST", base + "/plan", 406, "UnsupportedOperationException"},
+      {"GET", base + "/plan/some-plan-id", 404, "NoSuchPlanIdException"},
+      {"DELETE", base + "/plan/some-plan-id", 404, "NoSuchPlanIdException"},
+      {"POST", base + "/tasks", 404, "NoSuchPlanTaskException"},
   };
 
   for (const auto& r : routes) {
@@ -278,9 +282,64 @@ TEST_F(E2ETest, PlanRoutesReturn406) {
       res = cli.Delete(r.path);
     }
     ASSERT_TRUE(res) << r.method << " " << r.path << " no response";
-    EXPECT_EQ(res->status, 406) << r.method << " " << r.path;
-    EXPECT_NE(res->body.find("UnsupportedOperationException"), std::string::npos)
+    EXPECT_EQ(res->status, r.status) << r.method << " " << r.path;
+    EXPECT_NE(res->body.find(r.type), std::string::npos)
         << r.method << " " << r.path << ": " << res->body;
+  }
+}
+
+TEST_F(E2ETest, ExistenceChecksReturn204) {
+  auto cli = Client();
+
+  auto ns = cli.Head("/v1/namespaces/primeparts");
+  ASSERT_TRUE(ns) << "HEAD namespace: no response";
+  EXPECT_EQ(ns->status, 204);
+
+  auto table = cli.Head("/v1/namespaces/primeparts/tables/primes");
+  ASSERT_TRUE(table) << "HEAD table: no response";
+  EXPECT_EQ(table->status, 204);
+
+  auto missing_ns = cli.Head("/v1/namespaces/no-such-namespace");
+  ASSERT_TRUE(missing_ns) << "HEAD missing namespace: no response";
+  EXPECT_EQ(missing_ns->status, 404);
+
+  auto missing_table = cli.Head("/v1/namespaces/primeparts/tables/no-such-table");
+  ASSERT_TRUE(missing_table) << "HEAD missing table: no response";
+  EXPECT_EQ(missing_table->status, 404);
+}
+
+TEST_F(E2ETest, ConfigAdvertisesSupersetOfSpecDefaultEndpoints) {
+  auto cli = Client();
+  auto res = cli.Get("/v1/config");
+  ASSERT_TRUE(res) << "GET /v1/config: no response";
+  ASSERT_EQ(res->status, 200);
+
+  auto body = nlohmann::json::parse(res->body, nullptr, false);
+  ASSERT_FALSE(body.is_discarded()) << res->body;
+  ASSERT_TRUE(body.contains("endpoints")) << res->body;
+
+  std::set<std::string> advertised;
+  for (const auto& e : body["endpoints"]) advertised.insert(e.get<std::string>());
+
+  const std::vector<std::string> spec_default = {
+      "GET /v1/{prefix}/namespaces",
+      "POST /v1/{prefix}/namespaces",
+      "GET /v1/{prefix}/namespaces/{namespace}",
+      "DELETE /v1/{prefix}/namespaces/{namespace}",
+      "POST /v1/{prefix}/namespaces/{namespace}/properties",
+      "GET /v1/{prefix}/namespaces/{namespace}/tables",
+      "POST /v1/{prefix}/namespaces/{namespace}/tables",
+      "GET /v1/{prefix}/namespaces/{namespace}/tables/{table}",
+      "POST /v1/{prefix}/namespaces/{namespace}/tables/{table}",
+      "DELETE /v1/{prefix}/namespaces/{namespace}/tables/{table}",
+      "POST /v1/{prefix}/namespaces/{namespace}/register",
+      "POST /v1/{prefix}/namespaces/{namespace}/tables/{table}/metrics",
+      "POST /v1/{prefix}/tables/rename",
+      "POST /v1/{prefix}/transactions/commit",
+  };
+  for (const auto& e : spec_default) {
+    EXPECT_TRUE(advertised.count(e) == 1)
+        << "advertising `endpoints` withdraws this spec-default route: " << e;
   }
 }
 

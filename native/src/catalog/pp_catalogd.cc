@@ -351,6 +351,10 @@ int RunCatalogd(const CatalogdOptions& opts) {
     auto ns = ParseNamespace(req.matches[1]);
     auto r = catalog->GetNamespaceProperties(ns);
     if (!r.has_value()) return SendIcebergError(res, r.error());
+    if (req.method == "HEAD") {
+      res.status = 204;
+      return;
+    }
     ir::GetNamespaceResponse resp{.namespace_ = ns, .properties = std::move(r.value())};
     SendJson(res, 200, ir::ToJson(resp));
   });
@@ -438,6 +442,10 @@ int RunCatalogd(const CatalogdOptions& opts) {
                                         .name = req.matches[2]};
             auto r = catalog->LoadTable(id);
             if (!r.has_value()) return SendIcebergError(res, r.error());
+            if (req.method == "HEAD") {
+              res.status = 204;
+              return;
+            }
             SendTableResult(res, 200, r.value(), true);
           });
 
@@ -468,19 +476,32 @@ int RunCatalogd(const CatalogdOptions& opts) {
               "server-side scan planning is not implemented; "
               "scan-planning-mode is 'client'");
   };
+  auto no_such_plan_id = [](const httplib::Request& req,
+                            httplib::Response& res) {
+    SendError(res, 404, "NoSuchPlanIdException",
+              "unknown plan-id '" + std::string(req.matches[3]) +
+                  "'; no server-side plan has been submitted because "
+                  "scan-planning-mode is 'client'");
+  };
+  auto no_such_plan_task = [](const httplib::Request&,
+                              httplib::Response& res) {
+    SendError(res, 404, "NoSuchPlanTaskException",
+              "unknown plan-task; no server-side plan has been submitted "
+              "because scan-planning-mode is 'client'");
+  };
   routes.Post(R"(/v1/namespaces/([^/]+)/tables/([^/]+)/plan)",
               "/v1/{prefix}/namespaces/{namespace}/tables/{table}/plan",
               {"POST"}, planning_unsupported);
   routes.Get(R"(/v1/namespaces/([^/]+)/tables/([^/]+)/plan/([^/]+))",
              "/v1/{prefix}/namespaces/{namespace}/tables/{table}/plan/{plan-id}",
-             {"GET"}, planning_unsupported);
+             {"GET"}, no_such_plan_id);
   routes.Delete(
       R"(/v1/namespaces/([^/]+)/tables/([^/]+)/plan/([^/]+))",
       "/v1/{prefix}/namespaces/{namespace}/tables/{table}/plan/{plan-id}",
-      {"DELETE"}, planning_unsupported);
+      {"DELETE"}, no_such_plan_id);
   routes.Post(R"(/v1/namespaces/([^/]+)/tables/([^/]+)/tasks)",
               "/v1/{prefix}/namespaces/{namespace}/tables/{table}/tasks",
-              {"POST"}, planning_unsupported);
+              {"POST"}, no_such_plan_task);
 
   routes.Post(R"(/v1/namespaces/([^/]+)/tables/([^/]+))",
               "/v1/{prefix}/namespaces/{namespace}/tables/{table}", {"POST"},
@@ -522,7 +543,7 @@ int RunCatalogd(const CatalogdOptions& opts) {
     auto& rr = parsed.value();
     auto st = catalog->RenameTable(rr.source, rr.destination);
     if (!st.has_value()) return SendIcebergError(res, st.error());
-    res.status = 200;
+    res.status = 204;
   });
 
   routes.Post(R"(/v1/namespaces/([^/]+)/tables/([^/]+)/metrics)",
