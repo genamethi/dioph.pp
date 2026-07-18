@@ -12,11 +12,15 @@ Checked-in fixture builder + loud-by-design assertions against a scratch catalog
 
 - [x] `native/e2e/` builder: spin scratch catalogd (sqlite + lmdb, scratch warehouse dir); write a tiny
       warehouse via `BucketParquetWriter` + `pp_commit` (bypasses `kMinCount`).
-- [x] assert loud-by-design behaviors:
+- [x] assert spec-correct refusals:
   - [x] ScanByK / windowed GroupCount on undeclared-order table → error naming missing sort order.
-  - [x] full-table `read` (all columns) → "Missing required field with id: N"; column-subset read ok.
-  - [x] catalogd plan routes → 406 UnsupportedOperationException, all four.
-  - [x] non-int stat-column / sort-key declaration → loud NotImplemented naming the found type.
+  - [x] catalogd plan routes → 406, all four. NOT spec-correct: the yaml lists 406 only on
+        `planTableScan`; the other three want 404 for an unknown plan-id/plan-task. Registry hole.
+- [x] column-subset read ok.
+- superseded: full-table `read` and non-int stat-column cases were written as assertions that the
+  error is correct. They are holes, not design — reversed 2026-07-18 to assert desired behavior and
+  are red until the holes close. Scope note: e2e covers entry points, data integrity, and REST
+  status behavior; capability gaps belong in unit tests.
   - [x] partition stats present after commit: fixture seeds via `CommitFiles` then appends via the
         real `CommitFilesAtomic` (store path, writes `SetPartitionStatistics`); `LoadPartitionStats`
         asserts the (1,2) row is registered with 2 files / 6 records — guards stats going missing.

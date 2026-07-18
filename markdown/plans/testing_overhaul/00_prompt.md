@@ -32,12 +32,14 @@ Inventory to scrap:
 - Vendored-deps policy: check vendor/ gitlinks and version floors before assuming any system dep; never map deps 1:1 to distro packages. gtest is NOT currently installed or vendored — sourcing it is a design question below.
 - `generate --temp --count 1000000000` measured on promix: 199s, 8.8GB, exit 0 — viable as an e2e fixture generator but heavyweight; kMinCount forbids smaller runs (do NOT silently lower it; parameterizing minimum for tests is a user decision).
 
-## behaviors e2e must ASSERT (loud-by-design, do not "fix")
+## errors: two kinds, do not conflate
 
-- ScanByK / windowed GroupCount on undeclared-order tables: error naming the missing sort order.
-- Full-table `read` (all columns): "Missing required field with id: N" (identity-partition columns; subset selects work).
-- catalogd plan routes: 406 UnsupportedOperationException, all four.
-- Non-int stat-column/sort-key declarations: loud NotImplemented naming the found type.
+SUPERSEDED as originally written — this section listed four loud errors as "behaviors e2e must ASSERT, do not fix", which pinned unimplemented capability as intended behavior. Corrected 2026-07-18; see the registry in `planner_prep/00_overview.md`.
+
+- **Spec-correct refusals** — assert these. Plan routes serve 406 because `scan-planning-mode: client` is advertised; a missing sort order must error rather than silently return unsorted rows.
+- **Unimplemented capability** — do NOT assert the failure. Identity-partition column selection and non-int stat columns are holes, not design. A test that asserts they fail turns closing the hole into a red test.
+
+Before asserting an error, decide which kind it is. If it is the second, the test belongs to the desired behavior and should be red until the hole closes.
 
 ## design questions to settle with the user BEFORE building
 
