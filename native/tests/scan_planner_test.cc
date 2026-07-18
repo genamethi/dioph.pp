@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -251,6 +252,71 @@ TEST_F(ScanPlannerTest, SortsTasksByLowerBoundAndErrorsOnMissing) {
   tasks.push_back(TaskWithLowerBound("d", std::nullopt));
   EXPECT_FALSE(
       primeparts::scan::SortTasksByLowerBound(&tasks, *schema_, key, &error));
+}
+
+TEST(KeyWindow, FoldsInclusiveAndStrictBoundsInclusively) {
+  std::optional<iceberg::Literal> lo, hi;
+  auto filter = iceberg::Expressions::And(
+      iceberg::Expressions::GreaterThan("p", iceberg::Literal::Long(10)),
+      iceberg::Expressions::LessThanOrEqual("p", iceberg::Literal::Long(20)));
+
+  primeparts::scan::DeriveKeyWindow(filter, "p", iceberg::int64(), &lo, &hi);
+
+  ASSERT_TRUE(lo.has_value());
+  ASSERT_TRUE(hi.has_value());
+  EXPECT_EQ(*std::get_if<int64_t>(&lo->value()), 10)
+      << "a strict > must fold to an inclusive bound: the window may "
+         "over-include, never under-include";
+  EXPECT_EQ(*std::get_if<int64_t>(&hi->value()), 20);
+}
+
+TEST(KeyWindow, TightensToTheNarrowestBound) {
+  std::optional<iceberg::Literal> lo, hi;
+  auto filter = iceberg::Expressions::And(
+      iceberg::Expressions::GreaterThanOrEqual("p", iceberg::Literal::Long(10)),
+      iceberg::Expressions::GreaterThanOrEqual("p", iceberg::Literal::Long(50)));
+
+  primeparts::scan::DeriveKeyWindow(filter, "p", iceberg::int64(), &lo, &hi);
+
+  ASSERT_TRUE(lo.has_value());
+  EXPECT_EQ(*std::get_if<int64_t>(&lo->value()), 50);
+  EXPECT_FALSE(hi.has_value());
+}
+
+TEST(KeyWindow, CastsPredicateLiteralToTheKeyType) {
+  std::optional<iceberg::Literal> lo, hi;
+  auto filter =
+      iceberg::Expressions::GreaterThanOrEqual("k", iceberg::Literal::Long(7));
+
+  primeparts::scan::DeriveKeyWindow(filter, "k", iceberg::int32(), &lo, &hi);
+
+  ASSERT_TRUE(lo.has_value());
+  EXPECT_NE(std::get_if<int32_t>(&lo->value()), nullptr)
+      << "the window must carry the key's type, not the predicate's";
+  EXPECT_EQ(*std::get_if<int32_t>(&lo->value()), 7);
+}
+
+TEST(KeyWindow, IgnoresPredicatesOverOtherColumnsAndUnfoldableOps) {
+  std::optional<iceberg::Literal> lo, hi;
+  auto filter = iceberg::Expressions::And(
+      iceberg::Expressions::Equal("k", iceberg::Literal::Int(1)),
+      iceberg::Expressions::NotEqual("p", iceberg::Literal::Long(3)));
+
+  primeparts::scan::DeriveKeyWindow(filter, "p", iceberg::int64(), &lo, &hi);
+
+  EXPECT_FALSE(lo.has_value());
+  EXPECT_FALSE(hi.has_value());
+}
+
+TEST(KeyWindow, DoesNotFoldAnOutOfRangeLiteral) {
+  std::optional<iceberg::Literal> lo, hi;
+  auto filter = iceberg::Expressions::GreaterThanOrEqual(
+      "k", iceberg::Literal::Long(std::numeric_limits<int64_t>::max()));
+
+  primeparts::scan::DeriveKeyWindow(filter, "k", iceberg::int32(), &lo, &hi);
+
+  EXPECT_FALSE(lo.has_value())
+      << "a literal that saturates to AboveMax is not a usable window bound";
 }
 
 TEST_F(ScanPlannerTest, RefusesBranchSchemaWhenSnapshotSchemaDiffers) {

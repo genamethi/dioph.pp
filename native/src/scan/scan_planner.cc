@@ -79,62 +79,70 @@ bool StatsNames(const iceberg::TableMetadata& metadata,
   return !out->empty();
 }
 
-void TightenLo(std::optional<int64_t>* lo, int64_t v) {
-  *lo = lo->has_value() ? std::max(**lo, v) : v;
-}
-
-void TightenHi(std::optional<int64_t>* hi, int64_t v) {
-  *hi = hi->has_value() ? std::min(**hi, v) : v;
-}
-
-bool FoldKeyConjunct(const std::shared_ptr<iceberg::Expression>& expr,
-                     const std::string& key_name, std::optional<int64_t>* lo,
-                     std::optional<int64_t>* hi) {
-  auto pred = std::dynamic_pointer_cast<iceberg::UnboundPredicate>(expr);
-  if (!pred) return false;
-  auto ref = pred->reference();
-  if (!ref || ref->name() != key_name) return false;
-  auto lits = pred->literals();
-  if (lits.size() != 1) return false;
-  const auto& val = lits[0].value();
-  int64_t v = 0;
-  if (std::holds_alternative<int64_t>(val)) {
-    v = std::get<int64_t>(val);
-  } else if (std::holds_alternative<int32_t>(val)) {
-    v = std::get<int32_t>(val);
-  } else {
-    return false;
+void TightenLo(std::optional<iceberg::Literal>* lo, iceberg::Literal v) {
+  if (!lo->has_value()) {
+    *lo = std::move(v);
+    return;
   }
+  const auto cmp = **lo <=> v;
+  if (cmp == std::partial_ordering::unordered) return;
+  if (cmp < 0) *lo = std::move(v);
+}
+
+void TightenHi(std::optional<iceberg::Literal>* hi, iceberg::Literal v) {
+  if (!hi->has_value()) {
+    *hi = std::move(v);
+    return;
+  }
+  const auto cmp = **hi <=> v;
+  if (cmp == std::partial_ordering::unordered) return;
+  if (cmp > 0) *hi = std::move(v);
+}
+
+void FoldKeyConjunct(const std::shared_ptr<iceberg::Expression>& expr,
+                     const std::string& key_name,
+                     const std::shared_ptr<iceberg::PrimitiveType>& key_type,
+                     std::optional<iceberg::Literal>* lo,
+                     std::optional<iceberg::Literal>* hi) {
+  auto pred = std::dynamic_pointer_cast<iceberg::UnboundPredicate>(expr);
+  if (!pred) return;
+  auto ref = pred->reference();
+  if (!ref || ref->name() != key_name) return;
+  auto lits = pred->literals();
+  if (lits.size() != 1) return;
+
+  auto cast = lits[0].CastTo(key_type);
+  if (!cast.has_value()) return;
+  auto lit = std::move(cast.value());
+  if (lit.IsAboveMax() || lit.IsBelowMin() || lit.IsNull()) return;
+
   switch (pred->op()) {
     case iceberg::Expression::Operation::kGtEq:
-      TightenLo(lo, v);
-      return true;
     case iceberg::Expression::Operation::kGt:
-      TightenLo(lo, v + 1);
-      return true;
+      TightenLo(lo, std::move(lit));
+      return;
     case iceberg::Expression::Operation::kLtEq:
-      TightenHi(hi, v);
-      return true;
     case iceberg::Expression::Operation::kLt:
-      TightenHi(hi, v - 1);
-      return true;
+      TightenHi(hi, std::move(lit));
+      return;
     case iceberg::Expression::Operation::kEq:
-      TightenLo(lo, v);
-      TightenHi(hi, v);
-      return true;
+      TightenLo(lo, lit);
+      TightenHi(hi, std::move(lit));
+      return;
     default:
-      return false;
+      return;
   }
 }
 
-void ExtractKeyWindow(const std::shared_ptr<iceberg::Expression>& filter,
-                      const std::string& key_name, std::optional<int64_t>* lo,
-                      std::optional<int64_t>* hi,
-                      std::shared_ptr<iceberg::Expression>* residual) {
-  *residual = nullptr;
-  if (!filter) return;
+}  // namespace
+
+void DeriveKeyWindow(const std::shared_ptr<iceberg::Expression>& filter,
+                     const std::string& key_name,
+                     const std::shared_ptr<iceberg::PrimitiveType>& key_type,
+                     std::optional<iceberg::Literal>* lo,
+                     std::optional<iceberg::Literal>* hi) {
+  if (!filter || !key_type) return;
   std::vector<std::shared_ptr<iceberg::Expression>> pending{filter};
-  std::vector<std::shared_ptr<iceberg::Expression>> leftover;
   while (!pending.empty()) {
     auto expr = std::move(pending.back());
     pending.pop_back();
@@ -144,15 +152,11 @@ void ExtractKeyWindow(const std::shared_ptr<iceberg::Expression>& filter,
       pending.push_back(conj->right());
       continue;
     }
-    if (!FoldKeyConjunct(expr, key_name, lo, hi)) {
-      leftover.push_back(std::move(expr));
-    }
-  }
-  for (auto& expr : leftover) {
-    *residual = *residual ? iceberg::Expressions::And(*residual, expr)
-                          : std::move(expr);
+    FoldKeyConjunct(expr, key_name, key_type, lo, hi);
   }
 }
+
+namespace {
 
 bool CheckSnapshotSchemaSupported(const iceberg::TableMetadata& metadata,
                                   const ScanPlanRequest& request,
@@ -471,11 +475,17 @@ bool PlanTableScan(const std::shared_ptr<iceberg::TableMetadata>& metadata,
     out->table_schema = schema_r.value();
   }
 
+  out->residual = request.filter;
+
   if (out->traits.sorted() && out->traits.sort_keys.front().ascending) {
-    ExtractKeyWindow(request.filter, out->traits.sort_keys.front().name,
-                     &out->key_lo, &out->key_hi, &out->residual);
-  } else {
-    out->residual = request.filter;
+    const auto& key = out->traits.sort_keys.front();
+    const auto* field = FieldById(*out->table_schema, key.field_id);
+    if (field != nullptr) {
+      auto key_type =
+          std::dynamic_pointer_cast<iceberg::PrimitiveType>(field->type());
+      DeriveKeyWindow(request.filter, key.name, key_type, &out->key_lo,
+                      &out->key_hi);
+    }
   }
 
   std::vector<std::string> stats_names;

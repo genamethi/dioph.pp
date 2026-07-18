@@ -394,6 +394,28 @@ TEST_F(E2ETest, MinRowsRequestedDoesNotStopOnUnprovenRowCounts) {
   EXPECT_EQ(bounded_plan.planned_rows, unbounded_plan.planned_rows);
 }
 
+TEST_F(E2ETest, ResidualStaysCompleteAndKeyWindowIsDerived) {
+  auto metadata = LoadPrimesMetadata();
+  ASSERT_NE(metadata, nullptr);
+  auto io = ppc::LocalIO();
+  std::string error;
+
+  primeparts::scan::ScanPlanRequest request;
+  request.filter = iceberg::Expressions::And(
+      iceberg::Expressions::Equal("k", iceberg::Literal::Int(1)),
+      iceberg::Expressions::GreaterThanOrEqual("p", iceberg::Literal::Long(5)));
+
+  primeparts::scan::ScanPlan plan;
+  ASSERT_TRUE(
+      primeparts::scan::PlanTableScan(metadata, io, request, &plan, &error))
+      << error;
+
+  ASSERT_NE(plan.residual, nullptr);
+  EXPECT_EQ(plan.residual->ToString(), request.filter->ToString())
+      << "the key conjunct must remain in the residual: a consumer that "
+         "declines the key window has to stay correct";
+}
+
 TEST_F(E2ETest, ConfigAdvertisesSupersetOfSpecDefaultEndpoints) {
   auto cli = Client();
   auto res = cli.Get("/v1/config");

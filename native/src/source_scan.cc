@@ -81,6 +81,21 @@ struct SourceTableReader::Impl {
 
   std::string key_name;
   bool key_is_int32 = false;
+  bool key_sliceable = false;
+
+  static std::optional<int32_t> KeyAsInt32(
+      const std::optional<iceberg::Literal>& bound) {
+    if (!bound) return std::nullopt;
+    if (const auto* v = std::get_if<int32_t>(&bound->value())) return *v;
+    return std::nullopt;
+  }
+
+  static std::optional<int64_t> KeyAsInt64(
+      const std::optional<iceberg::Literal>& bound) {
+    if (!bound) return std::nullopt;
+    if (const auto* v = std::get_if<int64_t>(&bound->value())) return *v;
+    return std::nullopt;
+  }
 
   bool ResolveKey(std::string* error) {
     if (!plan.key_lo && !plan.key_hi) return true;
@@ -92,7 +107,10 @@ struct SourceTableReader::Impl {
     key_name = key.name;
     for (const auto& f : plan.table_schema->fields()) {
       if (f.field_id() == key.field_id) {
-        key_is_int32 = f.type()->type_id() == iceberg::TypeId::kInt;
+        const auto type = f.type()->type_id();
+        key_is_int32 = type == iceberg::TypeId::kInt;
+        key_sliceable =
+            type == iceberg::TypeId::kInt || type == iceberg::TypeId::kLong;
         return true;
       }
     }
@@ -183,6 +201,7 @@ struct SourceTableReader::Impl {
   bool SliceToKeyWindow(std::shared_ptr<arrow::RecordBatch>* batch,
                         std::string* error) {
     if (!plan.key_lo && !plan.key_hi) return true;
+    if (!key_sliceable) return true;
     const int64_t n = (*batch)->num_rows();
     if (n == 0) return true;
     int64_t lower = 0;
@@ -190,19 +209,21 @@ struct SourceTableReader::Impl {
     if (key_is_int32) {
       const int32_t* v = scan::BindInt32(**batch, key_name, error);
       if (!v) return false;
-      if (plan.key_lo) {
-        lower = std::lower_bound(v, v + n, *plan.key_lo) - v;
+      if (auto lo = KeyAsInt32(plan.key_lo)) {
+        lower = std::lower_bound(v, v + n, *lo) - v;
       }
-      if (plan.key_hi) {
-        upper = std::upper_bound(v, v + n,
-                                 static_cast<int32_t>(*plan.key_hi)) -
-                v;
+      if (auto hi = KeyAsInt32(plan.key_hi)) {
+        upper = std::upper_bound(v, v + n, *hi) - v;
       }
     } else {
       const int64_t* v = scan::BindInt64(**batch, key_name, error);
       if (!v) return false;
-      if (plan.key_lo) lower = std::lower_bound(v, v + n, *plan.key_lo) - v;
-      if (plan.key_hi) upper = std::upper_bound(v, v + n, *plan.key_hi) - v;
+      if (auto lo = KeyAsInt64(plan.key_lo)) {
+        lower = std::lower_bound(v, v + n, *lo) - v;
+      }
+      if (auto hi = KeyAsInt64(plan.key_hi)) {
+        upper = std::upper_bound(v, v + n, *hi) - v;
+      }
     }
     if (upper <= lower) {
       *batch = (*batch)->Slice(0, 0);
