@@ -1,12 +1,28 @@
-# pp clients — Iceberg REST access & behavior
+# pp REST client — Iceberg REST access & behavior
 
-New 2026-07-09. The client side of the IRC seam; companion to
-`catalogd_rest_gap.md` (server routes), `irc_catalog_design.md`,
+New 2026-07-09; framing corrected 2026-07-18. The client side of the IRC seam;
+companion to `catalogd_rest_gap.md` (server routes), `irc_catalog_design.md`,
 `iceberg_data_setup.md`.
 
-A client is any native tool/library that speaks IRC: `generate`, `covering-sieve`,
-`verify`, `query`/`tui` (`QueryService`), `pp-catalog`. All reach data through the
-catalog seam, never the filesystem directly.
+There is **one** REST client. It stands between the producers and catalogd;
+tools do not each speak IRC in their own way, and "a client" is not a synonym
+for "a tool". Perfecting that client and the server it talks to is the goal —
+what sits behind either is expected to move.
+
+- **producer:** `primeparts-generate`. Writes; resume is the only nontrivial
+  processing it needs today.
+- **server:** `primeparts-catalogd`, intended as a full realization of the IRC
+  server.
+- **consumers:** `pp` (query), `primeparts-tui`, `primeparts-verify` exist, but
+  the real consumers of `FileScanTask` and the query engine behind them are
+  substantially unwritten. Their interfaces are open ground.
+
+An earlier revision of this file listed `covering-sieve` and `pp-catalog` as
+clients. Neither is a binary in this repo — the built set is
+`primeparts-generate`, `pp`, `primeparts-catalogd`, `primeparts-tui`,
+`primeparts-verify`, and two benches (`native/Makefile`, `all:`).
+`covering-sieve` survives only as an aspirational name in a comment
+(`common/thread_pool.h:4`).
 
 ## Access path
 
@@ -81,3 +97,25 @@ while there is no planner. Real planning is server-side `planTableScan`, which
 catalogd fulfills by **invoking** a planner module and returning the plan as if the
 catalog produced it (`catalogd_rest_gap.md`). Client-side planning is transitional;
 keeping the plan atom API-shaped makes the lift mechanical.
+
+## The scan plan a consumer receives
+
+`ScanPlan` (`scan/scan_plan.h`) is the shape handed to a consumer of file scan
+tasks. Two properties are contractual, and both exist so an unwritten consumer
+cannot be trapped by them:
+
+- **`residual` is complete.** It carries every conjunct the caller supplied.
+  `key_lo`/`key_hi` are *derived* from it, not subtracted out of it, so a
+  consumer that ignores the key window is slower but never wrong. Before
+  2026-07-18 the window was load-bearing and ignoring it silently returned too
+  many rows.
+- **the key window may over-include, never under-include.** It is an
+  ordered-data acceleration: `SliceToKeyWindow` binary-searches a batch sorted
+  on the key. This is why a strict `>` folds to an *inclusive* bound — no
+  type-specific successor function is needed, and the fold works for any
+  comparable type. `DeriveKeyWindow` (`scan/scan_planner.h`) is public so a
+  consumer can compute the window itself.
+
+`SourceTableReader` returns a **superset**: it slices by the window and does not
+evaluate the residual. Consumers filter for themselves — `ScanByK` re-tests `k`
+per row. A consumer that wants exact rows must evaluate `residual`.

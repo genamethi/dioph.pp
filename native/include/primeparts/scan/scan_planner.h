@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -22,6 +23,9 @@ bool PlanTableScan(const std::shared_ptr<iceberg::TableMetadata>& metadata,
                    const ScanPlanRequest& request, ScanPlan* out,
                    std::string* error);
 
+bool RefineSplits(ScanPlan* plan, const std::shared_ptr<iceberg::FileIO>& io,
+                  bool case_sensitive, std::string* error);
+
 struct SplitSelection {
   iceberg::Split split;
   int64_t planned_rows = 0;
@@ -38,5 +42,11 @@ bool SortTasksByLowerBound(
     std::vector<std::shared_ptr<iceberg::FileScanTask>>* tasks,
     const iceberg::Schema& schema, const TableReadTraits::SortKey& key,
     std::string* error);
+
+void DeriveKeyWindow(const std::shared_ptr<iceberg::Expression>& filter,
+                     const std::string& key_name,
+                     const std::shared_ptr<iceberg::PrimitiveType>& key_type,
+                     std::optional<iceberg::Literal>* lo,
+                     std::optional<iceberg::Literal>* hi);
 
 }  // namespace primeparts::scan

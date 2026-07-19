@@ -30,15 +30,6 @@ fs::path NamespaceDir(const fs::path& root, const iceberg::Namespace& ns) {
   return p;
 }
 
-std::string NamespaceUrlPath(const iceberg::Namespace& ns) {
-  std::string out;
-  for (const auto& level : ns.levels) {
-    if (!out.empty()) out += "%1F";
-    out += level;
-  }
-  return out;
-}
-
 bool MoveStagedFile(const fs::path& src, const fs::path& dst, std::string* error) {
   std::error_code ec;
   fs::create_directories(dst.parent_path(), ec);
@@ -57,6 +48,15 @@ bool MoveStagedFile(const fs::path& src, const fs::path& dst, std::string* error
 }
 
 }  // namespace
+
+std::string NamespaceUrlPath(const iceberg::Namespace& ns) {
+  std::string out;
+  for (const auto& level : ns.levels) {
+    if (!out.empty()) out += "%1F";
+    out += level;
+  }
+  return out;
+}
 
 iceberg::Namespace ResolveNamespace(const std::string& name) {
   std::string n = name;

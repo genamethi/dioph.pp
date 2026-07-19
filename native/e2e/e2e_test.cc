@@ -1,14 +1,17 @@
 #include "primeparts/catalog/partition_stats.h"
 #include "primeparts/catalog/pp_commit.h"
 #include "primeparts/catalog/pp_iceberg_rest.h"
+#include "primeparts/catalog/rest_scan_plan.h"
 #include "primeparts/common/arrow_init.h"
 #include "primeparts/query/query_service.h"
+#include "primeparts/scan/scan_planner.h"
 #include "primeparts/schemas.h"
 #include "primeparts/writer.h"
 
 #include <arrow/api.h>
 #include <gtest/gtest.h>
 #include <httplib.h>
+#include <nlohmann/json.hpp>
 
 #include <sys/wait.h>
 #include <unistd.h>
@@ -18,12 +21,17 @@
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "iceberg/catalog.h"
+#include "iceberg/expression/expressions.h"
 #include "iceberg/expression/literal.h"
+#include "iceberg/manifest/manifest_entry.h"
+#include "iceberg/table_metadata.h"
+#include "iceberg/table_scan.h"
 #include "iceberg/partition_spec.h"
 #include "iceberg/row/partition_values.h"
 #include "iceberg/schema.h"
@@ -136,6 +144,32 @@ void BuildPrimesWarehouse(const fs::path& warehouse,
 
 class E2ETest : public ::testing::Test {
  protected:
+  static std::shared_ptr<iceberg::TableMetadata> LoadPrimesMetadata() {
+    primeparts::common::EnsureArrowRegistration();
+    fs::path dir = warehouse_;
+    for (const auto& level : ns_.levels) dir /= level;
+    dir = dir / "primes" / "metadata";
+
+    fs::path latest;
+    std::error_code ec;
+    for (const auto& entry : fs::directory_iterator(dir, ec)) {
+      const std::string name = entry.path().filename().string();
+      if (name.size() > 14 &&
+          name.compare(name.size() - 14, 14, ".metadata.json") == 0 &&
+          name > latest.filename().string()) {
+        latest = entry.path();
+      }
+    }
+    EXPECT_FALSE(latest.empty()) << "no metadata json under " << dir;
+    if (latest.empty()) return nullptr;
+
+    auto io = ppc::LocalIO();
+    auto md = iceberg::TableMetadataUtil::Read(*io, latest.string());
+    EXPECT_TRUE(md.has_value()) << (md.has_value() ? "" : md.error().message);
+    if (!md.has_value()) return nullptr;
+    return std::move(md.value());
+  }
+
   static void SetUpTestSuite() {
     warehouse_ = fs::temp_directory_path() / "primeparts-e2e-warehouse";
     std::error_code ec;
@@ -152,7 +186,7 @@ class E2ETest : public ::testing::Test {
     ASSERT_GE(pid_, 0);
     if (pid_ == 0) {
       execl(bin.c_str(), bin.c_str(), "--warehouse", warehouse_.c_str(),
-            "--port", "18181", "--host", "127.0.0.1",
+            "--port", "18181", "--host", "127.0.0.1", "--plan-batch", "1",
             static_cast<char*>(nullptr));
       _exit(127);
     }
@@ -252,35 +286,338 @@ TEST_F(E2ETest, PartitionStatsPresentAfterCommit) {
   EXPECT_EQ(row->data_record_count, 6);
 }
 
-TEST_F(E2ETest, PlanRoutesReturn406) {
+TEST_F(E2ETest, ConfigAdvertisesEveryPlanningRoute) {
   auto cli = Client();
-  const char* body = "{}";
+  auto res = cli.Get("/v1/config");
+  ASSERT_TRUE(res);
+  ASSERT_EQ(res->status, 200);
+
+  auto body = nlohmann::json::parse(res->body);
+  ASSERT_TRUE(body.contains("endpoints")) << res->body;
+  std::set<std::string> endpoints;
+  for (const auto& entry : body["endpoints"]) {
+    endpoints.insert(entry.get<std::string>());
+  }
+
+  const std::string table = "/v1/{prefix}/namespaces/{namespace}/tables/{table}";
+  for (const std::string& wanted :
+       {"POST " + table + "/plan", "GET " + table + "/plan/{plan-id}",
+        "DELETE " + table + "/plan/{plan-id}", "POST " + table + "/tasks"}) {
+    EXPECT_TRUE(endpoints.count(wanted) == 1)
+        << "planning route not advertised: " << wanted;
+  }
+}
+
+TEST_F(E2ETest, LoadTableAdvertisesServerSidePlanning) {
+  ppc::ScanPlanningMode mode = ppc::ScanPlanningMode::kClient;
+  std::string error;
+  ASSERT_TRUE(ppc::FetchScanPlanningMode("http://127.0.0.1:18181", ns_,
+                                         "primes", &mode, &error))
+      << error;
+  EXPECT_EQ(mode, ppc::ScanPlanningMode::kServer);
+}
+
+TEST_F(E2ETest, AClientThatReadsTheAdvertisementCanCompleteAScan) {
+  const std::string uri = "http://127.0.0.1:18181";
+  auto metadata = LoadPrimesMetadata();
+  ASSERT_NE(metadata, nullptr);
+  primeparts::scan::ScanPlanRequest request;
+  std::string error;
+
+  ppc::ScanPlanningMode mode = ppc::ScanPlanningMode::kClient;
+  ASSERT_TRUE(ppc::FetchScanPlanningMode(uri, ns_, "primes", &mode, &error))
+      << error;
+
+  std::vector<std::shared_ptr<iceberg::FileScanTask>> tasks;
+  if (mode == ppc::ScanPlanningMode::kServer) {
+    ASSERT_TRUE(ppc::PlanScanOnServer(uri, ns_, "primes", request, *metadata,
+                                      ppc::PlanPollOptions{}, &tasks, &error))
+        << error;
+  } else {
+    primeparts::scan::ScanPlan local;
+    ASSERT_TRUE(primeparts::scan::PlanTableScan(metadata, ppc::LocalIO(),
+                                                request, &local, &error))
+        << error;
+    for (const auto& task : local.tasks) tasks.push_back(task.inner);
+  }
+
+  EXPECT_FALSE(tasks.empty())
+      << "the advertised mode must lead to a usable scan, not a dead end";
+}
+
+TEST_F(E2ETest, ServerAndInProcessPlanningAgreeOnTheTaskSet) {
+  auto metadata = LoadPrimesMetadata();
+  ASSERT_NE(metadata, nullptr);
+  auto io = ppc::LocalIO();
+  primeparts::scan::ScanPlanRequest request;
+
+  primeparts::scan::ScanPlan local;
+  std::string error;
+  ASSERT_TRUE(
+      primeparts::scan::PlanTableScan(metadata, io, request, &local, &error))
+      << error;
+  ASSERT_FALSE(local.tasks.empty());
+
+  std::vector<std::shared_ptr<iceberg::FileScanTask>> remote;
+  ASSERT_TRUE(ppc::PlanScanOnServer("http://127.0.0.1:18181", ns_, "primes",
+                                    request, *metadata, ppc::PlanPollOptions{},
+                                    &remote, &error))
+      << error;
+
+  std::set<std::string> local_paths;
+  std::set<std::string> remote_paths;
+  for (const auto& task : local.tasks) {
+    local_paths.insert(task.inner->data_file()->file_path);
+  }
+  for (const auto& task : remote) {
+    remote_paths.insert(task->data_file()->file_path);
+  }
+
+  EXPECT_EQ(remote.size(), local.tasks.size());
+  EXPECT_EQ(remote_paths, local_paths)
+      << "planning the same request in-process and over REST must agree";
+}
+
+TEST_F(E2ETest, ClientSurfacesATypedServerRefusal) {
+  std::string error;
+  EXPECT_FALSE(ppc::CancelPlanning("http://127.0.0.1:18181", ns_, "primes",
+                                   "not-a-plan-id", &error));
+  EXPECT_NE(error.find("NoSuchPlanIdException"), std::string::npos)
+      << "the client must surface the server's typed error, not just a code: "
+      << error;
+}
+
+TEST_F(E2ETest, UnknownPlanIdsAndTasksAreTypedNotFounds) {
+  auto cli = Client();
   const std::string base = "/v1/namespaces/primeparts/tables/primes";
 
-  struct Route {
-    std::string method;
-    std::string path;
-  };
-  const std::vector<Route> routes = {
-      {"POST", base + "/plan"},
-      {"GET", base + "/plan/some-plan-id"},
-      {"DELETE", base + "/plan/some-plan-id"},
-      {"POST", base + "/tasks"},
-  };
+  auto fetch = cli.Get(base + "/plan/some-plan-id");
+  ASSERT_TRUE(fetch);
+  EXPECT_EQ(fetch->status, 404);
+  EXPECT_NE(fetch->body.find("NoSuchPlanIdException"), std::string::npos)
+      << fetch->body;
 
-  for (const auto& r : routes) {
-    httplib::Result res;
-    if (r.method == "POST") {
-      res = cli.Post(r.path, body, "application/json");
-    } else if (r.method == "GET") {
-      res = cli.Get(r.path);
-    } else {
-      res = cli.Delete(r.path);
-    }
-    ASSERT_TRUE(res) << r.method << " " << r.path << " no response";
-    EXPECT_EQ(res->status, 406) << r.method << " " << r.path;
-    EXPECT_NE(res->body.find("UnsupportedOperationException"), std::string::npos)
-        << r.method << " " << r.path << ": " << res->body;
+  auto cancel = cli.Delete(base + "/plan/some-plan-id");
+  ASSERT_TRUE(cancel);
+  EXPECT_EQ(cancel->status, 404);
+  EXPECT_NE(cancel->body.find("NoSuchPlanIdException"), std::string::npos)
+      << cancel->body;
+
+  auto tasks = cli.Post(base + "/tasks", R"({"plan-task":"nope"})",
+                        "application/json");
+  ASSERT_TRUE(tasks);
+  EXPECT_EQ(tasks->status, 404);
+  EXPECT_NE(tasks->body.find("NoSuchPlanTaskException"), std::string::npos)
+      << tasks->body;
+}
+
+TEST_F(E2ETest, ServerSidePlanningRunsTheFullLifecycle) {
+  auto cli = Client();
+  const std::string base = "/v1/namespaces/primeparts/tables/primes";
+
+  auto submitted = cli.Post(base + "/plan", "{}", "application/json");
+  ASSERT_TRUE(submitted) << "planTableScan: no response";
+  ASSERT_EQ(submitted->status, 200) << submitted->body;
+
+  auto submitted_json = nlohmann::json::parse(submitted->body);
+  EXPECT_EQ(submitted_json.value("status", ""), "submitted")
+      << "planning is asynchronous, so the first answer is always submitted";
+  const std::string plan_id = submitted_json.value("plan-id", "");
+  ASSERT_FALSE(plan_id.empty()) << submitted->body;
+
+  nlohmann::json result;
+  for (int i = 0; i < 400; ++i) {
+    auto polled = cli.Get(base + "/plan/" + plan_id);
+    ASSERT_TRUE(polled);
+    ASSERT_EQ(polled->status, 200) << polled->body;
+    result = nlohmann::json::parse(polled->body);
+    if (result.value("status", "") != "submitted") break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+
+  ASSERT_EQ(result.value("status", ""), "completed") << result.dump();
+  ASSERT_TRUE(result.contains("file-scan-tasks")) << result.dump();
+  EXPECT_FALSE(result["file-scan-tasks"].empty());
+
+  const auto& first = result["file-scan-tasks"][0];
+  ASSERT_TRUE(first.contains("data-file")) << first.dump();
+  EXPECT_TRUE(first["data-file"].contains("file-path"));
+  EXPECT_FALSE(first.contains("split"))
+      << "split selection is a data-layer concern the server does not do";
+
+  auto cancelled = cli.Delete(base + "/plan/" + plan_id);
+  ASSERT_TRUE(cancelled);
+  EXPECT_EQ(cancelled->status, 204) << cancelled->body;
+}
+
+TEST_F(E2ETest, PlanTasksAreFetchableWhenPlanningExceedsOneBatch) {
+  auto cli = Client();
+  const std::string base = "/v1/namespaces/primeparts/tables/primes";
+
+  auto submitted = cli.Post(base + "/plan", "{}", "application/json");
+  ASSERT_TRUE(submitted);
+  ASSERT_EQ(submitted->status, 200) << submitted->body;
+  const std::string plan_id =
+      nlohmann::json::parse(submitted->body).value("plan-id", "");
+  ASSERT_FALSE(plan_id.empty());
+
+  nlohmann::json result;
+  for (int i = 0; i < 400; ++i) {
+    auto polled = cli.Get(base + "/plan/" + plan_id);
+    ASSERT_TRUE(polled);
+    result = nlohmann::json::parse(polled->body);
+    if (result.value("status", "") != "submitted") break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  ASSERT_EQ(result.value("status", ""), "completed") << result.dump();
+
+  if (!result.contains("plan-tasks") || result["plan-tasks"].empty()) {
+    GTEST_SKIP() << "the fixture plans within one batch; plan-task paging is "
+                    "covered by PlanStoreTest";
+  }
+
+  const std::string token = result["plan-tasks"][0];
+  nlohmann::json request;
+  request["plan-task"] = token;
+  auto fetched = cli.Post(base + "/tasks", request.dump(), "application/json");
+  ASSERT_TRUE(fetched);
+  ASSERT_EQ(fetched->status, 200) << fetched->body;
+  auto tasks = nlohmann::json::parse(fetched->body);
+  ASSERT_TRUE(tasks.contains("file-scan-tasks")) << tasks.dump();
+  EXPECT_FALSE(tasks["file-scan-tasks"].empty());
+}
+
+TEST_F(E2ETest, ExistenceChecksReturn204) {
+  auto cli = Client();
+
+  auto ns = cli.Head("/v1/namespaces/primeparts");
+  ASSERT_TRUE(ns) << "HEAD namespace: no response";
+  EXPECT_EQ(ns->status, 204);
+
+  auto table = cli.Head("/v1/namespaces/primeparts/tables/primes");
+  ASSERT_TRUE(table) << "HEAD table: no response";
+  EXPECT_EQ(table->status, 204);
+
+  auto missing_ns = cli.Head("/v1/namespaces/no-such-namespace");
+  ASSERT_TRUE(missing_ns) << "HEAD missing namespace: no response";
+  EXPECT_EQ(missing_ns->status, 404);
+
+  auto missing_table = cli.Head("/v1/namespaces/primeparts/tables/no-such-table");
+  ASSERT_TRUE(missing_table) << "HEAD missing table: no response";
+  EXPECT_EQ(missing_table->status, 404);
+}
+
+TEST_F(E2ETest, MinRowsRequestedStopsPlanningEarly) {
+  auto metadata = LoadPrimesMetadata();
+  ASSERT_NE(metadata, nullptr);
+  auto io = ppc::LocalIO();
+  std::string error;
+
+  primeparts::scan::ScanPlanRequest full_request;
+  primeparts::scan::ScanPlan full;
+  ASSERT_TRUE(primeparts::scan::PlanTableScan(metadata, io, full_request, &full,
+                                              &error))
+      << error;
+  ASSERT_GT(full.tasks.size(), 1u) << "fixture must plan more than one task";
+
+  primeparts::scan::ScanPlanRequest capped_request;
+  capped_request.min_rows_requested = 1;
+  primeparts::scan::ScanPlan capped;
+  ASSERT_TRUE(primeparts::scan::PlanTableScan(metadata, io, capped_request,
+                                              &capped, &error))
+      << error;
+
+  EXPECT_LT(capped.tasks.size(), full.tasks.size());
+  EXPECT_GE(capped.planned_rows, 1);
+  EXPECT_LT(capped.planned_rows, full.planned_rows);
+}
+
+TEST_F(E2ETest, MinRowsRequestedDoesNotStopOnUnprovenRowCounts) {
+  auto metadata = LoadPrimesMetadata();
+  ASSERT_NE(metadata, nullptr);
+  auto io = ppc::LocalIO();
+  std::string error;
+
+  auto filter = iceberg::Expressions::Equal("k", iceberg::Literal::Int(1));
+
+  primeparts::scan::ScanPlanRequest unbounded;
+  unbounded.filter = filter;
+  primeparts::scan::ScanPlan unbounded_plan;
+  ASSERT_TRUE(primeparts::scan::PlanTableScan(metadata, io, unbounded,
+                                              &unbounded_plan, &error))
+      << error;
+  ASSERT_GT(unbounded_plan.tasks.size(), 1u)
+      << "fixture must plan more than one task, or the comparison below is "
+         "vacuous";
+
+  primeparts::scan::ScanPlanRequest bounded;
+  bounded.filter = filter;
+  bounded.min_rows_requested = 1;
+  primeparts::scan::ScanPlan bounded_plan;
+  ASSERT_TRUE(primeparts::scan::PlanTableScan(metadata, io, bounded,
+                                              &bounded_plan, &error))
+      << error;
+
+  EXPECT_EQ(bounded_plan.tasks.size(), unbounded_plan.tasks.size())
+      << "row counts under a non-trivial residual are upper bounds, so "
+         "min-rows-requested must not stop planning early";
+  EXPECT_EQ(bounded_plan.planned_rows, unbounded_plan.planned_rows);
+}
+
+TEST_F(E2ETest, ResidualStaysCompleteAndKeyWindowIsDerived) {
+  auto metadata = LoadPrimesMetadata();
+  ASSERT_NE(metadata, nullptr);
+  auto io = ppc::LocalIO();
+  std::string error;
+
+  primeparts::scan::ScanPlanRequest request;
+  request.filter = iceberg::Expressions::And(
+      iceberg::Expressions::Equal("k", iceberg::Literal::Int(1)),
+      iceberg::Expressions::GreaterThanOrEqual("p", iceberg::Literal::Long(5)));
+
+  primeparts::scan::ScanPlan plan;
+  ASSERT_TRUE(
+      primeparts::scan::PlanTableScan(metadata, io, request, &plan, &error))
+      << error;
+
+  ASSERT_NE(plan.residual, nullptr);
+  EXPECT_EQ(plan.residual->ToString(), request.filter->ToString())
+      << "the key conjunct must remain in the residual: a consumer that "
+         "declines the key window has to stay correct";
+}
+
+TEST_F(E2ETest, ConfigAdvertisesSupersetOfSpecDefaultEndpoints) {
+  auto cli = Client();
+  auto res = cli.Get("/v1/config");
+  ASSERT_TRUE(res) << "GET /v1/config: no response";
+  ASSERT_EQ(res->status, 200);
+
+  auto body = nlohmann::json::parse(res->body, nullptr, false);
+  ASSERT_FALSE(body.is_discarded()) << res->body;
+  ASSERT_TRUE(body.contains("endpoints")) << res->body;
+
+  std::set<std::string> advertised;
+  for (const auto& e : body["endpoints"]) advertised.insert(e.get<std::string>());
+
+  const std::vector<std::string> spec_default = {
+      "GET /v1/{prefix}/namespaces",
+      "POST /v1/{prefix}/namespaces",
+      "GET /v1/{prefix}/namespaces/{namespace}",
+      "DELETE /v1/{prefix}/namespaces/{namespace}",
+      "POST /v1/{prefix}/namespaces/{namespace}/properties",
+      "GET /v1/{prefix}/namespaces/{namespace}/tables",
+      "POST /v1/{prefix}/namespaces/{namespace}/tables",
+      "GET /v1/{prefix}/namespaces/{namespace}/tables/{table}",
+      "POST /v1/{prefix}/namespaces/{namespace}/tables/{table}",
+      "DELETE /v1/{prefix}/namespaces/{namespace}/tables/{table}",
+      "POST /v1/{prefix}/namespaces/{namespace}/register",
+      "POST /v1/{prefix}/namespaces/{namespace}/tables/{table}/metrics",
+      "POST /v1/{prefix}/tables/rename",
+      "POST /v1/{prefix}/transactions/commit",
+  };
+  for (const auto& e : spec_default) {
+    EXPECT_TRUE(advertised.count(e) == 1)
+        << "advertising `endpoints` withdraws this spec-default route: " << e;
   }
 }
 

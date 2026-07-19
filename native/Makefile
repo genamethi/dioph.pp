@@ -62,6 +62,9 @@ LMDB_LIB := $(BUILD_DIR)/liblmdb.a
 PP_CATALOGD_OBJ := $(BUILD_DIR)/pp_catalogd.o
 PP_CATALOGD_MAIN_OBJ := $(BUILD_DIR)/pp_catalogd_main.o
 PP_COMMIT_OBJ := $(BUILD_DIR)/pp_commit.o
+PLAN_STORE_OBJ := $(BUILD_DIR)/plan_store.o
+PLAN_STATUS_OBJ := $(BUILD_DIR)/plan_status.o
+REST_SCAN_PLAN_OBJ := $(BUILD_DIR)/rest_scan_plan.o
 PARTITION_STATS_OBJ := $(BUILD_DIR)/partition_stats.o
 ICEBERG_SRC_CPPFLAGS := -Ivendor/iceberg-cpp/src
 VERIFY_OBJ := $(BUILD_DIR)/verify.o
@@ -69,12 +72,13 @@ VERIFY_MAIN_OBJ := $(BUILD_DIR)/verify_main.o
 
 TEST_SUITE_BIN := $(BUILD_DIR)/primeparts-tests
 TEST_SUITE_OBJS := $(BUILD_DIR)/core_test.o $(BUILD_DIR)/writer_test.o \
-                   $(BUILD_DIR)/scan_planner_test.o $(BUILD_DIR)/partition_stats_test.o
-TEST_SUITE_LIBOBJS := $(WRITER_OBJ) $(SCHEMAS_OBJ) $(SCAN_OBJS) $(PARTITION_STATS_OBJ) $(CORE_OBJ)
+                   $(BUILD_DIR)/scan_planner_test.o $(BUILD_DIR)/partition_stats_test.o \
+                   $(BUILD_DIR)/plan_store_test.o
+TEST_SUITE_LIBOBJS := $(WRITER_OBJ) $(SCHEMAS_OBJ) $(SCAN_OBJS) $(PARTITION_STATS_OBJ) $(PLAN_STORE_OBJ) $(PLAN_STATUS_OBJ) $(CORE_OBJ)
 
 E2E_BIN := $(BUILD_DIR)/primeparts-e2e
 E2E_OBJ := $(BUILD_DIR)/e2e_test.o
-E2E_LIBOBJS := $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(PP_ICEBERG_REST_OBJ) $(PP_COMMIT_OBJ) $(PP_LMDB_STORE_OBJ) $(PARTITION_STATS_OBJ) $(LMDB_LIB)
+E2E_LIBOBJS := $(REST_SCAN_PLAN_OBJ) $(PLAN_STATUS_OBJ) $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(PP_ICEBERG_REST_OBJ) $(PP_COMMIT_OBJ) $(PP_LMDB_STORE_OBJ) $(PARTITION_STATS_OBJ) $(LMDB_LIB)
 
 .PHONY: all clean test e2e install
 
@@ -233,13 +237,22 @@ $(BUILD_DIR)/mdb_%: $(LMDB_DIR)/mdb_%.c $(LMDB_LIB) $(LMDB_MODULE_OBJ) | $(BUILD
 .PHONY: lmdb-tools
 lmdb-tools: $(LMDB_TOOLS)
 
-$(PP_CATALOGD_OBJ): src/catalog/pp_catalogd.cc include/primeparts/catalog/pp_catalogd.h include/primeparts/catalog/pp_iceberg_rest.h | $(BUILD_DIR)
+$(PP_CATALOGD_OBJ): src/catalog/pp_catalogd.cc include/primeparts/catalog/pp_catalogd.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/catalog/plan_store.h include/primeparts/scan/scan_planner.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(ICEBERG_SRC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(PP_COMMIT_OBJ): src/catalog/pp_commit.cc include/primeparts/catalog/pp_commit.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/catalog/partition_stats.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(ICEBERG_SRC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(PARTITION_STATS_OBJ): src/catalog/partition_stats.cc include/primeparts/catalog/partition_stats.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(PLAN_STATUS_OBJ): src/catalog/plan_status.cc include/primeparts/catalog/plan_status.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(REST_SCAN_PLAN_OBJ): src/catalog/rest_scan_plan.cc include/primeparts/catalog/rest_scan_plan.h include/primeparts/catalog/plan_status.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/scan/scan_plan.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(ICEBERG_SRC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(PLAN_STORE_OBJ): src/catalog/plan_store.cc include/primeparts/catalog/plan_store.h include/primeparts/catalog/plan_status.h include/primeparts/scan/scan_plan.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(PP_CATALOGD_MAIN_OBJ): src/catalog/pp_catalogd_main.cc include/primeparts/catalog/pp_catalogd.h | $(BUILD_DIR)
@@ -263,7 +276,7 @@ $(BUILD_DIR)/primeparts-bench-materialize: $(CORE_OBJ) $(BENCH_MATERIALIZE_OBJ)
 $(BUILD_DIR)/primeparts-generate: $(CORE_OBJ) $(GENERATE_OBJ) $(CONFIG_OBJ) $(WRITER_OBJ) $(ALIGNED_WRITER_OBJ) $(SCHEMAS_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_COMMIT_OBJ) $(PARTITION_STATS_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(LUA_LDLIBS) -lsqlite3 -pthread -o $@
 
-$(BUILD_DIR)/primeparts-catalogd: $(PP_CATALOGD_MAIN_OBJ) $(PP_CATALOGD_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
+$(BUILD_DIR)/primeparts-catalogd: $(PP_CATALOGD_MAIN_OBJ) $(PP_CATALOGD_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(PLAN_STORE_OBJ) $(PLAN_STATUS_OBJ) $(SCAN_OBJS) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
 
 $(VERIFY_OBJ): src/verify/verify.cc include/primeparts/verify/verify.h include/primeparts/source_scan.h include/primeparts/core.h include/primeparts/common/thread_pool.h | $(BUILD_DIR)

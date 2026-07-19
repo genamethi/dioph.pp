@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "iceberg/expression/literal.h"
 #include "iceberg/file_reader.h"
 #include "primeparts/scan/table_traits.h"
 
@@ -41,8 +42,8 @@ struct ScanPlan {
   TableReadTraits traits;
   std::vector<FileScanTask> tasks;
   int64_t planned_rows = 0;
-  std::optional<int64_t> key_lo;
-  std::optional<int64_t> key_hi;
+  std::optional<iceberg::Literal> key_lo;
+  std::optional<iceberg::Literal> key_hi;
   std::shared_ptr<iceberg::Expression> residual;
 };
 

@@ -24,6 +24,7 @@
 #include "iceberg/manifest/manifest_entry.h"
 #include "iceberg/schema.h"
 #include "iceberg/schema_field.h"
+#include "iceberg/snapshot.h"
 #include "iceberg/table_metadata.h"
 #include "iceberg/table_scan.h"
 #include "iceberg/type.h"
@@ -44,27 +45,6 @@ const iceberg::SchemaField* FieldById(const iceberg::Schema& schema,
   return nullptr;
 }
 
-bool DecodeIntegerBound(const std::vector<uint8_t>& bytes,
-                        iceberg::TypeId type, int64_t* out,
-                        std::string* error) {
-  auto prim = type == iceberg::TypeId::kInt
-                  ? std::static_pointer_cast<iceberg::PrimitiveType>(
-                        iceberg::int32())
-                  : std::static_pointer_cast<iceberg::PrimitiveType>(
-                        iceberg::int64());
-  auto lit = iceberg::Literal::Deserialize(bytes, prim);
-  if (!lit.has_value()) {
-    if (error) *error = "Literal::Deserialize: " + lit.error().message;
-    return false;
-  }
-  if (type == iceberg::TypeId::kInt) {
-    *out = std::get<int32_t>(lit.value().value());
-  } else {
-    *out = std::get<int64_t>(lit.value().value());
-  }
-  return true;
-}
-
 bool StatsNames(const iceberg::TableMetadata& metadata,
                 const ScanPlanRequest& request, const TableReadTraits& traits,
                 std::vector<std::string>* out) {
@@ -78,62 +58,70 @@ bool StatsNames(const iceberg::TableMetadata& metadata,
   return !out->empty();
 }
 
-void TightenLo(std::optional<int64_t>* lo, int64_t v) {
-  *lo = lo->has_value() ? std::max(**lo, v) : v;
-}
-
-void TightenHi(std::optional<int64_t>* hi, int64_t v) {
-  *hi = hi->has_value() ? std::min(**hi, v) : v;
-}
-
-bool FoldKeyConjunct(const std::shared_ptr<iceberg::Expression>& expr,
-                     const std::string& key_name, std::optional<int64_t>* lo,
-                     std::optional<int64_t>* hi) {
-  auto pred = std::dynamic_pointer_cast<iceberg::UnboundPredicate>(expr);
-  if (!pred) return false;
-  auto ref = pred->reference();
-  if (!ref || ref->name() != key_name) return false;
-  auto lits = pred->literals();
-  if (lits.size() != 1) return false;
-  const auto& val = lits[0].value();
-  int64_t v = 0;
-  if (std::holds_alternative<int64_t>(val)) {
-    v = std::get<int64_t>(val);
-  } else if (std::holds_alternative<int32_t>(val)) {
-    v = std::get<int32_t>(val);
-  } else {
-    return false;
+void TightenLo(std::optional<iceberg::Literal>* lo, iceberg::Literal v) {
+  if (!lo->has_value()) {
+    *lo = std::move(v);
+    return;
   }
+  const auto cmp = **lo <=> v;
+  if (cmp == std::partial_ordering::unordered) return;
+  if (cmp < 0) *lo = std::move(v);
+}
+
+void TightenHi(std::optional<iceberg::Literal>* hi, iceberg::Literal v) {
+  if (!hi->has_value()) {
+    *hi = std::move(v);
+    return;
+  }
+  const auto cmp = **hi <=> v;
+  if (cmp == std::partial_ordering::unordered) return;
+  if (cmp > 0) *hi = std::move(v);
+}
+
+void FoldKeyConjunct(const std::shared_ptr<iceberg::Expression>& expr,
+                     const std::string& key_name,
+                     const std::shared_ptr<iceberg::PrimitiveType>& key_type,
+                     std::optional<iceberg::Literal>* lo,
+                     std::optional<iceberg::Literal>* hi) {
+  auto pred = std::dynamic_pointer_cast<iceberg::UnboundPredicate>(expr);
+  if (!pred) return;
+  auto ref = pred->reference();
+  if (!ref || ref->name() != key_name) return;
+  auto lits = pred->literals();
+  if (lits.size() != 1) return;
+
+  auto cast = lits[0].CastTo(key_type);
+  if (!cast.has_value()) return;
+  auto lit = std::move(cast.value());
+  if (lit.IsAboveMax() || lit.IsBelowMin() || lit.IsNull()) return;
+
   switch (pred->op()) {
     case iceberg::Expression::Operation::kGtEq:
-      TightenLo(lo, v);
-      return true;
     case iceberg::Expression::Operation::kGt:
-      TightenLo(lo, v + 1);
-      return true;
+      TightenLo(lo, std::move(lit));
+      return;
     case iceberg::Expression::Operation::kLtEq:
-      TightenHi(hi, v);
-      return true;
     case iceberg::Expression::Operation::kLt:
-      TightenHi(hi, v - 1);
-      return true;
+      TightenHi(hi, std::move(lit));
+      return;
     case iceberg::Expression::Operation::kEq:
-      TightenLo(lo, v);
-      TightenHi(hi, v);
-      return true;
+      TightenLo(lo, lit);
+      TightenHi(hi, std::move(lit));
+      return;
     default:
-      return false;
+      return;
   }
 }
 
-void ExtractKeyWindow(const std::shared_ptr<iceberg::Expression>& filter,
-                      const std::string& key_name, std::optional<int64_t>* lo,
-                      std::optional<int64_t>* hi,
-                      std::shared_ptr<iceberg::Expression>* residual) {
-  *residual = nullptr;
-  if (!filter) return;
+}  // namespace
+
+void DeriveKeyWindow(const std::shared_ptr<iceberg::Expression>& filter,
+                     const std::string& key_name,
+                     const std::shared_ptr<iceberg::PrimitiveType>& key_type,
+                     std::optional<iceberg::Literal>* lo,
+                     std::optional<iceberg::Literal>* hi) {
+  if (!filter || !key_type) return;
   std::vector<std::shared_ptr<iceberg::Expression>> pending{filter};
-  std::vector<std::shared_ptr<iceberg::Expression>> leftover;
   while (!pending.empty()) {
     auto expr = std::move(pending.back());
     pending.pop_back();
@@ -143,14 +131,61 @@ void ExtractKeyWindow(const std::shared_ptr<iceberg::Expression>& filter,
       pending.push_back(conj->right());
       continue;
     }
-    if (!FoldKeyConjunct(expr, key_name, lo, hi)) {
-      leftover.push_back(std::move(expr));
+    FoldKeyConjunct(expr, key_name, key_type, lo, hi);
+  }
+}
+
+namespace {
+
+bool CheckSnapshotSchemaSupported(const iceberg::TableMetadata& metadata,
+                                  const ScanPlanRequest& request,
+                                  std::string* error) {
+  std::shared_ptr<iceberg::Snapshot> snapshot;
+  if (request.snapshot_id.has_value() || request.end_snapshot_id.has_value()) {
+    const int64_t id = request.snapshot_id.value_or(
+        request.end_snapshot_id.value_or(0));
+    auto r = metadata.SnapshotById(id);
+    if (!r.has_value()) {
+      if (error) *error = "TableMetadata::SnapshotById: " + r.error().message;
+      return false;
     }
+    snapshot = r.value();
+  } else {
+    auto r = metadata.Snapshot();
+    if (!r.has_value()) return true;
+    snapshot = r.value();
   }
-  for (auto& expr : leftover) {
-    *residual = *residual ? iceberg::Expressions::And(*residual, expr)
-                          : std::move(expr);
+  if (snapshot == nullptr) return true;
+
+  const int32_t snapshot_schema_id =
+      snapshot->schema_id.value_or(metadata.current_schema_id);
+  if (snapshot_schema_id == metadata.current_schema_id) return true;
+
+  const bool resolves_snapshot_schema = request.snapshot_id.has_value();
+  if (resolves_snapshot_schema == request.use_snapshot_schema) return true;
+
+  if (error) {
+    *error =
+        request.use_snapshot_schema
+            ? "NotImplemented: use-snapshot-schema is true and snapshot " +
+                  std::to_string(snapshot->snapshot_id) + " was written under "
+                  "schema " + std::to_string(snapshot_schema_id) +
+                  " rather than the current schema " +
+                  std::to_string(metadata.current_schema_id) + ", but no "
+                  "snapshot-id was given; the vendored TableScanBuilder "
+                  "resolves the snapshot schema only when a snapshot-id is "
+                  "set, so this scan would silently use the table schema"
+            : "NotImplemented: use-snapshot-schema is false but snapshot " +
+                  std::to_string(snapshot->snapshot_id) + " was written under "
+                  "schema " + std::to_string(snapshot_schema_id) +
+                  " rather than the current schema " +
+                  std::to_string(metadata.current_schema_id) + "; the vendored "
+                  "TableScanBuilder always resolves the snapshot schema when a "
+                  "snapshot-id is set, so branch-schema resolution is "
+                  "unreachable without building a TableScanContext and calling "
+                  "DataTableScan::Make directly";
   }
+  return false;
 }
 
 template <typename ScanType>
@@ -211,18 +246,19 @@ bool SortTasksByLowerBound(
     }
     return false;
   }
-  const auto type = field->type()->type_id();
-  if (type != iceberg::TypeId::kInt && type != iceberg::TypeId::kLong) {
+  auto key_type =
+      std::dynamic_pointer_cast<iceberg::PrimitiveType>(field->type());
+  if (!key_type) {
     if (error) {
       *error = "NotImplemented: declared sort key '" + key.name +
-               "' has type " + field->type()->ToString() +
-               "; task ordering decodes int and long bounds only — ordering "
-               "on this key requires deserializing manifest bounds as "
-               "iceberg::Literal of that type and comparing literals";
+               "' has non-primitive type " + field->type()->ToString() +
+               "; manifest bounds are primitive literals";
     }
     return false;
   }
-  std::vector<std::pair<int64_t, std::shared_ptr<iceberg::FileScanTask>>> keyed;
+
+  std::vector<std::pair<iceberg::Literal, std::shared_ptr<iceberg::FileScanTask>>>
+      keyed;
   keyed.reserve(tasks->size());
   for (auto& task : *tasks) {
     const auto& lb = task->data_file()->lower_bounds;
@@ -234,14 +270,46 @@ bool SortTasksByLowerBound(
       }
       return false;
     }
-    int64_t v = 0;
-    if (!DecodeIntegerBound(it->second, type, &v, error)) return false;
-    keyed.emplace_back(v, std::move(task));
+    auto decoded = iceberg::Literal::Deserialize(it->second, key_type);
+    if (!decoded.has_value()) {
+      if (error) {
+        *error = "Literal::Deserialize lower bound of " +
+                 task->data_file()->file_path + " for sort key " + key.name +
+                 ": " + decoded.error().message;
+      }
+      return false;
+    }
+    auto value = std::move(decoded.value());
+    if (value.IsNull() || value.IsAboveMax() || value.IsBelowMin()) {
+      if (error) {
+        *error = "data file " + task->data_file()->file_path +
+                 " lower bound for sort key " + key.name + " decoded as " +
+                 value.ToString() + "; task ordering requires comparable bounds";
+      }
+      return false;
+    }
+    keyed.emplace_back(std::move(value), std::move(task));
   }
+
+  for (size_t i = 1; i < keyed.size(); ++i) {
+    if ((keyed[i].first <=> keyed[0].first) ==
+        std::partial_ordering::unordered) {
+      if (error) {
+        *error = "NotImplemented: declared sort key '" + key.name +
+                 "' has type " + key_type->ToString() +
+                 ", whose values " + keyed[0].first.ToString() + " and " +
+                 keyed[i].first.ToString() +
+                 " compare as unordered; task ordering requires a total order "
+                 "over the sort key";
+      }
+      return false;
+    }
+  }
+
   std::stable_sort(keyed.begin(), keyed.end(),
                    [&](const auto& a, const auto& b) {
-                     return key.ascending ? a.first < b.first
-                                          : a.first > b.first;
+                     const auto cmp = a.first <=> b.first;
+                     return key.ascending ? cmp < 0 : cmp > 0;
                    });
   tasks->clear();
   for (auto& [v, task] : keyed) tasks->push_back(std::move(task));
@@ -404,6 +472,8 @@ bool PlanTableScan(const std::shared_ptr<iceberg::TableMetadata>& metadata,
     return false;
   }
 
+  if (!CheckSnapshotSchemaSupported(*metadata, request, error)) return false;
+
   if (!TableReadTraits::FromMetadata(*metadata, &out->traits, error)) {
     return false;
   }
@@ -417,11 +487,17 @@ bool PlanTableScan(const std::shared_ptr<iceberg::TableMetadata>& metadata,
     out->table_schema = schema_r.value();
   }
 
+  out->residual = request.filter;
+
   if (out->traits.sorted() && out->traits.sort_keys.front().ascending) {
-    ExtractKeyWindow(request.filter, out->traits.sort_keys.front().name,
-                     &out->key_lo, &out->key_hi, &out->residual);
-  } else {
-    out->residual = request.filter;
+    const auto& key = out->traits.sort_keys.front();
+    const auto* field = FieldById(*out->table_schema, key.field_id);
+    if (field != nullptr) {
+      auto key_type =
+          std::dynamic_pointer_cast<iceberg::PrimitiveType>(field->type());
+      DeriveKeyWindow(request.filter, key.name, key_type, &out->key_lo,
+                      &out->key_hi);
+    }
   }
 
   std::vector<std::string> stats_names;
@@ -452,16 +528,48 @@ bool PlanTableScan(const std::shared_ptr<iceberg::TableMetadata>& metadata,
     }
   }
 
+  int64_t guaranteed_rows = 0;
+
   out->tasks.reserve(tasks.size());
   for (auto& task : tasks) {
+    const bool trivial = TrivialResidual(task->residual_filter());
+    const bool has_deletes = !task->delete_files().empty();
+    FileScanTask planned;
+    planned.planned_rows =
+        static_cast<int64_t>(task->data_file()->record_count);
+    planned.inner = std::move(task);
+    out->planned_rows += planned.planned_rows;
+    if (trivial && !has_deletes) guaranteed_rows += planned.planned_rows;
+    out->tasks.push_back(std::move(planned));
+    if (request.min_rows_requested.has_value() &&
+        guaranteed_rows >= *request.min_rows_requested) {
+      break;
+    }
+  }
+  return true;
+}
+
+bool RefineSplits(ScanPlan* plan, const std::shared_ptr<iceberg::FileIO>& io,
+                  bool case_sensitive, std::string* error) {
+  if (plan == nullptr) {
+    if (error) *error = "RefineSplits: plan is null";
+    return false;
+  }
+  if (!plan->table_schema) {
+    if (error) *error = "RefineSplits: plan has no table schema";
+    return false;
+  }
+
+  std::vector<FileScanTask> refined;
+  refined.reserve(plan->tasks.size());
+  int64_t planned_rows = 0;
+
+  for (auto& planned : plan->tasks) {
+    const auto task = planned.inner;
     if (TrivialResidual(task->residual_filter()) ||
         !task->delete_files().empty()) {
-      FileScanTask planned;
-      planned.planned_rows =
-          static_cast<int64_t>(task->data_file()->record_count);
-      planned.inner = std::move(task);
-      out->planned_rows += planned.planned_rows;
-      out->tasks.push_back(std::move(planned));
+      planned_rows += planned.planned_rows;
+      refined.push_back(std::move(planned));
       continue;
     }
     const auto& df = task->data_file();
@@ -469,27 +577,27 @@ bool PlanTableScan(const std::shared_ptr<iceberg::TableMetadata>& metadata,
     bool all_kept = false;
     if (!SelectSplits(df->file_path,
                       static_cast<int64_t>(df->file_size_in_bytes), io,
-                      *table_schema, task->residual_filter(),
-                      request.case_sensitive, &selected, &all_kept, error)) {
+                      *plan->table_schema, task->residual_filter(),
+                      case_sensitive, &selected, &all_kept, error)) {
       return false;
     }
     if (all_kept) {
-      FileScanTask planned;
-      planned.planned_rows = static_cast<int64_t>(df->record_count);
-      planned.inner = std::move(task);
-      out->planned_rows += planned.planned_rows;
-      out->tasks.push_back(std::move(planned));
+      planned_rows += planned.planned_rows;
+      refined.push_back(std::move(planned));
       continue;
     }
     for (auto& sel : selected) {
-      FileScanTask planned;
-      planned.inner = task;
-      planned.split = sel.split;
-      planned.planned_rows = sel.planned_rows;
-      out->planned_rows += sel.planned_rows;
-      out->tasks.push_back(std::move(planned));
+      FileScanTask split_task;
+      split_task.inner = task;
+      split_task.split = sel.split;
+      split_task.planned_rows = sel.planned_rows;
+      planned_rows += sel.planned_rows;
+      refined.push_back(std::move(split_task));
     }
   }
+
+  plan->tasks = std::move(refined);
+  plan->planned_rows = planned_rows;
   return true;
 }
 
