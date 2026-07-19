@@ -122,6 +122,41 @@ bool ParseJsonBody(const std::string& body, json* out, std::string* error) {
 
 }  // namespace
 
+bool FetchScanPlanningMode(const std::string& rest_uri,
+                           const iceberg::Namespace& ns,
+                           const std::string& table, ScanPlanningMode* out,
+                           std::string* error) {
+  auto cli = MakeClient(rest_uri);
+  auto res = cli.Get("/v1/namespaces/" + NamespaceUrlPath(ns) + "/tables/" +
+                     table);
+  if (!CheckResponse(res, rest_uri, 200, error)) return false;
+
+  json body;
+  if (!ParseJsonBody(res->body, &body, error)) return false;
+
+  const auto config = body.find("config");
+  if (config == body.end()) {
+    if (error) {
+      *error = "loadTable answered without a config block, so no planning mode "
+               "is advertised";
+    }
+    return false;
+  }
+  const auto mode = config->value("scan-planning-mode", std::string());
+  if (mode == "server") {
+    *out = ScanPlanningMode::kServer;
+    return true;
+  }
+  if (mode == "client") {
+    *out = ScanPlanningMode::kClient;
+    return true;
+  }
+  if (error) {
+    *error = "unrecognized scan-planning-mode '" + mode + "'";
+  }
+  return false;
+}
+
 bool SubmitTableScan(const std::string& rest_uri, const iceberg::Namespace& ns,
                      const std::string& table,
                      const scan::ScanPlanRequest& request,

@@ -16,7 +16,9 @@ void Usage() {
     "  --host H          bind address (default: 127.0.0.1)\n"
     "  --port N          bind port (default: 8181)\n"
     "  --plan-batch N    file scan tasks per planning batch (default: 64)\n"
-    "  --plan-ttl N      seconds an idle plan-id is retained (default: 300)\n",
+    "  --plan-ttl N      seconds an idle plan-id is retained (default: 300)\n"
+    "  --scan-planning-mode server|client   advertised planning mode\n"
+    "                    (default: server)\n",
     kDefaultWarehouse);
 }
 
@@ -43,6 +45,17 @@ int main(int argc, char** argv) {
           std::strtoul(next("--plan-batch").c_str(), nullptr, 10));
     else if (f == "--plan-ttl")
       opts.plan_ttl_seconds = std::atoi(next("--plan-ttl").c_str());
+    else if (f == "--scan-planning-mode") {
+      opts.scan_planning_mode = next("--scan-planning-mode");
+      if (opts.scan_planning_mode != "server" &&
+          opts.scan_planning_mode != "client") {
+        std::fprintf(stderr,
+                     "pp-catalogd: --scan-planning-mode must be 'server' or "
+                     "'client', got '%s'\n",
+                     opts.scan_planning_mode.c_str());
+        return 2;
+      }
+    }
     else if (f == "-h" || f == "--help") { Usage(); return 0; }
     else { std::fprintf(stderr, "pp-catalogd: unknown flag '%s'\n", f.c_str()); Usage(); return 2; }
   }

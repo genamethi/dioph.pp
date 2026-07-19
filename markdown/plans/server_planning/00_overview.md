@@ -51,7 +51,7 @@ catalog/metadata and data may sit on different machines.
 | 02 | `02_plan_state.md` | done |
 | 03 | `03_server_routes.md` | done |
 | 04 | `04_client_calls.md` | done |
-| 05 | `05_advertise_and_e2e.md` | not started |
+| 05 | `05_advertise_and_e2e.md` | done |
 
 ## decisions
 

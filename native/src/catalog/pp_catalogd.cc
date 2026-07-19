@@ -161,7 +161,8 @@ bool ParseBody(const httplib::Request& req, httplib::Response& res, json* out) {
 }
 
 iceberg::Result<std::string> TableResultBody(
-    const std::shared_ptr<iceberg::Table>& table, bool with_config) {
+    const std::shared_ptr<iceberg::Table>& table,
+    const std::string& scan_planning_mode) {
   const auto& meta = table->metadata();
   if (!meta) {
     return std::unexpected(
@@ -172,14 +173,16 @@ iceberg::Result<std::string> TableResultBody(
   json body;
   body["metadata-location"] = std::string(table->metadata_file_location());
   body["metadata"] = json::parse(meta_str.value());
-  if (with_config) body["config"] = json{{"scan-planning-mode", "client"}};
+  if (!scan_planning_mode.empty()) {
+    body["config"] = json{{"scan-planning-mode", scan_planning_mode}};
+  }
   return body.dump();
 }
 
 void SendTableResult(httplib::Response& res, int status,
                      const std::shared_ptr<iceberg::Table>& table,
-                     bool with_config) {
-  auto body = TableResultBody(table, with_config);
+                     const std::string& scan_planning_mode) {
+  auto body = TableResultBody(table, scan_planning_mode);
   if (!body.has_value()) return SendIcebergError(res, body.error());
   res.status = status;
   res.set_content(body.value(), "application/json");
@@ -388,6 +391,7 @@ int RunCatalogd(const CatalogdOptions& opts) {
   }
   auto catalog = local.catalog;
   auto store = local.store;
+  const std::string planning_mode = opts.scan_planning_mode;
   auto plans = std::make_shared<PlanStore>(PlanStore::Config{
       .batch_tasks = opts.plan_batch_tasks,
       .ttl = std::chrono::seconds(opts.plan_ttl_seconds)});
@@ -476,7 +480,7 @@ int RunCatalogd(const CatalogdOptions& opts) {
 
   routes.Post(R"(/v1/namespaces/([^/]+)/tables)",
               "/v1/{prefix}/namespaces/{namespace}/tables", {"POST"},
-              [catalog](const httplib::Request& req, httplib::Response& res) {
+              [catalog, planning_mode](const httplib::Request& req, httplib::Response& res) {
              json body;
              if (!ParseBody(req, res, &body)) return;
              auto parsed = ir::CreateTableRequestFromJson(body);
@@ -491,12 +495,12 @@ int RunCatalogd(const CatalogdOptions& opts) {
              auto r = catalog->CreateTable(id, cr.schema, spec, order, cr.location,
                                            cr.properties);
              if (!r.has_value()) return SendIcebergError(res, r.error());
-             SendTableResult(res, 200, r.value(), true);
+             SendTableResult(res, 200, r.value(), planning_mode);
            });
 
   routes.Post(R"(/v1/namespaces/([^/]+)/register)",
               "/v1/{prefix}/namespaces/{namespace}/register", {"POST"},
-              [catalog](const httplib::Request& req, httplib::Response& res) {
+              [catalog, planning_mode](const httplib::Request& req, httplib::Response& res) {
              json body;
              if (!ParseBody(req, res, &body)) return;
              auto parsed = ir::RegisterTableRequestFromJson(body);
@@ -507,13 +511,13 @@ int RunCatalogd(const CatalogdOptions& opts) {
                                          .name = rr.name};
              auto r = catalog->RegisterTable(id, rr.metadata_location);
              if (!r.has_value()) return SendIcebergError(res, r.error());
-             SendTableResult(res, 200, r.value(), true);
+             SendTableResult(res, 200, r.value(), planning_mode);
            });
 
   routes.Get(R"(/v1/namespaces/([^/]+)/tables/([^/]+))",
              "/v1/{prefix}/namespaces/{namespace}/tables/{table}",
              {"GET", "HEAD"},
-             [catalog](const httplib::Request& req, httplib::Response& res) {
+             [catalog, planning_mode](const httplib::Request& req, httplib::Response& res) {
             iceberg::TableIdentifier id{.ns = ParseNamespace(req.matches[1]),
                                         .name = req.matches[2]};
             auto r = catalog->LoadTable(id);
@@ -522,7 +526,7 @@ int RunCatalogd(const CatalogdOptions& opts) {
               res.status = 204;
               return;
             }
-            SendTableResult(res, 200, r.value(), true);
+            SendTableResult(res, 200, r.value(), planning_mode);
           });
 
 
@@ -690,7 +694,7 @@ int RunCatalogd(const CatalogdOptions& opts) {
                return SendError(res, 400, "BadRequest", perr);
              auto r = catalog->UpdateTable(id, requirements, updates);
              if (!r.has_value()) return SendIcebergError(res, r.error());
-             SendTableResult(res, 200, r.value(), false);
+             SendTableResult(res, 200, r.value(), std::string());
            });
 
   routes.Delete(R"(/v1/namespaces/([^/]+)/tables/([^/]+))",

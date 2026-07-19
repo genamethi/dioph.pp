@@ -17,6 +17,13 @@ struct TableMetadata;
 
 namespace primeparts::catalog {
 
+enum class ScanPlanningMode { kClient, kServer };
+
+bool FetchScanPlanningMode(const std::string& rest_uri,
+                           const iceberg::Namespace& ns,
+                           const std::string& table, ScanPlanningMode* out,
+                           std::string* error);
+
 struct PlanSubmission {
   std::string plan_id;
   PlanStatus status = PlanStatus::kSubmitted;

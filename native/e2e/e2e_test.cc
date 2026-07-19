@@ -286,6 +286,65 @@ TEST_F(E2ETest, PartitionStatsPresentAfterCommit) {
   EXPECT_EQ(row->data_record_count, 6);
 }
 
+TEST_F(E2ETest, ConfigAdvertisesEveryPlanningRoute) {
+  auto cli = Client();
+  auto res = cli.Get("/v1/config");
+  ASSERT_TRUE(res);
+  ASSERT_EQ(res->status, 200);
+
+  auto body = nlohmann::json::parse(res->body);
+  ASSERT_TRUE(body.contains("endpoints")) << res->body;
+  std::set<std::string> endpoints;
+  for (const auto& entry : body["endpoints"]) {
+    endpoints.insert(entry.get<std::string>());
+  }
+
+  const std::string table = "/v1/{prefix}/namespaces/{namespace}/tables/{table}";
+  for (const std::string& wanted :
+       {"POST " + table + "/plan", "GET " + table + "/plan/{plan-id}",
+        "DELETE " + table + "/plan/{plan-id}", "POST " + table + "/tasks"}) {
+    EXPECT_TRUE(endpoints.count(wanted) == 1)
+        << "planning route not advertised: " << wanted;
+  }
+}
+
+TEST_F(E2ETest, LoadTableAdvertisesServerSidePlanning) {
+  ppc::ScanPlanningMode mode = ppc::ScanPlanningMode::kClient;
+  std::string error;
+  ASSERT_TRUE(ppc::FetchScanPlanningMode("http://127.0.0.1:18181", ns_,
+                                         "primes", &mode, &error))
+      << error;
+  EXPECT_EQ(mode, ppc::ScanPlanningMode::kServer);
+}
+
+TEST_F(E2ETest, AClientThatReadsTheAdvertisementCanCompleteAScan) {
+  const std::string uri = "http://127.0.0.1:18181";
+  auto metadata = LoadPrimesMetadata();
+  ASSERT_NE(metadata, nullptr);
+  primeparts::scan::ScanPlanRequest request;
+  std::string error;
+
+  ppc::ScanPlanningMode mode = ppc::ScanPlanningMode::kClient;
+  ASSERT_TRUE(ppc::FetchScanPlanningMode(uri, ns_, "primes", &mode, &error))
+      << error;
+
+  std::vector<std::shared_ptr<iceberg::FileScanTask>> tasks;
+  if (mode == ppc::ScanPlanningMode::kServer) {
+    ASSERT_TRUE(ppc::PlanScanOnServer(uri, ns_, "primes", request, *metadata,
+                                      ppc::PlanPollOptions{}, &tasks, &error))
+        << error;
+  } else {
+    primeparts::scan::ScanPlan local;
+    ASSERT_TRUE(primeparts::scan::PlanTableScan(metadata, ppc::LocalIO(),
+                                                request, &local, &error))
+        << error;
+    for (const auto& task : local.tasks) tasks.push_back(task.inner);
+  }
+
+  EXPECT_FALSE(tasks.empty())
+      << "the advertised mode must lead to a usable scan, not a dead end";
+}
+
 TEST_F(E2ETest, ServerAndInProcessPlanningAgreeOnTheTaskSet) {
   auto metadata = LoadPrimesMetadata();
   ASSERT_NE(metadata, nullptr);
