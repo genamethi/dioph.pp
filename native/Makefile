@@ -62,6 +62,7 @@ LMDB_LIB := $(BUILD_DIR)/liblmdb.a
 PP_CATALOGD_OBJ := $(BUILD_DIR)/pp_catalogd.o
 PP_CATALOGD_MAIN_OBJ := $(BUILD_DIR)/pp_catalogd_main.o
 PP_COMMIT_OBJ := $(BUILD_DIR)/pp_commit.o
+PLAN_STORE_OBJ := $(BUILD_DIR)/plan_store.o
 PARTITION_STATS_OBJ := $(BUILD_DIR)/partition_stats.o
 ICEBERG_SRC_CPPFLAGS := -Ivendor/iceberg-cpp/src
 VERIFY_OBJ := $(BUILD_DIR)/verify.o
@@ -69,8 +70,9 @@ VERIFY_MAIN_OBJ := $(BUILD_DIR)/verify_main.o
 
 TEST_SUITE_BIN := $(BUILD_DIR)/primeparts-tests
 TEST_SUITE_OBJS := $(BUILD_DIR)/core_test.o $(BUILD_DIR)/writer_test.o \
-                   $(BUILD_DIR)/scan_planner_test.o $(BUILD_DIR)/partition_stats_test.o
-TEST_SUITE_LIBOBJS := $(WRITER_OBJ) $(SCHEMAS_OBJ) $(SCAN_OBJS) $(PARTITION_STATS_OBJ) $(CORE_OBJ)
+                   $(BUILD_DIR)/scan_planner_test.o $(BUILD_DIR)/partition_stats_test.o \
+                   $(BUILD_DIR)/plan_store_test.o
+TEST_SUITE_LIBOBJS := $(WRITER_OBJ) $(SCHEMAS_OBJ) $(SCAN_OBJS) $(PARTITION_STATS_OBJ) $(PLAN_STORE_OBJ) $(CORE_OBJ)
 
 E2E_BIN := $(BUILD_DIR)/primeparts-e2e
 E2E_OBJ := $(BUILD_DIR)/e2e_test.o
@@ -240,6 +242,9 @@ $(PP_COMMIT_OBJ): src/catalog/pp_commit.cc include/primeparts/catalog/pp_commit.
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(ICEBERG_SRC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(PARTITION_STATS_OBJ): src/catalog/partition_stats.cc include/primeparts/catalog/partition_stats.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(PLAN_STORE_OBJ): src/catalog/plan_store.cc include/primeparts/catalog/plan_store.h include/primeparts/scan/scan_plan.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(PP_CATALOGD_MAIN_OBJ): src/catalog/pp_catalogd_main.cc include/primeparts/catalog/pp_catalogd.h | $(BUILD_DIR)

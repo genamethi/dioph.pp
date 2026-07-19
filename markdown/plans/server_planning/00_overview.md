@@ -48,7 +48,7 @@ catalog/metadata and data may sit on different machines.
 | # | file | status |
 |---|---|---|
 | 01 | `01_layer_boundary.md` | done |
-| 02 | `02_plan_state.md` | not started |
+| 02 | `02_plan_state.md` | done |
 | 03 | `03_server_routes.md` | not started |
 | 04 | `04_client_calls.md` | not started |
 | 05 | `05_advertise_and_e2e.md` | not started |
