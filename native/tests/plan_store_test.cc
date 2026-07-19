@@ -148,7 +148,7 @@ TEST(PlanStoreTest, FailedPlanCarriesItsError) {
   EXPECT_TRUE(snap.tasks.empty());
 }
 
-TEST(PlanStoreTest, CancelKeepsThePlanIdAnswerable) {
+TEST(PlanStoreTest, CancellingACompletedPlanIsAdvisory) {
   PlanStore store(PlanStore::Config{.batch_tasks = 2});
 
   const auto plan_id = store.Submit(PlanOf(4));
@@ -156,17 +156,36 @@ TEST(PlanStoreTest, CancelKeepsThePlanIdAnswerable) {
   ASSERT_EQ(snap.status, PlanStatus::kCompleted);
   const auto token = snap.plan_tasks.at(0);
 
-  ASSERT_TRUE(store.Cancel(plan_id));
+  EXPECT_TRUE(store.Cancel(plan_id));
 
   PlanStore::Snapshot after;
-  ASSERT_TRUE(store.Fetch(plan_id, &after))
-      << "the spec has a cancelled status, so the plan-id must still answer";
-  EXPECT_EQ(after.status, PlanStatus::kCancelled);
-  EXPECT_TRUE(after.tasks.empty());
+  ASSERT_TRUE(store.Fetch(plan_id, &after));
+  EXPECT_EQ(after.status, PlanStatus::kCompleted)
+      << "cancellation only has teeth against planning still in flight";
 
   std::vector<primeparts::scan::FileScanTask> tasks;
-  EXPECT_FALSE(store.FetchTasks(token, &tasks))
-      << "plan-task tokens die with their plan";
+  EXPECT_TRUE(store.FetchTasks(token, &tasks))
+      << "a client may cancel while still holding tokens it means to use";
+  EXPECT_EQ(tasks.size(), 2u);
+}
+
+TEST(PlanStoreTest, CancellingAFailedPlanKeepsItsError) {
+  PlanStore store;
+
+  auto plan_id = store.Submit([](primeparts::scan::ScanPlan*,
+                                 std::string* error) {
+    *error = "manifest unreadable";
+    return false;
+  });
+  ASSERT_EQ(Settle(&store, plan_id).status, PlanStatus::kFailed);
+
+  EXPECT_TRUE(store.Cancel(plan_id));
+
+  PlanStore::Snapshot after;
+  ASSERT_TRUE(store.Fetch(plan_id, &after));
+  EXPECT_EQ(after.status, PlanStatus::kFailed);
+  EXPECT_EQ(after.error, "manifest unreadable")
+      << "cancelling a failed plan must not overwrite why it failed";
 }
 
 TEST(PlanStoreTest, CancellingARunningPlanDiscardsItsResult) {

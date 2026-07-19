@@ -160,6 +160,8 @@ bool PlanStore::Cancel(const std::string& plan_id) {
   if (it == plans_.end()) return false;
 
   auto& entry = *it->second;
+  if (entry.status != PlanStatus::kSubmitted) return true;
+
   entry.cancelled.store(true);
   entry.status = PlanStatus::kCancelled;
   entry.last_access = Clock::now();

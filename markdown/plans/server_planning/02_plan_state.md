@@ -29,6 +29,13 @@ shape belongs to phase 03.
 
 ## notes
 
+Cancellation only has teeth against planning still in flight. Against a
+completed, failed or already-cancelled plan it is advisory: accepted, 204, and
+nothing torn down. The spec says cancellation is unnecessary once every plan
+task has been fetched, which implies a client may cancel while still holding
+tokens it means to use — destroying them would strand it. A failed plan keeps
+its error rather than having it overwritten.
+
 A cancelled plan-id stays answerable rather than being erased. The spec gives
 `fetchPlanningResult` a `cancelled` status, which only means something if the
 server can still answer for the id; erasing would force a 404 instead.
