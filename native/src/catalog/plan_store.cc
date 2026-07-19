@@ -7,20 +7,6 @@
 
 namespace primeparts::catalog {
 
-std::string_view PlanStatusName(PlanStatus status) {
-  switch (status) {
-    case PlanStatus::kSubmitted:
-      return "submitted";
-    case PlanStatus::kCompleted:
-      return "completed";
-    case PlanStatus::kFailed:
-      return "failed";
-    case PlanStatus::kCancelled:
-      return "cancelled";
-  }
-  return "failed";
-}
-
 PlanStore::PlanStore() : PlanStore(Config()) {}
 
 PlanStore::PlanStore(Config config)

@@ -27,6 +27,8 @@ inline constexpr char kCatalogName[] = "primeparts";
 
 iceberg::Namespace ResolveNamespace(const std::string& name);
 
+std::string NamespaceUrlPath(const iceberg::Namespace& ns);
+
 struct RestOptions {
   std::string rest_uri;
   std::string rest_name = kCatalogName;

@@ -14,13 +14,10 @@
 #include <utility>
 #include <vector>
 
+#include "primeparts/catalog/plan_status.h"
 #include "primeparts/scan/scan_plan.h"
 
 namespace primeparts::catalog {
-
-enum class PlanStatus { kSubmitted, kCompleted, kFailed, kCancelled };
-
-std::string_view PlanStatusName(PlanStatus status);
 
 class PlanStore {
  public:

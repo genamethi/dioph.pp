@@ -1,6 +1,7 @@
 #include "primeparts/catalog/partition_stats.h"
 #include "primeparts/catalog/pp_commit.h"
 #include "primeparts/catalog/pp_iceberg_rest.h"
+#include "primeparts/catalog/rest_scan_plan.h"
 #include "primeparts/common/arrow_init.h"
 #include "primeparts/query/query_service.h"
 #include "primeparts/scan/scan_planner.h"
@@ -28,7 +29,9 @@
 #include "iceberg/catalog.h"
 #include "iceberg/expression/expressions.h"
 #include "iceberg/expression/literal.h"
+#include "iceberg/manifest/manifest_entry.h"
 #include "iceberg/table_metadata.h"
+#include "iceberg/table_scan.h"
 #include "iceberg/partition_spec.h"
 #include "iceberg/row/partition_values.h"
 #include "iceberg/schema.h"
@@ -281,6 +284,48 @@ TEST_F(E2ETest, PartitionStatsPresentAfterCommit) {
   ASSERT_NE(row, nullptr) << "no partition stats row for (1, 2)";
   EXPECT_EQ(row->data_file_count, 2);
   EXPECT_EQ(row->data_record_count, 6);
+}
+
+TEST_F(E2ETest, ServerAndInProcessPlanningAgreeOnTheTaskSet) {
+  auto metadata = LoadPrimesMetadata();
+  ASSERT_NE(metadata, nullptr);
+  auto io = ppc::LocalIO();
+  primeparts::scan::ScanPlanRequest request;
+
+  primeparts::scan::ScanPlan local;
+  std::string error;
+  ASSERT_TRUE(
+      primeparts::scan::PlanTableScan(metadata, io, request, &local, &error))
+      << error;
+  ASSERT_FALSE(local.tasks.empty());
+
+  std::vector<std::shared_ptr<iceberg::FileScanTask>> remote;
+  ASSERT_TRUE(ppc::PlanScanOnServer("http://127.0.0.1:18181", ns_, "primes",
+                                    request, *metadata, ppc::PlanPollOptions{},
+                                    &remote, &error))
+      << error;
+
+  std::set<std::string> local_paths;
+  std::set<std::string> remote_paths;
+  for (const auto& task : local.tasks) {
+    local_paths.insert(task.inner->data_file()->file_path);
+  }
+  for (const auto& task : remote) {
+    remote_paths.insert(task->data_file()->file_path);
+  }
+
+  EXPECT_EQ(remote.size(), local.tasks.size());
+  EXPECT_EQ(remote_paths, local_paths)
+      << "planning the same request in-process and over REST must agree";
+}
+
+TEST_F(E2ETest, ClientSurfacesATypedServerRefusal) {
+  std::string error;
+  EXPECT_FALSE(ppc::CancelPlanning("http://127.0.0.1:18181", ns_, "primes",
+                                   "not-a-plan-id", &error));
+  EXPECT_NE(error.find("NoSuchPlanIdException"), std::string::npos)
+      << "the client must surface the server's typed error, not just a code: "
+      << error;
 }
 
 TEST_F(E2ETest, UnknownPlanIdsAndTasksAreTypedNotFounds) {
