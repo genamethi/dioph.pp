@@ -24,9 +24,13 @@ stating as much. The point is: Leave the high level stuff to the user.
 
 - `primeparts.primes`: one row per prime, `p`-ordered. $\min(p)=3$ (p=2 absent);
   no primes skipped between 3 and $\max(p)$.
-- `primeparts.partitions`: the `(m_k, n_k, q_k)` tuples; most edges are `n=1`.
+- `primeparts.partitions`: length-two integer partitions of odd `p` into prime
+  power summands — by parity a power of two plus an odd prime power. Each row's
+  `(m_k, n_k, q_k)` **characterizes** one such partition for that `p`; the tuple
+  is not itself the partition. Most edges are `n=1`.
 - `primeparts.primes_k0`: `k=0` primes; flat/unpartitioned, Iceberg format-version
-  2, merge-on-read.
+  2, merge-on-read. **No source file references this table.** It exists in the
+  warehouse or in intent only; nothing creates, reads or verifies it.
 
 ## Catalog (operating notes)
 
@@ -41,23 +45,110 @@ stating as much. The point is: Leave the high level stuff to the user.
   to `StagingDataDir` (outside the table tree), the commit moves it in on
   success. A build killed before commit can only leave `.pp-staging` debris
   (safe to `rm`).
+- Catalog authority is REST; **data reads are not**. Consumers read metadata
+  and parquet themselves. Server-side scan planning exists and is advertised,
+  but no shipped tool calls it (see below).
 - Design detail: `markdown/data_eng/irc_catalog_design.md`.
+- Open gaps live in `markdown/plans/holes_registry.md`. That file is the
+  registry; this file is the map.
 
-## Remaining work
+## Binaries and what links into them
 
-- Client access and the read seam: `../data_eng/clients_rest_gap.md`,
-  `../data_eng/catalogd_rest_gap.md`. Row-group/zone-map pruning
-  (`scan::RefineSplits`) and server-side scan planning both landed 2026-07-18.
-- Derived read indexes for fast number-theoretic reads (approach open).
-- Implement views
-- `https://raw.githubusercontent.com/apache/iceberg/refs/heads/main/format/view-spec.md`
-- `LoadAlignedResume` still derives bucket fill + per-table file seq by fs-glob;
-  replace with a read of the current snapshot's manifests.
-- Optional: a janitor for killed-run `.pp-staging` debris.
+| Binary | Entry | Notably links |
+|---|---|---|
+| `primeparts-generate` | `generate.cc` | writer, aligned_writer, schemas, pp_commit, partition_stats |
+| `primeparts-catalogd` | `pp_catalogd_main.cc` | pp_catalogd, plan_store, scan planner, lmdb store |
+| `primeparts-verify` | `verify_main.cc` | verify, source_scan, scan planner |
+| `primeparts-tui` | `tui_main.cc` | tui_*, query_service, materialize, lua_presets, source_scan |
+| `pp` | `query/pp_main.cc` | lua_query_module, query_service, materialize, source_scan |
+| `primeparts-bench-core`, `primeparts-bench-materialize` | `bench.c`, `materialize_bench.c` | core only |
+
+Consumers of scan plans are `source_scan.cc` (the generic reader) and
+`query_service.cc`. Both plan **in-process** from metadata they read off disk.
+
+## Not wired to anything
+
+Start here when deciding what is alive.
+
+- `catalog/rest_scan_plan.{h,cc}` — the four client planning calls and
+  `PlanScanOnServer`. Linked only into the e2e test; **no shipped binary calls
+  it**. Either a consumer adopts it or it is speculative surface.
+- `common/thread_pool.h` — sized Arrow's pools for multithreaded scan tools.
+  Only `verify.cc` includes it. Its comment names `covering-sieve` and
+  `primitive-factors`, neither of which is a binary in this repo. Retire the
+  header or retire the comment.
+- `primeparts.primes_k0` — see Tables.
+- `include/primeparts/generate.h` — included only by `generate.cc`. A private
+  header for one TU; nothing calls into generate as a library. The TUI drives it
+  by fork/exec of the binary (`tui_generate.cc`), not by linking.
+
+Nothing else in `src/` or `include/` is unreferenced. The tree is smaller than
+it looks — most of what appears redundant is a real seam.
+
+Three doc pairs are byte-identical duplicates; which copy is canonical is
+undecided:
+
+- `arch/tui_app_design.md` = `tui/tui_app_design.md`
+- `arch/tui_query_design.md` = `tui/tui_query_design.md`
+- `arch/lua_query_api.md` = `api/lua_query_api.md`
+
+## Configuration loose ends
+
+- **Two disjoint config surfaces.** `config::Load` (`config.{h,cc}`) reads
+  `config.lua`'s `config({...})` into a flat `map<string,string>`; `generate`
+  consumes exactly three keys — `rest_uri`, `namespace`, `warehouse`. The TUI
+  keeps its own six-field `App::cfg` (log limit, gen threads, default limit,
+  log format, autosave, warehouse). Only `warehouse` overlaps. Neither surface
+  knows about the other's keys.
+- **The warehouse default is hardcoded in five places**
+  (`generate.cc`, `pp_catalogd_main.cc`, `pp_main.cc`, `verify_main.cc`,
+  `tui_main.cc`), all pointing at `/media/extssd/research/dioph.pp/data...`.
+  On a machine without that mount every tool fails the same way and the
+  systemd unit crash-loops.
+- **Table definitions are C++, not config.** `schemas.cc` holds `PrimesSchema`,
+  `PartitionsSchema`, `BucketPartitionSpec`, `AscendingSortOrder`. Adding a
+  table means editing and rebuilding.
+- **Traits are read from table metadata, not declared.** `TableReadTraits::
+  FromMetadata` (`scan/table_traits.cc`) derives sort keys from the table's
+  sort order, and resolves identity transforms only. So a table's read
+  behaviour follows what was committed, which is why the declaration gap below
+  bites.
+
+## Directions
+
+Roughly in dependency order. Each is a starting point, not a spec.
+
+1. **Declare sort order on the existing tables.** Decided REST-only. Until this
+   lands, every order-requiring path — `ScanByK`, windowed histogram, `verify`
+   on primes, the Extent frontier — errors on the live tables. This is the
+   single biggest blocker to the tools being usable against real data. The
+   domain precondition (refuse if primary-key bounds are missing on any
+   committed file) has no spec counterpart and still needs a home.
+2. **Bring `generate` to workable.** `LoadAlignedResume` still derives bucket
+   fill and per-table file sequence by filesystem glob; replace with a read of
+   the current snapshot's manifests. `ShapePolicy` is uniform across tables, so
+   primes and the 1.884B-row partitions table share one file/row-group sizing.
+3. **Decide whether consumers plan server-side.** `rest_scan_plan` exists and
+   works; nothing calls it. Either wire `source_scan` / `query_service` to it —
+   which also decides where mode dispatch lives — or accept that in-process
+   planning is the real path and the REST client is for foreign consumers.
+   This choice determines whether metadata can move off the consumer's machine.
+4. **Settle configuration.** One surface, one warehouse default, and a decision
+   on whether tables are declarable outside C++.
+5. **Lifecycle.** Snapshot expiry is unwired, orphaned files from failed
+   transactions are unreachable, rollback has no surface. All three are small
+   against APIs that already exist.
+6. **Derived read indexes** for fast number-theoretic reads (approach open).
+7. **Views** — `https://raw.githubusercontent.com/apache/iceberg/refs/heads/main/format/view-spec.md`
+8. Optional: a janitor for killed-run `.pp-staging` debris.
 
 ## Terminology
 
-- Call the `(m_k, n_k, q_k)` tuples **"partitions"** in prose.
+- The objects are **integer partitions** — specifically length-two partitions of
+  an odd prime into prime-power summands. One sum is one partition; the whole
+  set for a given `p` is also called a partition, or a restricted partition. A
+  `(m_k, n_k, q_k)` tuple *characterizes* a partition; do not write that it *is*
+  one. Never "decomposition".
 - **`prime_rank`** = the prime-counting function $\pi(p)$ (library-agnostic).
 - **"Snap"** = physically re-sort on-disk data to match a declared `sort_order`;
   sort violations get fixed by re-snapping, not by relaxing the check.

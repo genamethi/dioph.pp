@@ -19,7 +19,7 @@ Two queries, priority-ordered by the user:
 1. **k-scan with LIMIT** (wanted now): "show up to N primes where `k == K`",
    optionally within a `[p_lo, p_hi]` window. Near-instant.
 2. **Point lookup by p**: "given prime `p`, show its `k` and its
-   `(m_k, n_k, q_k)` partitions." ~1.7 s on the current layout.
+   `(m_k, n_k, q_k)` tuples characterizing its partitions." ~1.7 s on the current layout.
 3. **Range count** (free add-on): total + k=0 count in `[p_lo, p_hi]`.
 
 Non-goals (now): joins beyond p-keyed cross-table reads, mutation, the Lua
