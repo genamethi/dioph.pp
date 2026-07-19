@@ -177,6 +177,25 @@ The plan path is closed (`DecodeIntegerBound` deleted, `Literal` key window,
 - lua query module, lua presets, and `pp_lmdb_store` have no direct test
   coverage; exercised only indirectly — filed-by testing_overhaul 03 — owner: unassigned
 
+## known-red tests (expected; do not "fix" without closing the hole)
+
+As of 2026-07-18: unit 27 passing / 3 red, e2e 11 passing / 1 red. Every red is
+deliberate — a test written to assert correct behavior that is not yet
+implemented, so it goes green when its hole closes.
+
+| test | hole |
+|---|---|
+| `WriterStatColumns.StringStatColumnCapturesBounds` | type narrowing — `writer.cc` stat bounds |
+| `PartitionStatsTest.BucketTransformResolves` | transform coverage — `partition_stats` identity-only guard |
+| `PartitionStatsTest.TruncateTransformResolves` | transform coverage — same guard |
+| `E2ETest.FullTableReadSynthesizesIdentityColumns` | read-path — identity-partition synthesis |
+
+Fixture hitch: the e2e `primes` table is deliberately **unsorted**, and that is
+load-bearing for `ScanByKErrorsWithoutSortOrder` and
+`WindowedGroupCountErrorsWithoutSortOrder`. Anything needing a sorted table
+(key-window derivation, task ordering) must be unit-tested against hand-built
+metadata rather than by giving the fixture a sort order.
+
 ## groups at a glance
 
 | group | hard | priority |
