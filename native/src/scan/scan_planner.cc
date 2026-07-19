@@ -529,24 +529,47 @@ bool PlanTableScan(const std::shared_ptr<iceberg::TableMetadata>& metadata,
   }
 
   int64_t guaranteed_rows = 0;
-  const auto min_rows_met = [&]() {
-    return request.min_rows_requested.has_value() &&
-           guaranteed_rows >= *request.min_rows_requested;
-  };
 
   out->tasks.reserve(tasks.size());
   for (auto& task : tasks) {
     const bool trivial = TrivialResidual(task->residual_filter());
     const bool has_deletes = !task->delete_files().empty();
-    if (trivial || has_deletes) {
-      FileScanTask planned;
-      planned.planned_rows =
-          static_cast<int64_t>(task->data_file()->record_count);
-      planned.inner = std::move(task);
-      out->planned_rows += planned.planned_rows;
-      if (trivial && !has_deletes) guaranteed_rows += planned.planned_rows;
-      out->tasks.push_back(std::move(planned));
-      if (min_rows_met()) break;
+    FileScanTask planned;
+    planned.planned_rows =
+        static_cast<int64_t>(task->data_file()->record_count);
+    planned.inner = std::move(task);
+    out->planned_rows += planned.planned_rows;
+    if (trivial && !has_deletes) guaranteed_rows += planned.planned_rows;
+    out->tasks.push_back(std::move(planned));
+    if (request.min_rows_requested.has_value() &&
+        guaranteed_rows >= *request.min_rows_requested) {
+      break;
+    }
+  }
+  return true;
+}
+
+bool RefineSplits(ScanPlan* plan, const std::shared_ptr<iceberg::FileIO>& io,
+                  bool case_sensitive, std::string* error) {
+  if (plan == nullptr) {
+    if (error) *error = "RefineSplits: plan is null";
+    return false;
+  }
+  if (!plan->table_schema) {
+    if (error) *error = "RefineSplits: plan has no table schema";
+    return false;
+  }
+
+  std::vector<FileScanTask> refined;
+  refined.reserve(plan->tasks.size());
+  int64_t planned_rows = 0;
+
+  for (auto& planned : plan->tasks) {
+    const auto task = planned.inner;
+    if (TrivialResidual(task->residual_filter()) ||
+        !task->delete_files().empty()) {
+      planned_rows += planned.planned_rows;
+      refined.push_back(std::move(planned));
       continue;
     }
     const auto& df = task->data_file();
@@ -554,27 +577,27 @@ bool PlanTableScan(const std::shared_ptr<iceberg::TableMetadata>& metadata,
     bool all_kept = false;
     if (!SelectSplits(df->file_path,
                       static_cast<int64_t>(df->file_size_in_bytes), io,
-                      *table_schema, task->residual_filter(),
-                      request.case_sensitive, &selected, &all_kept, error)) {
+                      *plan->table_schema, task->residual_filter(),
+                      case_sensitive, &selected, &all_kept, error)) {
       return false;
     }
     if (all_kept) {
-      FileScanTask planned;
-      planned.planned_rows = static_cast<int64_t>(df->record_count);
-      planned.inner = std::move(task);
-      out->planned_rows += planned.planned_rows;
-      out->tasks.push_back(std::move(planned));
+      planned_rows += planned.planned_rows;
+      refined.push_back(std::move(planned));
       continue;
     }
     for (auto& sel : selected) {
-      FileScanTask planned;
-      planned.inner = task;
-      planned.split = sel.split;
-      planned.planned_rows = sel.planned_rows;
-      out->planned_rows += sel.planned_rows;
-      out->tasks.push_back(std::move(planned));
+      FileScanTask split_task;
+      split_task.inner = task;
+      split_task.split = sel.split;
+      split_task.planned_rows = sel.planned_rows;
+      planned_rows += sel.planned_rows;
+      refined.push_back(std::move(split_task));
     }
   }
+
+  plan->tasks = std::move(refined);
+  plan->planned_rows = planned_rows;
   return true;
 }
 

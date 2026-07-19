@@ -321,6 +321,9 @@ std::unique_ptr<SourceTableReader> OpenFromMetadata(
   if (!scan::PlanTableScan(metadata, io, request, &plan, error)) {
     return nullptr;
   }
+  if (!scan::RefineSplits(&plan, io, request.case_sensitive, error)) {
+    return nullptr;
+  }
 
   auto reader = SourceTableReader::Open(std::move(plan), io, error, shard_index,
                                         shard_count);

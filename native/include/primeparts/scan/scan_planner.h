@@ -23,6 +23,9 @@ bool PlanTableScan(const std::shared_ptr<iceberg::TableMetadata>& metadata,
                    const ScanPlanRequest& request, ScanPlan* out,
                    std::string* error);
 
+bool RefineSplits(ScanPlan* plan, const std::shared_ptr<iceberg::FileIO>& io,
+                  bool case_sensitive, std::string* error);
+
 struct SplitSelection {
   iceberg::Split split;
   int64_t planned_rows = 0;

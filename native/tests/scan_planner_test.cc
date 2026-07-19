@@ -380,6 +380,80 @@ TEST(KeyWindow, DoesNotFoldAnOutOfRangeLiteral) {
       << "a literal that saturates to AboveMax is not a usable window bound";
 }
 
+primeparts::scan::ScanPlan PlanWithOneTask(
+    const std::string& path, int64_t file_length, int64_t record_count,
+    const std::shared_ptr<iceberg::Expression>& residual,
+    const std::shared_ptr<iceberg::Schema>& schema) {
+  auto df = std::make_shared<iceberg::DataFile>();
+  df->file_path = path;
+  df->file_size_in_bytes = file_length;
+  df->record_count = record_count;
+
+  primeparts::scan::FileScanTask task;
+  task.inner = std::make_shared<iceberg::FileScanTask>(
+      std::move(df), std::vector<std::shared_ptr<iceberg::DataFile>>{},
+      residual);
+  task.planned_rows = record_count;
+
+  primeparts::scan::ScanPlan plan;
+  plan.table_schema = schema;
+  plan.planned_rows = record_count;
+  plan.tasks.push_back(std::move(task));
+  return plan;
+}
+
+TEST_F(ScanPlannerTest, RefineSplitsNarrowsANonTrivialTaskToItsRowGroups) {
+  auto residual = iceberg::Expressions::And(
+      iceberg::Expressions::GreaterThanOrEqual("p", iceberg::Literal::Long(250)),
+      iceberg::Expressions::LessThanOrEqual("p", iceberg::Literal::Long(260)));
+  auto plan = PlanWithOneTask(path_, file_length_, 1000, residual, schema_);
+
+  std::string error;
+  ASSERT_TRUE(primeparts::scan::RefineSplits(&plan, io_, true, &error)) << error;
+
+  ASSERT_EQ(plan.tasks.size(), 1u);
+  EXPECT_TRUE(plan.tasks[0].split.has_value())
+      << "refinement is what selects a split; planning leaves it unset";
+  EXPECT_EQ(plan.tasks[0].planned_rows, 100);
+  EXPECT_EQ(plan.planned_rows, 100)
+      << "the plan total narrows from record_count to the kept row groups";
+}
+
+TEST_F(ScanPlannerTest, RefineSplitsLeavesATrivialTaskUnopened) {
+  auto plan = PlanWithOneTask("/nonexistent/never-opened.parquet", 4096, 1000,
+                              nullptr, schema_);
+
+  std::string error;
+  ASSERT_TRUE(primeparts::scan::RefineSplits(&plan, io_, true, &error))
+      << "a trivial residual needs no row-group pruning, so no file is opened: "
+      << error;
+
+  ASSERT_EQ(plan.tasks.size(), 1u);
+  EXPECT_FALSE(plan.tasks[0].split.has_value());
+  EXPECT_EQ(plan.planned_rows, 1000);
+}
+
+TEST_F(ScanPlannerTest, RefineSplitsOwnsTheOnlyDataLayerRead) {
+  auto residual =
+      iceberg::Expressions::Equal("k", iceberg::Literal::Int(1));
+  auto plan = PlanWithOneTask("/nonexistent/opened-here.parquet", 4096, 1000,
+                              residual, schema_);
+
+  std::string error;
+  EXPECT_FALSE(primeparts::scan::RefineSplits(&plan, io_, true, &error));
+  EXPECT_NE(error.find("opened-here.parquet"), std::string::npos)
+      << "the data file is reached from RefineSplits and nowhere else: "
+      << error;
+}
+
+TEST_F(ScanPlannerTest, RefineSplitsNeedsATableSchema) {
+  primeparts::scan::ScanPlan plan;
+  std::string error;
+
+  EXPECT_FALSE(primeparts::scan::RefineSplits(&plan, io_, true, &error));
+  EXPECT_NE(error.find("table schema"), std::string::npos) << error;
+}
+
 TEST_F(ScanPlannerTest, RefusesBranchSchemaWhenSnapshotSchemaDiffers) {
   auto meta = MetadataWithSnapshotSchema(0, 1);
   primeparts::scan::ScanPlanRequest request;
