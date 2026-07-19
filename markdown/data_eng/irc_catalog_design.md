@@ -20,19 +20,31 @@ flowchart TD
       gen[generate]
       rew["rewrite / clone / row-delta<br/>(not built)"]
     end
+    subgraph consumers["consumers"]
+      qe["query engine / scan consumers<br/>(largely unwritten)"]
+    end
     tools -->|"the one REST client<br/>(pp_iceberg_rest)"| wire
+    consumers -->|"the same client<br/>(rest_scan_plan)"| wire
     wire["HTTP — IRC /v1 routes"] --> server
     subgraph server["pp-catalogd — native IRC server"]
       router["cpp-httplib router"]
       engine["iceberg::sql::SqlCatalog<br/>(store-agnostic)"]
+      plan["PlanStore + metadata-layer planner"]
       router --> engine
+      router --> plan
     end
     engine -->|"CatalogStore seam"| lmdb[("LMDB<br/>catalog txns")]
-    engine -->|"FileIO"| fs[("warehouse storage<br/>metadata.json + Parquet")]
+    engine -->|"FileIO"| meta[("catalog + metadata<br/>metadata.json, manifests")]
+    plan -->|"FileIO — metadata only"| meta
+    consumers -.->|"data reads never cross the server"| data[("data<br/>Parquet")]
 ```
 
 The metadata engine (apply `TableUpdate`s, write `metadata.json`, CAS commit)
 lives in `SqlCatalog`; the server is a thin JSON↔Catalog adapter.
+
+The dashed edge is the load-bearing one: the server reads metadata and
+manifests, never Parquet. Data reads go consumer→storage directly, so the data
+may live on a different machine from the catalog and metadata.
 
 ## Components
 
@@ -93,6 +105,9 @@ available by config swap if DB-level interop is ever wanted.
 `SqlCatalog(LmdbStore)` (`MakeLocalCatalogWithStore`). Route status:
 `catalogd_rest_gap.md`.
 
+Flags: `--warehouse`, `--host`, `--port`, plus the planning knobs
+`--scan-planning-mode server|client`, `--plan-batch N` and `--plan-ttl N`.
+
 Server-side JSON reuses iceberg-cpp's exported internal serde
 (`json_serde_internal.h`) for both directions (`CreateTableRequest`,
 `CommitTableRequest` {`requirements`+`updates`}, `RegisterTableRequest`,
@@ -102,6 +117,22 @@ the archives' ABI (3.11.3, pinned by configure). Deletion-vector forward-
 compatible: DV/Puffin specifics ride inside `add-snapshot` updates, no server
 change (that work is writer-side).
 
+### Scan planning
+
+catalogd serves the spec's four planning routes and advertises
+`scan-planning-mode: server`. Two properties define the split of labor:
+
+- **The server plans to the metadata layer only.** It walks manifests and prunes
+  on `DataFile` statistics; it never opens a parquet file. Row-group selection
+  (`scan::RefineSplits`) is the data layer and stays with whoever reads the data.
+- **Held state, not a synchronous answer.** `PlanStore` keys plans by opaque
+  plan-id; `planTableScan` returns `submitted` and the client polls
+  `fetchPlanningResult`, paging any overflow through `fetchScanTasks`.
+
+The practical consequence is topological: catalogd needs no FileIO reach to
+wherever the parquet lives, so catalog and metadata may sit on one machine and
+the data on another. Detail: `catalogd_rest_gap.md`.
+
 ### Client
 
 `pp_iceberg_rest`'s `MakeCatalog` RestCatalog branch and the generic helpers
@@ -109,6 +140,14 @@ change (that work is writer-side).
 work against any `iceberg::Catalog`. `MakeLocalCatalogWithStore` builds
 `SqlCatalog(LmdbStore)` and surfaces both the catalog and the store handle (the
 store is needed for `RunInTransaction`).
+
+Vendored `RestCatalog` has the four planning `Endpoint::` constants but no
+methods for them, so `rest_scan_plan.{h,cc}` supplies the calls —
+`SubmitTableScan`, `FetchPlanningResult`, `CancelPlanning`, `FetchScanTasks` —
+plus `PlanScanOnServer`, which drives the whole lifecycle. It takes our own
+`scan::ScanPlanRequest` and returns `iceberg::FileScanTask`, so a consumer
+builds one request whether planning runs on the server or in-process, and no
+vendored-internal type appears in our headers.
 
 ## Write & commit model
 
@@ -183,3 +222,13 @@ submodules under `native/vendor/`, built rootless into `$HOME/.local`:
 commit → reload-scan → dropTable), `primeparts-commit-smoke` (two-table atomic
 commit + rollback on a tampered requirement), `primeparts-generate-smoke`
 (`generate` commit + resume through the daemon).
+
+`make test` is the unit suite (`primeparts-tests`), including `PlanStoreTest`
+for the plan-id lifecycle and `ScanPlannerTest` for the metadata/data boundary.
+`make e2e` forks a real catalogd on :18181 and drives it, covering the full
+planning lifecycle, plan-task paging, the advertised planning mode, and the
+agreement between server-side and in-process planning.
+
+Four tests are **deliberately red**, each pinning an open hole rather than a
+regression; they are inventoried in `../plans/holes_registry.md`. Do not "fix"
+them without closing the hole behind them.

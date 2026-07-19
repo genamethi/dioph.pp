@@ -45,14 +45,12 @@ stating as much. The point is: Leave the high level stuff to the user.
 
 ## Remaining work
 
-- Client access, the row-group/zone-map pruning gap (client-side, not
-  iceberg-cpp blocked), and the server-side planner model (catalogd invokes a
-  planner module, returns the plan as if the catalog produced it):
-  `../data_eng/clients_rest_gap.md`, `../data_eng/catalogd_rest_gap.md`.
+- Client access and the read seam: `../data_eng/clients_rest_gap.md`,
+  `../data_eng/catalogd_rest_gap.md`. Row-group/zone-map pruning
+  (`scan::RefineSplits`) and server-side scan planning both landed 2026-07-18.
 - Derived read indexes for fast number-theoretic reads (approach open).
 - Implement views
 - `https://raw.githubusercontent.com/apache/iceberg/refs/heads/main/format/view-spec.md`
-- Server-side scan planning (`planTableScan`/`fetchScanTasks`).
 - `LoadAlignedResume` still derives bucket fill + per-table file seq by fs-glob;
   replace with a read of the current snapshot's manifests.
 - Optional: a janitor for killed-run `.pp-staging` debris.

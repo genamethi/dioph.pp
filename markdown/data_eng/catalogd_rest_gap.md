@@ -24,10 +24,10 @@ returns no prefix). HEAD existence checks are served by the GET handlers
 | updateProperties | `POST .../{ns}/properties` | yaml:460 | done |
 | listTables | `GET .../{ns}/tables` | yaml:525 | done; no pagination |
 | createTable | `POST .../{ns}/tables` | yaml:525 | done; no `stage-create` |
-| planTableScan | `POST .../tables/{t}/plan` | yaml:707 | not implemented; 406 (listed) |
-| fetchPlanningResult | `GET .../plan/{plan-id}` | yaml:796 | not implemented; 404 NoSuchPlanIdException |
-| cancelPlanning | `DELETE .../plan/{plan-id}` | yaml:796 | not implemented; 404 NoSuchPlanIdException |
-| fetchScanTasks | `POST .../tables/{t}/tasks` | yaml:919 | not implemented; 404 NoSuchPlanTaskException |
+| planTableScan | `POST .../tables/{t}/plan` | yaml:707 | done; always answers 200 `submitted` |
+| fetchPlanningResult | `GET .../plan/{plan-id}` | yaml:796 | done; 404 NoSuchPlanIdException when unknown |
+| cancelPlanning | `DELETE .../plan/{plan-id}` | yaml:796 | done; 204, or 404 NoSuchPlanIdException |
+| fetchScanTasks | `POST .../tables/{t}/tasks` | yaml:919 | done; 404 NoSuchPlanTaskException when unknown |
 | registerTable | `POST .../{ns}/register` | yaml:971 | done |
 | loadTable | `GET .../tables/{t}` | yaml:1027 | done; no `?snapshots=`, no ETag |
 | updateTable | `POST .../tables/{t}` | yaml:1027 | done |
@@ -69,28 +69,64 @@ in a single LMDB write txn (atomic-or-abort). The client
 (`CommitFilesAtomic`, `pp_commit.{h,cc}`) writes all parquet + manifests and
 assembles the request; the server only validates requirements and does the CAS.
 
-## Scan planning (server-side model, 2026-07-09)
+## Scan planning
 
-`planTableScan`/`fetchScanTasks` are unimplemented; `loadTable` advertises
-`scan-planning-mode: client` and clients plan for themselves (see
-`clients_rest_gap.md`). Target model when they land:
+Implemented 2026-07-18. `loadTable` advertises `scan-planning-mode: server`
+(configurable, see below) and the client reads it.
 
-- catalogd implements the **catalog API surface** only. It does not contain the
-  planner. On `planTableScan` it **invokes** a planner module (a specialized
-  consumer — separate logic/binary) and holds the request until a plan is formed,
-  then returns `FileScanTask`s. To the client the plan appears to come from the
-  catalog; the planner is never a party the client addresses.
-- A `FileScanTask` is the plan atom: `{ data-file, delete-files, residual,
-  row-group ranges }`. The same atom the client builds locally today; server-side
-  planning just moves its production behind the API and flips `scan-planning-mode`
-  to `server`, letting clients drop manifest walking + path parsing.
-- Residual → row-group selection (zone-map pruning) is the core of the plan and
-  is **not** iceberg-cpp-blocked — it composes parquet/arrow primitives. Built as
-  the API-shaped scan-plan atom, one implementation serves client-side planning
-  now and server-side `planTableScan` later. Detail: `clients_rest_gap.md`.
+**The server plans to the metadata layer only.** catalogd owns the catalog and
+metadata layers; the data layer is not its purview. `scan::PlanTableScan` walks
+manifests, prunes on `DataFile` statistics, orders by bound and estimates rows
+from `record_count` — it never opens a parquet file. The one data-layer step,
+`scan::RefineSplits`, selects row groups and is called only by in-process
+consumers. So catalogd needs no FileIO reach to wherever the data lives, and
+catalog/metadata and data may sit on different machines.
+
+**Wire shape is spec-only.** A `FileScanTask` on the wire is
+`{ data-file, delete-file-references, residual-filter }` — the spec has no field
+for a selected row-group split, so none is invented. A consumer re-derives
+splits from the data file's `split-offsets` plus the residual, which is why the
+plan-level residual is kept complete. Responses are built as vendored
+`iceberg::rest` types and serialized by the vendored serde, which derives
+`delete-files` and the reference indices itself; each is run through its
+`Validate()` before serializing.
+
+**Held state.** `PlanStore` (`catalog/plan_store.{h,cc}`) keys plans by opaque
+random plan-id across the spec's four statuses. Planning runs on a worker
+thread, so `planTableScan` always answers `submitted` rather than racing to
+`completed` — the same request would otherwise return different shapes run to
+run. Tasks beyond `--plan-batch` become plan-task tokens for `fetchScanTasks`.
+Fetches are non-destructive; tokens die with their plan.
+
+Cancellation has teeth only against planning still in flight. Against a
+finished plan it is advisory, because the spec says cancellation is unnecessary
+once every plan task has been fetched — a client may cancel while still holding
+tokens it means to use. A cancelled plan-id stays answerable, since the spec's
+`cancelled` status requires it. `PlanFn` has no cancellation point, so a
+running plan runs to completion and its result is discarded at publish time.
+
+Expiry sweeps at the top of each of the four handlers rather than on a timer,
+so an idle server holds its last plans until traffic resumes.
+
+Note this diverges from the 2026-07-09 target model recorded here previously,
+which had catalogd invoking a *separate* planner binary. catalogd links the
+planner module directly. The seam that mattered — the client never addresses
+the planner — holds either way.
+
+Flags: `--scan-planning-mode server|client`, `--plan-batch N`,
+`--plan-ttl N`. The e2e fixture runs with `--plan-batch 1` so the plan-task
+paging path is exercised rather than skipped.
 
 ## Not implemented
 - **Views.** `QueryService::Materialize`'s MV cache (replace-semantics
   `primeparts.<name>` tables) covers the current need.
 - **`stage-create`, pagination, `?snapshots=`, ETag/If-None-Match, `{prefix}`,
   functions, real metrics sink, `unregisterTable`.**
+- **`storage-credentials`** on completed planning results. The spec allows a
+  server to hand back credentials for reading the returned files; vendored
+  `PlanTableScanResponse` carries a TODO where the field would go
+  (`catalog/rest/types.h:341`). Only reachable where the data layer needs
+  credentials the consumer does not already hold.
+
+Each of these is tracked in `../plans/holes_registry.md`, which is the living
+record; this doc describes the route surface as it stands.

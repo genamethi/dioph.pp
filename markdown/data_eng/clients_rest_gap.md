@@ -31,9 +31,11 @@ pointer → client reads manifests + Parquet from storage → Arrow batches → 
 catalogd is the path; the in-process LMDB catalog is a **deprecated** fallback (do
 not rely on it).
 
-Catalog authority is REST end to end. Manifest read + file selection (planning) and
-data reads are client→storage, per the standard IRC client model when
-`scan-planning-mode: client`.
+Catalog authority is REST end to end. Since 2026-07-18 catalogd advertises
+`scan-planning-mode: server` and serves the four planning routes, so a client
+may have the plan produced for it (`rest_scan_plan.{h,cc}`) or plan in-process
+from metadata it reads itself. Data reads are always client→storage: the server
+plans to the metadata layer only and never opens a parquet file.
 
 ## Read seam
 
@@ -55,26 +57,24 @@ expose an Arrow batch stream. `cols` + `filter` are the IRC `PlanTableScanReques
 | File pruning (partition + manifest `p` bounds) | done (server-planned `PlanFiles`) |
 | Incremental append scan | done (`OpenIncremental`) |
 | MOR position-delete awareness | done (via `FileScanTaskReader`) |
-| Row-group / page pruning (zone map on `p`) | **not done** — see below |
-| Server-side planning (`planTableScan`) | not done — `catalogd_rest_gap.md` |
+| Row-group / page pruning (zone map on `p`) | done (`scan::RefineSplits`) |
+| Server-side planning (`planTableScan`) | done — `catalogd_rest_gap.md` |
+| Planning dispatch on the advertised mode | not done — each consumer chooses |
 
-**Row-group pruning.** A `p`-window prunes only to overlapping files today; the whole
-file is decoded. The vendored high-level `FileScanTaskReader` receives the residual
-but does not apply it (`parquet_reader.cc` builds `row_group_indices` from split
-offsets only; zone-map is its own TODO). This is **not** iceberg-cpp-blocked: the fix
-is client-side, composing lower-level primitives —
+**Row-group pruning** is `scan::SelectSplits`, driven by `scan::RefineSplits`:
+`InclusiveMetricsEvaluator` over the residual against each row group's parquet
+statistics, keeping the overlapping groups as `iceberg::Split`s. The vendored
+high-level `FileScanTaskReader` still does not apply the residual itself
+(`parquet_reader.cc` builds `row_group_indices` from split offsets only), which
+is why selection happens here and is handed down as a split.
 
-- `parquet-cpp`: footer `RowGroup(i)->ColumnChunk(p)->statistics()` min/max vs the
-  residual → `parquet::arrow::FileReader::GetRecordBatchReader({kept}, {cols})`; or
-- `arrow::dataset`: hand it the file + a `p` filter — it prunes row groups by
-  statistics itself.
+Because both base tables are p-sorted, a narrow window collapses to 1-2 row
+groups.
 
-Since both base tables are p-sorted, a narrow window collapses to 1–2 row groups.
-Build it as the API-shaped scan-plan atom (residual → `FileScanTask{ file,
-row-group ranges, residual }`), not a consumer-local read: one implementation then
-serves client-side planning now and server-side `planTableScan` later. Delete
-awareness and field-id mapping are sibling capabilities of the same scan-execution
-abstraction, composed — not a reason to fork a parallel reader.
+This is the one **data-layer** step in planning, and it is deliberately not on
+the server path: the wire has no field for a selected split, and the server does
+not open data files. A consumer of a server-produced plan re-derives it from the
+data file's `split-offsets` and the complete residual.
 
 ## Client / consumer separation
 
@@ -90,13 +90,30 @@ the write path (`generate.cc`):
 `Eval` is a pure leaf: no catalog, no I/O, no planning; it computes over
 catalog-sourced buffers only.
 
-## Open question — is client-side planning in the spirit of the API?
+## Planning: server-side or in-process
 
-Stance (2026-07-09): no. "Local" file selection is not planning in the API sense
-while there is no planner. Real planning is server-side `planTableScan`, which
-catalogd fulfills by **invoking** a planner module and returning the plan as if the
-catalog produced it (`catalogd_rest_gap.md`). Client-side planning is transitional;
-keeping the plan atom API-shaped makes the lift mechanical.
+Resolved 2026-07-18. Server-side `planTableScan` exists and is advertised, so the
+2026-07-09 stance — that local file selection was transitional until a planner
+existed — no longer describes the code. Keeping the plan atom API-shaped did make
+the lift mechanical, as predicted.
+
+Both paths are live and take the **same request type**:
+
+| Path | Call | Notes |
+|---|---|---|
+| server | `PlanScanOnServer` (`catalog/rest_scan_plan.h`) | submit → poll → page every plan-task |
+| in-process | `scan::PlanTableScan` + `scan::RefineSplits` | needs metadata and FileIO locally |
+
+`ScanPlanRequest` is the input either way, so a consumer builds one request and
+chooses. `FetchScanPlanningMode` reads the server's advertisement, but **nothing
+dispatches on it automatically** — that choice is each consumer's, and a single
+entry point that reads the mode and routes would couple this client to the
+in-process planner. Filed as a hole.
+
+In-process consumers (`source_scan.cc`, `query_service.cc`) read metadata off
+disk and never consult the advertisement. That is coherent only while metadata is
+local to the consumer; a deployment that moves metadata server-side puts them on
+the REST path.
 
 ## The scan plan a consumer receives
 
