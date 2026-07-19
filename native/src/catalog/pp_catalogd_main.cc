@@ -1,12 +1,3 @@
-// pp-catalogd — native Iceberg REST Catalog (IRC) HTTP server entry point.
-//
-// Serves the local catalog of record (SqlCatalog over LMDB) over IRC /v1 routes
-// so any IRC client (the iceberg-cpp RestCatalog, pyiceberg, Spark, Trino) can
-// drive it. See primeparts/catalog/pp_catalogd.h.
-//
-// Usage:
-//   pp-catalogd [--warehouse DIR] [--host H] [--port N]
-
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -23,7 +14,9 @@ void Usage() {
     "pp-catalogd — native Iceberg REST Catalog server\n\n"
     "  --warehouse DIR   warehouse root holding catalog.lmdb (default: %s)\n"
     "  --host H          bind address (default: 127.0.0.1)\n"
-    "  --port N          bind port (default: 8181)\n",
+    "  --port N          bind port (default: 8181)\n"
+    "  --plan-batch N    file scan tasks per planning batch (default: 64)\n"
+    "  --plan-ttl N      seconds an idle plan-id is retained (default: 300)\n",
     kDefaultWarehouse);
 }
 
@@ -45,6 +38,11 @@ int main(int argc, char** argv) {
     if (f == "--warehouse") opts.warehouse = next("--warehouse");
     else if (f == "--host") opts.host = next("--host");
     else if (f == "--port") opts.port = std::atoi(next("--port").c_str());
+    else if (f == "--plan-batch")
+      opts.plan_batch_tasks = static_cast<size_t>(
+          std::strtoul(next("--plan-batch").c_str(), nullptr, 10));
+    else if (f == "--plan-ttl")
+      opts.plan_ttl_seconds = std::atoi(next("--plan-ttl").c_str());
     else if (f == "-h" || f == "--help") { Usage(); return 0; }
     else { std::fprintf(stderr, "pp-catalogd: unknown flag '%s'\n", f.c_str()); Usage(); return 2; }
   }

@@ -183,7 +183,7 @@ class E2ETest : public ::testing::Test {
     ASSERT_GE(pid_, 0);
     if (pid_ == 0) {
       execl(bin.c_str(), bin.c_str(), "--warehouse", warehouse_.c_str(),
-            "--port", "18181", "--host", "127.0.0.1",
+            "--port", "18181", "--host", "127.0.0.1", "--plan-batch", "1",
             static_cast<char*>(nullptr));
       _exit(127);
     }
@@ -283,38 +283,104 @@ TEST_F(E2ETest, PartitionStatsPresentAfterCommit) {
   EXPECT_EQ(row->data_record_count, 6);
 }
 
-TEST_F(E2ETest, PlanRoutesMatchSpecStatuses) {
+TEST_F(E2ETest, UnknownPlanIdsAndTasksAreTypedNotFounds) {
   auto cli = Client();
-  const char* body = "{}";
   const std::string base = "/v1/namespaces/primeparts/tables/primes";
 
-  struct Route {
-    std::string method;
-    std::string path;
-    int status;
-    std::string type;
-  };
-  const std::vector<Route> routes = {
-      {"POST", base + "/plan", 406, "UnsupportedOperationException"},
-      {"GET", base + "/plan/some-plan-id", 404, "NoSuchPlanIdException"},
-      {"DELETE", base + "/plan/some-plan-id", 404, "NoSuchPlanIdException"},
-      {"POST", base + "/tasks", 404, "NoSuchPlanTaskException"},
-  };
+  auto fetch = cli.Get(base + "/plan/some-plan-id");
+  ASSERT_TRUE(fetch);
+  EXPECT_EQ(fetch->status, 404);
+  EXPECT_NE(fetch->body.find("NoSuchPlanIdException"), std::string::npos)
+      << fetch->body;
 
-  for (const auto& r : routes) {
-    httplib::Result res;
-    if (r.method == "POST") {
-      res = cli.Post(r.path, body, "application/json");
-    } else if (r.method == "GET") {
-      res = cli.Get(r.path);
-    } else {
-      res = cli.Delete(r.path);
-    }
-    ASSERT_TRUE(res) << r.method << " " << r.path << " no response";
-    EXPECT_EQ(res->status, r.status) << r.method << " " << r.path;
-    EXPECT_NE(res->body.find(r.type), std::string::npos)
-        << r.method << " " << r.path << ": " << res->body;
+  auto cancel = cli.Delete(base + "/plan/some-plan-id");
+  ASSERT_TRUE(cancel);
+  EXPECT_EQ(cancel->status, 404);
+  EXPECT_NE(cancel->body.find("NoSuchPlanIdException"), std::string::npos)
+      << cancel->body;
+
+  auto tasks = cli.Post(base + "/tasks", R"({"plan-task":"nope"})",
+                        "application/json");
+  ASSERT_TRUE(tasks);
+  EXPECT_EQ(tasks->status, 404);
+  EXPECT_NE(tasks->body.find("NoSuchPlanTaskException"), std::string::npos)
+      << tasks->body;
+}
+
+TEST_F(E2ETest, ServerSidePlanningRunsTheFullLifecycle) {
+  auto cli = Client();
+  const std::string base = "/v1/namespaces/primeparts/tables/primes";
+
+  auto submitted = cli.Post(base + "/plan", "{}", "application/json");
+  ASSERT_TRUE(submitted) << "planTableScan: no response";
+  ASSERT_EQ(submitted->status, 200) << submitted->body;
+
+  auto submitted_json = nlohmann::json::parse(submitted->body);
+  EXPECT_EQ(submitted_json.value("status", ""), "submitted")
+      << "planning is asynchronous, so the first answer is always submitted";
+  const std::string plan_id = submitted_json.value("plan-id", "");
+  ASSERT_FALSE(plan_id.empty()) << submitted->body;
+
+  nlohmann::json result;
+  for (int i = 0; i < 400; ++i) {
+    auto polled = cli.Get(base + "/plan/" + plan_id);
+    ASSERT_TRUE(polled);
+    ASSERT_EQ(polled->status, 200) << polled->body;
+    result = nlohmann::json::parse(polled->body);
+    if (result.value("status", "") != "submitted") break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
+
+  ASSERT_EQ(result.value("status", ""), "completed") << result.dump();
+  ASSERT_TRUE(result.contains("file-scan-tasks")) << result.dump();
+  EXPECT_FALSE(result["file-scan-tasks"].empty());
+
+  const auto& first = result["file-scan-tasks"][0];
+  ASSERT_TRUE(first.contains("data-file")) << first.dump();
+  EXPECT_TRUE(first["data-file"].contains("file-path"));
+  EXPECT_FALSE(first.contains("split"))
+      << "split selection is a data-layer concern the server does not do";
+
+  auto cancelled = cli.Delete(base + "/plan/" + plan_id);
+  ASSERT_TRUE(cancelled);
+  EXPECT_EQ(cancelled->status, 204) << cancelled->body;
+}
+
+TEST_F(E2ETest, PlanTasksAreFetchableWhenPlanningExceedsOneBatch) {
+  auto cli = Client();
+  const std::string base = "/v1/namespaces/primeparts/tables/primes";
+
+  auto submitted = cli.Post(base + "/plan", "{}", "application/json");
+  ASSERT_TRUE(submitted);
+  ASSERT_EQ(submitted->status, 200) << submitted->body;
+  const std::string plan_id =
+      nlohmann::json::parse(submitted->body).value("plan-id", "");
+  ASSERT_FALSE(plan_id.empty());
+
+  nlohmann::json result;
+  for (int i = 0; i < 400; ++i) {
+    auto polled = cli.Get(base + "/plan/" + plan_id);
+    ASSERT_TRUE(polled);
+    result = nlohmann::json::parse(polled->body);
+    if (result.value("status", "") != "submitted") break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  ASSERT_EQ(result.value("status", ""), "completed") << result.dump();
+
+  if (!result.contains("plan-tasks") || result["plan-tasks"].empty()) {
+    GTEST_SKIP() << "the fixture plans within one batch; plan-task paging is "
+                    "covered by PlanStoreTest";
+  }
+
+  const std::string token = result["plan-tasks"][0];
+  nlohmann::json request;
+  request["plan-task"] = token;
+  auto fetched = cli.Post(base + "/tasks", request.dump(), "application/json");
+  ASSERT_TRUE(fetched);
+  ASSERT_EQ(fetched->status, 200) << fetched->body;
+  auto tasks = nlohmann::json::parse(fetched->body);
+  ASSERT_TRUE(tasks.contains("file-scan-tasks")) << tasks.dump();
+  EXPECT_FALSE(tasks["file-scan-tasks"].empty());
 }
 
 TEST_F(E2ETest, ExistenceChecksReturn204) {

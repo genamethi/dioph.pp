@@ -3,6 +3,8 @@
 
 #include <atomic>
 #include <csignal>
+#include <chrono>
+#include <unordered_map>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -17,6 +19,8 @@
 #include <nlohmann/json.hpp>
 
 #include "primeparts/catalog/pp_iceberg_rest.h"
+#include "primeparts/catalog/plan_store.h"
+#include "primeparts/scan/scan_planner.h"
 
 #include "iceberg/catalog.h"
 #include "iceberg/catalog/sql/catalog_store.h"
@@ -182,6 +186,75 @@ void SendTableResult(httplib::Response& res, int status,
 }
 
 
+void SendPlanJson(httplib::Response& res, int status,
+                  const iceberg::Result<json>& body,
+                  const iceberg::Status& valid) {
+  if (!valid.has_value()) return SendIcebergError(res, valid.error());
+  if (!body.has_value()) return SendIcebergError(res, body.error());
+  SendJson(res, status, body.value());
+}
+
+std::unordered_map<int32_t, std::shared_ptr<iceberg::PartitionSpec>>
+PartitionSpecsById(const iceberg::TableMetadata& metadata) {
+  std::unordered_map<int32_t, std::shared_ptr<iceberg::PartitionSpec>> specs;
+  for (const auto& spec : metadata.partition_specs) {
+    if (spec) specs.emplace(spec->spec_id(), spec);
+  }
+  return specs;
+}
+
+primeparts::scan::ScanPlanRequest ToScanPlanRequest(
+    const ir::PlanTableScanRequest& in) {
+  primeparts::scan::ScanPlanRequest out;
+  out.snapshot_id = in.snapshot_id;
+  out.select = in.select;
+  out.filter = in.filter;
+  out.min_rows_requested = in.min_rows_requested;
+  out.case_sensitive = in.case_sensitive;
+  out.use_snapshot_schema = in.use_snapshot_schema;
+  out.start_snapshot_id = in.start_snapshot_id;
+  out.end_snapshot_id = in.end_snapshot_id;
+  out.stats_fields = in.stats_fields;
+  return out;
+}
+
+std::vector<std::shared_ptr<iceberg::FileScanTask>> InnerTasks(
+    const std::vector<primeparts::scan::FileScanTask>& tasks) {
+  std::vector<std::shared_ptr<iceberg::FileScanTask>> inner;
+  inner.reserve(tasks.size());
+  for (const auto& task : tasks) {
+    if (task.inner) inner.push_back(task.inner);
+  }
+  return inner;
+}
+
+ir::PlanStatus WireStatus(PlanStatus status) {
+  switch (status) {
+    case PlanStatus::kSubmitted:
+      return ir::PlanStatus::kSubmitted;
+    case PlanStatus::kCompleted:
+      return ir::PlanStatus::kCompleted;
+    case PlanStatus::kCancelled:
+      return ir::PlanStatus::kCancelled;
+    case PlanStatus::kFailed:
+      return ir::PlanStatus::kFailed;
+  }
+  return ir::PlanStatus::kFailed;
+}
+
+std::shared_ptr<iceberg::Table> LoadTableOr404(
+    const std::shared_ptr<iceberg::Catalog>& catalog,
+    const httplib::Request& req, httplib::Response& res) {
+  iceberg::TableIdentifier id{.ns = ParseNamespace(req.matches[1]),
+                              .name = req.matches[2]};
+  auto r = catalog->LoadTable(id);
+  if (!r.has_value()) {
+    SendIcebergError(res, r.error());
+    return nullptr;
+  }
+  return r.value();
+}
+
 std::atomic<httplib::Server*> g_server{nullptr};
 
 void HandleSignal(int) {
@@ -315,6 +388,9 @@ int RunCatalogd(const CatalogdOptions& opts) {
   }
   auto catalog = local.catalog;
   auto store = local.store;
+  auto plans = std::make_shared<PlanStore>(PlanStore::Config{
+      .batch_tasks = opts.plan_batch_tasks,
+      .ttl = std::chrono::seconds(opts.plan_ttl_seconds)});
 
   httplib::Server svr;
   RouteTable routes(svr);
@@ -470,38 +546,135 @@ int RunCatalogd(const CatalogdOptions& opts) {
             SendJson(res, 200, body);
           });
 
-  auto planning_unsupported = [](const httplib::Request&,
-                                 httplib::Response& res) {
-    SendError(res, 406, "UnsupportedOperationException",
-              "server-side scan planning is not implemented; "
-              "scan-planning-mode is 'client'");
-  };
-  auto no_such_plan_id = [](const httplib::Request& req,
-                            httplib::Response& res) {
-    SendError(res, 404, "NoSuchPlanIdException",
-              "unknown plan-id '" + std::string(req.matches[3]) +
-                  "'; no server-side plan has been submitted because "
-                  "scan-planning-mode is 'client'");
-  };
-  auto no_such_plan_task = [](const httplib::Request&,
-                              httplib::Response& res) {
-    SendError(res, 404, "NoSuchPlanTaskException",
-              "unknown plan-task; no server-side plan has been submitted "
-              "because scan-planning-mode is 'client'");
-  };
-  routes.Post(R"(/v1/namespaces/([^/]+)/tables/([^/]+)/plan)",
-              "/v1/{prefix}/namespaces/{namespace}/tables/{table}/plan",
-              {"POST"}, planning_unsupported);
-  routes.Get(R"(/v1/namespaces/([^/]+)/tables/([^/]+)/plan/([^/]+))",
-             "/v1/{prefix}/namespaces/{namespace}/tables/{table}/plan/{plan-id}",
-             {"GET"}, no_such_plan_id);
+  routes.Post(
+      R"(/v1/namespaces/([^/]+)/tables/([^/]+)/plan)",
+      "/v1/{prefix}/namespaces/{namespace}/tables/{table}/plan", {"POST"},
+      [catalog, plans](const httplib::Request& req, httplib::Response& res) {
+        plans->ExpireIdle(PlanStore::Clock::now());
+        json body;
+        if (!ParseBody(req, res, &body)) return;
+        auto parsed = ir::PlanTableScanRequestFromJson(body);
+        if (!parsed.has_value()) return SendIcebergError(res, parsed.error());
+
+        auto table = LoadTableOr404(catalog, req, res);
+        if (!table) return;
+        auto metadata = table->metadata();
+        if (!metadata) {
+          return SendError(res, 500, "ServerError", "table metadata is null");
+        }
+        auto schema = metadata->Schema();
+        if (!schema.has_value()) return SendIcebergError(res, schema.error());
+
+        auto request = ToScanPlanRequest(parsed.value());
+        auto io = table->io();
+        auto plan_id = plans->Submit(
+            [metadata, io, request](primeparts::scan::ScanPlan* plan,
+                                    std::string* error) {
+              return primeparts::scan::PlanTableScan(metadata, io, request,
+                                                     plan, error);
+            });
+
+        ir::PlanTableScanResponse response;
+        response.plan_status = ir::PlanStatus::kSubmitted;
+        response.plan_id = plan_id;
+        SendPlanJson(res, 200,
+                     ir::ToJson(response,
+                                           PartitionSpecsById(*metadata),
+                                           *schema.value()),
+                     response.Validate());
+      });
+
+  routes.Get(
+      R"(/v1/namespaces/([^/]+)/tables/([^/]+)/plan/([^/]+))",
+      "/v1/{prefix}/namespaces/{namespace}/tables/{table}/plan/{plan-id}",
+      {"GET"},
+      [catalog, plans](const httplib::Request& req, httplib::Response& res) {
+        plans->ExpireIdle(PlanStore::Clock::now());
+        auto table = LoadTableOr404(catalog, req, res);
+        if (!table) return;
+        auto metadata = table->metadata();
+        if (!metadata) {
+          return SendError(res, 500, "ServerError", "table metadata is null");
+        }
+        auto schema = metadata->Schema();
+        if (!schema.has_value()) return SendIcebergError(res, schema.error());
+
+        PlanStore::Snapshot snap;
+        if (!plans->Fetch(req.matches[3], &snap)) {
+          return SendError(
+              res, 404, "NoSuchPlanIdException",
+              "unknown plan-id '" + std::string(req.matches[3]) + "'");
+        }
+
+        ir::FetchPlanningResultResponse response;
+        response.plan_status = WireStatus(snap.status);
+        if (snap.status == PlanStatus::kCompleted) {
+          response.file_scan_tasks = InnerTasks(snap.tasks);
+          if (!snap.plan_tasks.empty()) response.plan_tasks = snap.plan_tasks;
+        }
+        if (snap.status == PlanStatus::kFailed) {
+          response.error = ir::ErrorResponse{
+              .code = 500,
+              .type = "ServerError",
+              .message = snap.error.empty() ? "scan planning failed"
+                                            : snap.error};
+        }
+        SendPlanJson(res, 200,
+                     ir::ToJson(response,
+                                           PartitionSpecsById(*metadata),
+                                           *schema.value()),
+                     response.Validate());
+      });
+
   routes.Delete(
       R"(/v1/namespaces/([^/]+)/tables/([^/]+)/plan/([^/]+))",
       "/v1/{prefix}/namespaces/{namespace}/tables/{table}/plan/{plan-id}",
-      {"DELETE"}, no_such_plan_id);
-  routes.Post(R"(/v1/namespaces/([^/]+)/tables/([^/]+)/tasks)",
-              "/v1/{prefix}/namespaces/{namespace}/tables/{table}/tasks",
-              {"POST"}, no_such_plan_task);
+      {"DELETE"},
+      [catalog, plans](const httplib::Request& req, httplib::Response& res) {
+        plans->ExpireIdle(PlanStore::Clock::now());
+        if (!LoadTableOr404(catalog, req, res)) return;
+        if (!plans->Cancel(req.matches[3])) {
+          return SendError(
+              res, 404, "NoSuchPlanIdException",
+              "unknown plan-id '" + std::string(req.matches[3]) + "'");
+        }
+        res.status = 204;
+      });
+
+  routes.Post(
+      R"(/v1/namespaces/([^/]+)/tables/([^/]+)/tasks)",
+      "/v1/{prefix}/namespaces/{namespace}/tables/{table}/tasks", {"POST"},
+      [catalog, plans](const httplib::Request& req, httplib::Response& res) {
+        plans->ExpireIdle(PlanStore::Clock::now());
+        json body;
+        if (!ParseBody(req, res, &body)) return;
+        auto parsed = ir::FetchScanTasksRequestFromJson(body);
+        if (!parsed.has_value()) return SendIcebergError(res, parsed.error());
+
+        auto table = LoadTableOr404(catalog, req, res);
+        if (!table) return;
+        auto metadata = table->metadata();
+        if (!metadata) {
+          return SendError(res, 500, "ServerError", "table metadata is null");
+        }
+        auto schema = metadata->Schema();
+        if (!schema.has_value()) return SendIcebergError(res, schema.error());
+
+        std::vector<primeparts::scan::FileScanTask> tasks;
+        if (!plans->FetchTasks(parsed.value().planTask, &tasks)) {
+          return SendError(res, 404, "NoSuchPlanTaskException",
+                           "unknown plan-task '" + parsed.value().planTask +
+                               "'");
+        }
+
+        ir::FetchScanTasksResponse response;
+        response.file_scan_tasks = InnerTasks(tasks);
+        SendPlanJson(res, 200,
+                     ir::ToJson(response,
+                                           PartitionSpecsById(*metadata),
+                                           *schema.value()),
+                     response.Validate());
+      });
 
   routes.Post(R"(/v1/namespaces/([^/]+)/tables/([^/]+))",
               "/v1/{prefix}/namespaces/{namespace}/tables/{table}", {"POST"},
