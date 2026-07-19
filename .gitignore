@@ -113,3 +113,4 @@ native/bin/nth_prime_boundaries
 native/vendor/lua-5.5.0/
 native/vendor/lua-5.5.0.tar.gz
 markdown/math/.speculative
+.ephemeral/
