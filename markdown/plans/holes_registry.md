@@ -2,7 +2,8 @@
 
 The single living record of what is missing. Consolidated 2026-07-18 from four
 completed plans — `planner_prep`, `testing_overhaul`, `irc_spec_surface`,
-`expression_surface` — whose phase documents were cleared out. Per-phase detail
+`expression_surface` — and again 2026-07-18 from `server_planning`, whose phase
+documents were cleared out. Per-phase detail
 lives in git history: one commit per phase, commit message = the phase document.
 
 ## goal
@@ -58,17 +59,44 @@ assertions stay; capability assertions retire with their holes.
 | 2026-07-18 | **server-side planning: implement in full** — all four routes plus plan-id lifecycle, flipping `scan-planning-mode` to `server`. Next branch. |
 | 2026-07-18 | `createTable`: the server ensures the table location exists, expressed so it is a no-op where directories are not a concept |
 | 2026-07-18 | existing-table declaration: **REST-only**, no local tool |
+| 2026-07-18 | the server owns catalog and metadata; the **data layer is not its purview**, so server-side planning never opens a parquet file |
+| 2026-07-18 | planning wire shape is **spec-only** — no namespaced extension; splits are re-derivable from `split-offsets` plus the complete residual |
+| 2026-07-18 | `plan-tasks` are emitted above a configurable batch size, so `fetchScanTasks` is a live route rather than a permanent 404 |
+| 2026-07-18 | planning is **genuinely async**; `planTableScan` always answers `submitted`, never racing to `completed` |
+| 2026-07-18 | cancellation has teeth only against planning still in flight; against a finished plan it is advisory |
+| 2026-07-18 | a cancelled plan-id stays answerable, because the spec's `cancelled` status requires it |
+| 2026-07-18 | `scan-planning-mode` is configurable and **read by the client**, not a constant |
 
 ## open holes
 
 **server surface**
 
-- server-side scan planning is unimplemented; only one of the spec's two
-  planning modes exists. `scan-planning-mode: client` is advertised, so today's
-  behavior is conformant. Decided 2026-07-18 to implement in full: `planTableScan`
-  invoking a planner module, plan-id lifecycle across `fetchPlanningResult` /
-  `cancelPlanning` / `fetchScanTasks`, and held plan state with its own
-  expiry — filed-by 08 — **owner: next branch**
+- server-side scan planning: **closed** 2026-07-18 on branch `server-planning`.
+  All four routes serve, plan state is held behind opaque plan-ids with batching
+  and TTL, the client has the four matching calls plus a lifecycle driver, and
+  `scan-planning-mode` advertises `server` with a client that reads it. The
+  residue is filed as the four entries below.
+- planning results carry no `storage-credentials`. The spec puts them on
+  `CompletedPlanningResult` so a client can read the returned files; vendored
+  `PlanTableScanResponse` carries a TODO in place of the field
+  (`catalog/rest/types.h:341`). Reachable only where the data layer needs
+  credentials the client does not already hold — filed-by server_planning 03 —
+  owner: unassigned
+- plan expiry sweeps on request, not on a clock. `ExpireIdle` runs at the top of
+  each of the four planning handlers, so a server that goes idle holds its last
+  plans until traffic resumes. A timer thread would need shutdown coordination
+  with httplib's signal handling — filed-by server_planning 03 — owner: unassigned
+- cancelling a plan whose worker is still running cannot interrupt the work. The
+  injected `PlanFn` has no cancellation point, so the planning runs to
+  completion and the result is discarded at publish time — filed-by
+  server_planning 02 — owner: unassigned
+- no single planning entry point reads the advertised `scan-planning-mode` and
+  dispatches. `FetchScanPlanningMode` exposes the value and `PlanScanOnServer`
+  and `scan::PlanTableScan` are both callable, but choosing between them is left
+  to each consumer. In-process consumers (`source_scan.cc`, `query_service.cc`)
+  read metadata off disk and never consult the advertisement at all; that is
+  consistent only while metadata is local to the consumer — filed-by
+  server_planning 05 — owner: unassigned
 - `createTable` answers 500 when the metadata location's parent does not exist.
   arrow's `LocalFileSystem` does not create parents on open-for-write; object
   stores have no directories at all, so this is specific to filesystem-backed
@@ -200,7 +228,7 @@ metadata rather than by giving the fixture a sort order.
 
 | group | hard | priority |
 |---|---|---|
-| server surface — server-side planning | 4 | **P1 — decided, next branch** |
+| server surface — planning residue (credentials, sweep, dispatch) | 2 | P2 |
 | server surface — location creation, branch schema, pagination et al. | 2 | P2 |
 | read-path synthesis — identity-partition columns | 2 | P2 |
 | transform coverage | 3 | P2 |
@@ -219,12 +247,6 @@ and append-only with identity partitions, so a v2→v3 move is metadata-level
 unless deletes are adopted. Nothing else implies a warehouse rewrite.
 
 ## potential paths (not decisions; entries above stay prescription-free)
-
-**server-side planning.** The plan atom is already API-shaped: `ScanPlan` +
-`FileScanTask` + `iceberg::Split`, with a complete residual. The lift is
-catalogd holding plan state keyed by plan-id, serializing tasks to the spec's
-`FileScanTask` JSON, and deciding the completed-vs-submitted policy. Held state
-brings its own lifecycle — a plan-id that is never fetched must expire.
 
 **identity-partition synthesis.** Constant-array widen from `DataFile::partition`
 onto the batch inside `SourceTableReader::Next`, after `ReadNext` and before
