@@ -191,9 +191,18 @@ The plan path is closed (`DecodeIntegerBound` deleted, `Literal` key window,
 
 - `ShapePolicy` is uniform across all tables: `generate.cc` default-constructs
   one instance for an `AlignedBucketWriter` spanning every `BoundTable`, so
-  primes and the 1.884B-row partitions table share `file_target_bytes`,
-  `rgs_per_file`, `bucket_target_bytes`, and one `ref_bytes_per_row_prior = 1.1`.
-  No per-table override exists — filed-by 2026-07-18 — owner: unassigned
+  `primes` and `partitions` — the latter carrying one row per representation,
+  so `sum(primes.k)` rows against `primes`' one row per prime — share
+  `file_target_bytes`, `rgs_per_file`, `bucket_target_bytes`, and one
+  `ref_bytes_per_row_prior = 1.1` (`aligned_writer.h:45`, consumed at
+  `aligned_writer.cc:170` as the estimation prior for byte-driven cuts). No
+  per-table override exists. `file_target_bytes` and `rgs_per_file` shadow
+  spec'd table properties — `write.target-file-size-bytes`
+  (`table_properties.h:245`, default 512 MB) and
+  `write.parquet.row-group-size-bytes` (`:114`, default 128 MB) — which
+  `CreateTableRequest.properties` can set per table at creation.
+  `bucket_target_bytes` has no spec counterpart — filed-by 2026-07-18 —
+  owner: unassigned
 
 **test and build**
 
@@ -207,9 +216,9 @@ The plan path is closed (`DecodeIntegerBound` deleted, `Literal` key window,
 
 ## known-red tests (expected; do not "fix" without closing the hole)
 
-As of 2026-07-18: unit 27 passing / 3 red, e2e 11 passing / 1 red. Every red is
-deliberate — a test written to assert correct behavior that is not yet
-implemented, so it goes green when its hole closes.
+As of 2026-07-19: unit 43 passing / 3 red (`make test`), e2e 18 passing / 1 red
+(`make e2e`). Every red is deliberate — a test written to assert correct
+behavior that is not yet implemented, so it goes green when its hole closes.
 
 | test | hole |
 |---|---|

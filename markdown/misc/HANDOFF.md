@@ -48,6 +48,25 @@ stating as much. The point is: Leave the high level stuff to the user.
 - Catalog authority is REST; **data reads are not**. Consumers read metadata
   and parquet themselves. Server-side scan planning exists and is advertised,
   but no shipped tool calls it (see below).
+- One non-spec extension route exists:
+  `GET /v1/namespaces/{ns}/tables/{t}/field-upper-bound?field=` (bound at
+  `pp_catalogd.cc:533`, advertised with an empty verb list so it stays out of
+  `/v1/config` `endpoints`). It answers `{field, upper_bound}` with
+  `upper_bound: null` when the table has no snapshot or no bound for the
+  field. `FieldUpperBound` reads every manifest whose `added_snapshot_id`
+  equals the current snapshot id and takes the max `upper_bounds[field]` over
+  their live entries. Iterating all of them is load-bearing:
+  `SnapshotUpdate::WriteDataManifests`
+  (`vendor/iceberg-cpp/src/iceberg/update/snapshot_update.cc:204`) writes
+  through a `RollingManifestWriter` bounded by `target_manifest_size_bytes_`
+  and dispatches through `WriteManifestGroups` under
+  `write_manifest_parallelism_`, so one append may produce several manifests
+  and their order is not the append order.
+- The spec surface for the same fact is `planTableScan` with `stats-fields`
+  (yaml:5170), which returns `upper-bounds`/`lower-bounds` per **data file** on
+  each `FileScanTask.data-file` (yaml:5070, typed `ValueMap` at yaml:4940).
+  That is O(data files) on the wire against O(manifests) server-side for the
+  extension; the spec has no aggregate route.
 - Design detail: `markdown/data_eng/irc_catalog_design.md`.
 - Open gaps live in `markdown/plans/holes_registry.md`. That file is the
   registry; this file is the map.
@@ -100,14 +119,18 @@ undecided:
   keeps its own six-field `App::cfg` (log limit, gen threads, default limit,
   log format, autosave, warehouse). Only `warehouse` overlaps. Neither surface
   knows about the other's keys.
-- **The warehouse default is hardcoded in five places**
-  (`generate.cc`, `pp_catalogd_main.cc`, `pp_main.cc`, `verify_main.cc`,
-  `tui_main.cc`), all pointing at `/media/extssd/research/dioph.pp/data...`.
-  On a machine without that mount every tool fails the same way and the
-  systemd unit crash-loops.
+- **The warehouse default is hardcoded in five places, and they disagree.**
+  `pp_catalogd_main.cc:10`, `verify_main.cc:30`, `pp_main.cc:14` and
+  `tui_main.cc:22` use `/media/extssd/research/dioph.pp/data/ib-staging`;
+  `generate.cc:303` uses `/media/extssd/research/dioph.pp/data` (as the temp
+  root under `FUNBUNS_DATA_DIR`). On a machine without that mount every tool
+  fails the same way and the systemd unit crash-loops.
 - **Table definitions are C++, not config.** `schemas.cc` holds `PrimesSchema`,
   `PartitionsSchema`, `BucketPartitionSpec`, `AscendingSortOrder`. Adding a
-  table means editing and rebuilding.
+  table means editing and rebuilding. `CreateTableRequest` (yaml:3931) accepts
+  `schema`, `partition-spec`, `write-order`, `location` and `properties`, so
+  everything a table needs at birth is expressible over the wire; nothing in
+  the tree assembles that body from a declaration.
 - **Traits are read from table metadata, not declared.** `TableReadTraits::
   FromMetadata` (`scan/table_traits.cc`) derives sort keys from the table's
   sort order, and resolves identity transforms only. So a table's read
@@ -118,21 +141,61 @@ undecided:
 
 Roughly in dependency order. Each is a starting point, not a spec.
 
-1. **Declare sort order on the existing tables.** Decided REST-only. Until this
-   lands, every order-requiring path — `ScanByK`, windowed histogram, `verify`
-   on primes, the Extent frontier — errors on the live tables. This is the
-   single biggest blocker to the tools being usable against real data. The
-   domain precondition (refuse if primary-key bounds are missing on any
-   committed file) has no spec counterpart and still needs a home.
-2. **Bring `generate` to workable.** `LoadAlignedResume` still derives bucket
-   fill and per-table file sequence by filesystem glob; replace with a read of
-   the current snapshot's manifests. `ShapePolicy` is uniform across tables, so
-   primes and the 1.884B-row partitions table share one file/row-group sizing.
+1. **Declare sort order on the existing tables.** Decided REST-only.
+   `TableReadTraits::FromMetadata` (`scan/table_traits.cc:13`) derives sort
+   keys from the *committed* sort order. With none declared it returns success
+   with empty `sort_keys`; the refusal happens in each `traits.sorted()` caller
+   — `RequireSorted` under `ScanByK` (`query/query_service.cc:229`), windowed
+   `GroupCount`, `QueryService::Extent` (`:510`, the table extent the TUI
+   reads), `verify_main.cc:104`, `source_scan.cc:102`, `scan_planner.cc:492`
+   and `:526`. A declared order using a non-identity transform is instead a
+   loud `NotImplemented` (`table_traits.cc:36`).
+   `CreateTableRequest` carries `write-order` (yaml:3945), so a table created
+   through an init path declares its order at birth and needs no separate step;
+   the two existing tables need one `updateTable` migration
+   (`assert-table-uuid` + `assert-default-sort-order-id`;
+   `update/update_sort_order.cc` in the vendored tree). The domain precondition
+   — refuse if primary-key bounds are missing on any committed file — has no
+   spec counterpart and still needs a home. It is the same predicate resume
+   needs when `field-upper-bound` finds a snapshot but no bound.
+   This blocks the query/read paths only. `generate`'s resume frontier reads
+   manifest `upper_bounds` directly and never consults sort order.
+2. **Bring `generate` to workable.** Two separate reads, and the fragile one is
+   the frontier, not the bucket state.
+   `LoadAlignedResume` (`aligned_writer.cc:323`) loads each table through the
+   catalog and reads bucket fill and per-table file sequence from the table's
+   **partition statistics files** via `catalog::LoadPartitionStats`
+   (`partition_stats.cc:697`) — frontier bucket, its
+   `total_data_file_size_in_bytes`, its `data_file_count` as `next_seq`. No
+   filesystem glob is involved. `LoadPartitionStats` calls `SingleSpecOnly`, so
+   partition evolution turns resume into a hard error, and `next_seq =
+   frontier_files` assumes no gaps in the `_%04d` suffix within a
+   `(version, bucket)`.
+   The generation frontier is separate: `resolve_start_idx`
+   (`generate.cc:605`) calls `FetchFieldUpperBound` for `primes.prime_rank`.
+   Every failure path in that route answers `present=false`, and
+   `generate.cc:632` reads that as a fresh warehouse and starts at
+   `kFreshStartIdx = 2` (rank 2 is the first row, `p=3`). A resume that cannot
+   locate the frontier therefore regenerates from the beginning into an
+   append-only table rather than refusing. Initialization is a fallback where
+   it should be a deliberate act; the three outcomes worth distinguishing are
+   table absent (not initialized), table present with a snapshot but no bound
+   (hard error), and table present with no snapshot (legitimately empty, start
+   at 2).
+   `ShapePolicy` (`aligned_writer.h:45`) is one instance across every
+   `BoundTable`, and its `file_target_bytes` / `rgs_per_file` shadow spec'd
+   Iceberg table properties — `write.target-file-size-bytes`
+   (`table_properties.h:245`) and `write.parquet.row-group-size-bytes`
+   (`:114`), both settable through `CreateTableRequest.properties` and
+   therefore fixable at creation. `bucket_target_bytes` has no spec
+   counterpart; bucketing here is an organizational axis, not a spec concept.
 3. **Decide whether consumers plan server-side.** `rest_scan_plan` exists and
-   works; nothing calls it. Either wire `source_scan` / `query_service` to it —
-   which also decides where mode dispatch lives — or accept that in-process
-   planning is the real path and the REST client is for foreign consumers.
-   This choice determines whether metadata can move off the consumer's machine.
+   works; it is linked only into the e2e test. Either wire `source_scan` /
+   `query_service` to it — which also decides where mode dispatch lives — or
+   accept that in-process planning is the real path and the REST client is for
+   foreign consumers. `generate` is already a REST client on both resume reads,
+   so the producer's REST-ness is not the gap; what it does not use is the
+   *spec* planning routes.
 4. **Settle configuration.** One surface, one warehouse default, and a decision
    on whether tables are declarable outside C++.
 5. **Lifecycle.** Snapshot expiry is unwired, orphaned files from failed

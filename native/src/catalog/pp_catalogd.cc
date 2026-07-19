@@ -309,35 +309,37 @@ bool FieldUpperBound(const std::shared_ptr<iceberg::Catalog>& catalog,
     return false;
   }
   const int64_t snap_id = snap.value()->snapshot_id;
-  const iceberg::ManifestFile* frontier = nullptr;
+  int64_t best = 0;
   for (const auto& m : manifests.value()) {
-    if (m.added_snapshot_id == snap_id) { frontier = &m; break; }
-  }
-  if (frontier == nullptr) return true;
+    if (m.added_snapshot_id != snap_id) continue;
 
-  auto reader = iceberg::ManifestReader::Make(*frontier, table->io(),
-                                              schema.value(), spec.value());
-  if (!reader.has_value()) {
-    *error = reader.error().message;
-    return false;
+    auto reader = iceberg::ManifestReader::Make(m, table->io(), schema.value(),
+                                                spec.value());
+    if (!reader.has_value()) {
+      *error = reader.error().message;
+      return false;
+    }
+    auto entries = reader.value()->Select({"upper_bounds"}).LiveEntries();
+    if (!entries.has_value()) {
+      *error = entries.error().message;
+      return false;
+    }
+    for (const auto& entry : entries.value()) {
+      const auto& df = entry.data_file;
+      if (df == nullptr) continue;
+      auto it = df->upper_bounds.find(fid);
+      if (it == df->upper_bounds.end() || it->second.size() < sizeof(int64_t)) {
+        continue;
+      }
+      int64_t v = 0;
+      std::memcpy(&v, it->second.data(), sizeof(int64_t));
+      if (!*present || v > best) {
+        best = v;
+        *present = true;
+      }
+    }
   }
-  auto entries = reader.value()->Select({"upper_bounds"}).LiveEntries();
-  if (!entries.has_value()) {
-    *error = entries.error().message;
-    return false;
-  }
-  if (entries.value().empty()) return true;
-
-  const auto& df = entries.value().back().data_file;
-  if (df == nullptr) return true;
-  auto it = df->upper_bounds.find(fid);
-  if (it == df->upper_bounds.end() || it->second.size() < sizeof(int64_t)) {
-    return true;
-  }
-  int64_t v = 0;
-  std::memcpy(&v, it->second.data(), sizeof(int64_t));
-  *out = v;
-  *present = true;
+  if (*present) *out = best;
   return true;
 }
 

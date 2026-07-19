@@ -113,7 +113,7 @@ Server-side JSON reuses iceberg-cpp's exported internal serde
 `CommitTableRequest` {`requirements`+`updates`}, `RegisterTableRequest`,
 `LoadTableResult`, `TableMetadata`) — no hand-written serializers. Compiled with
 `-Ivendor/iceberg-cpp/src` for the internal headers only; `nlohmann_json` matches
-the archives' ABI (3.11.3, pinned by configure). Deletion-vector forward-
+the archives' ABI (3.12, see Build / provisioning). Deletion-vector forward-
 compatible: DV/Puffin specifics ride inside `add-snapshot` updates, no server
 change (that work is writer-side).
 
@@ -202,14 +202,25 @@ it is the IRC contract; in-process it is the `iceberg::Catalog` API.
 
 ## Build / provisioning
 
-Canonical build doc is `BUILD.md`. Provisioning is `native/configure` + git
-submodules under `native/vendor/`, built rootless into `$HOME/.local`:
+Provisioning is `native/configure` + git submodules under `native/vendor/`,
+plus the spec submodule at `docs/vendor/iceberg` (registered under the name
+`iceberg-spec`, so a plain `git pull` leaves it empty — `configure:113-125`
+runs `submodule update --init` and reapplies the sparse cone, which lives in
+`.git` and does not survive a clone). Dependency policy is `markdown/VENDOR.md`;
+submodules track upstream branch heads and are built only when the prefix does
+not already provide them:
 
-- Submodules: `lmdb` (`liblmdb.a` from `libraries/liblmdb/{mdb.c,midl.c}`),
-  `iceberg-cpp` (pinned `v0.3.0`, built `BUNDLE=ON REST=ON SQL_CATALOG=ON`,
-  static), `arrow` (static).
-- Header-only deps fetched into `$PREFIX/include` by configure:
-  `nlohmann/json.hpp` + `json_fwd.hpp`, `httplib.h`.
+- Submodules: `lmdb` (`liblmdb.a` from `libraries/liblmdb/{mdb.c,midl.c}`,
+  compiled by `native/Makefile` rather than installed), `iceberg-cpp` (built
+  `BUNDLE + SHARED + SQL_SQLITE + SQL_CATALOG`), `arrow` (static), `flint`,
+  `notcurses`, `cpp-httplib` (used header-only). Nothing is pinned to a tag.
+- Libraries install into the prefix (`/usr/local`); `make install` puts the
+  seven binaries in `$HOME/.local/bin`.
+- nlohmann-json is **3.12**: `configure:48` requires `nlohmann-json3.12-dev`
+  and iceberg-cpp fetches `v3.12.0`
+  (`cmake_modules/IcebergThirdpartyToolchain.cmake:523`). The prefix copy must
+  be refreshed on every iceberg-cpp install or the `json_abi` inline-namespace
+  mangling stops matching the archives.
 - All-static Arrow/iceberg cluster; `-liceberg_sql_catalog` links before the
   iceberg core archives (static link order). Do not append `-lparquet -larrow`
   after `ICEBERG_LDLIBS` — the static `.a` are already in it, and a trailing `-l`
@@ -217,11 +228,10 @@ submodules under `native/vendor/`, built rootless into `$HOME/.local`:
 
 ## Verification
 
-`make smoke`: `primeparts-lmdb-smoke` (store contract + `SqlCatalog` round-trip),
-`primeparts-catalogd-smoke` (server + RestCatalog client createTable → FastAppend
-commit → reload-scan → dropTable), `primeparts-commit-smoke` (two-table atomic
-commit + rollback on a tampered requirement), `primeparts-generate-smoke`
-(`generate` commit + resume through the daemon).
+The smoke binaries and their `make smoke` target are retired; the Makefile
+targets are `all`, `install`, `lmdb-tools`, `test`, `e2e`, `clean`. Note that
+`install` is the first target in the file and therefore the default, so a bare
+`make` installs to `$HOME/.local/bin` and enables the catalogd user unit.
 
 `make test` is the unit suite (`primeparts-tests`), including `PlanStoreTest`
 for the plan-id lifecycle and `ScanPlannerTest` for the metadata/data boundary.
