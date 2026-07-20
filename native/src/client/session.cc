@@ -498,6 +498,7 @@ std::unique_ptr<ScanStream> Session::Scan(const TableHandle& table,
       return nullptr;
     }
   }
+  impl->plan.read_batch_size = impl_->options.read_batch_size;
   const int files = static_cast<int>(impl->plan.tasks.size());
   impl->shards = impl_->options.scan_threads;
   if (files > 0 && impl->shards > files) impl->shards = files;

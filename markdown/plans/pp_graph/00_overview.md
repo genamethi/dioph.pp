@@ -18,7 +18,7 @@ the reference numbers, composite-degree spectrum full.
 | 2026-07-19 | client obtains `TableMetadata` from `loadTable` over REST, not from `metadata.json` on disk (the experiment's disk read is retired in phase 01) |
 | 2026-07-19 | interfaces are authored header-first and reviewed before implementation |
 | 2026-07-19 | graph/word/satisfaction computation stays hand-built; a query engine is evaluated only for data pipelining (phase 04 decides, nothing pre-committed) |
-| 2026-07-20 | the warehouse volume is USB-attached and pinned at the 5 Gb/s link (447 MB/s measured); interface moves buy at most 1.2x, so scan cost is addressed by extracting the power-edge slice once, not by hardware |
+| 2026-07-20 | scan cost has two regimes: cold full scan of the 181 GiB table is disk-bound on the USB SATA link (~447 MB/s, ~408s, 131% CPU, batch size irrelevant); a cached or small working set is decode-bound, where read.batch-size dominates (4096 to 262144 = 1.8x at fixed shards) and threads scale with file count. read.batch-size is now a SessionOptions knob. The power-edge slice is ~2 MB, so extracting it once puts all downstream work in the fast decode-bound regime |
 
 ## Invariants
 

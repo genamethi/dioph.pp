@@ -45,6 +45,7 @@ struct ScanPlan {
   std::optional<iceberg::Literal> key_lo;
   std::optional<iceberg::Literal> key_hi;
   std::shared_ptr<iceberg::Expression> residual;
+  int64_t read_batch_size = 0;
 };
 
 }  // namespace primeparts::scan

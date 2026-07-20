@@ -124,6 +124,10 @@ struct SourceTableReader::Impl {
     opts.io = io;
     opts.table_schema = plan.table_schema;
     opts.projected_schema = plan.projected_schema;
+    if (plan.read_batch_size > 0) {
+      opts.properties["read.batch-size"] =
+          std::to_string(plan.read_batch_size);
+    }
     auto rdr_r = iceberg::FileScanTaskReader::Make(std::move(opts));
     if (!rdr_r.has_value()) {
       if (error) *error = "FileScanTaskReader::Make: " + rdr_r.error().message;

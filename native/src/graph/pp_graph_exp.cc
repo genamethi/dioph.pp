@@ -49,6 +49,7 @@ struct PowerEdge {
 struct Options {
   int64_t bound = 5000000000LL;
   int threads = 8;
+  int64_t batch = 0;
   std::string rest_uri;
   std::string warehouse = kDefaultWarehouse;
 };
@@ -172,10 +173,12 @@ bool ParseArgs(int argc, char** argv, Options* out) {
       out->warehouse = need("--warehouse");
     } else if (a == "--threads") {
       out->threads = std::atoi(need("--threads"));
+    } else if (a == "--batch") {
+      out->batch = std::atoll(need("--batch"));
     } else {
       std::fprintf(stderr,
                    "usage: pp-graph-exp [--bound N] [--threads N] "
-                   "[--rest-uri URI] [--warehouse DIR]\n");
+                   "[--batch N] [--rest-uri URI] [--warehouse DIR]\n");
       return false;
     }
   }
@@ -197,6 +200,7 @@ int main(int argc, char** argv) {
   session_options.rest_uri = opt.rest_uri;
   session_options.warehouse = opt.warehouse;
   session_options.scan_threads = opt.threads;
+  session_options.read_batch_size = opt.batch;
   auto session = client::Session::Open(session_options, &error);
   if (!session) {
     std::fprintf(stderr, "Session::Open: %s\n", error.c_str());

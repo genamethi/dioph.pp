@@ -24,6 +24,7 @@ struct SessionOptions {
   std::string warehouse;
   std::string ns;
   int scan_threads = 1;
+  int64_t read_batch_size = 0;
   catalog::PlanPollOptions poll;
 };
 
