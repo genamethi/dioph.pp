@@ -18,6 +18,7 @@ the reference numbers, composite-degree spectrum full.
 | 2026-07-19 | client obtains `TableMetadata` from `loadTable` over REST, not from `metadata.json` on disk (the experiment's disk read is retired in phase 01) |
 | 2026-07-19 | interfaces are authored header-first and reviewed before implementation |
 | 2026-07-19 | graph/word/satisfaction computation stays hand-built; a query engine is evaluated only for data pipelining (phase 04 decides, nothing pre-committed) |
+| 2026-07-20 | the warehouse volume is USB-attached and pinned at the 5 Gb/s link (447 MB/s measured); interface moves buy at most 1.2x, so scan cost is addressed by extracting the power-edge slice once, not by hardware |
 
 ## Invariants
 
@@ -33,5 +34,6 @@ the reference numbers, composite-degree spectrum full.
 - 01 shared client module, header first
 - 02 full-dataset run
 - 03 routing multiplicities against the sieve null
+- 03a exponent tail and the 3|n obstruction (done)
 - 04 query-engine evaluation (DuckDB candidate)
 - 05 permanent-fixture decision
