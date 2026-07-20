@@ -6,8 +6,8 @@ collapse-class multiplicities are counts the free algebra says nothing about.
 - [x] Turn the reachability DP into a counting DP: number of n=1 routings
       between each feeder endpoint and each power-edge source (universe
       ≤ √max_p, exact counts, 64-bit).
-- [~] Sieve null for the same counts — CRUX, needs your steer (see findings).
-- [ ] Compare per class and in aggregate (blocked on the null decision).
+- [x] Null resolved: the ORDER cover is the Eisenstein basis (not 1/ln, not divisibility). Located in cov_emit (covering_primary=divisibility vs covering_bleed_min=order); grading regenerated in markdown/reference/covering-vp/grade_covering_regen.md.
+- [x] Cusp characterized via polynomial algebra: markdown/math/hermite_congruences.md. He_p=x^p mod p; He_n factorization mod l is a power-residue condition orthogonal to ord2(l), giving a determinate handle on the frontier/cusp where covering breaks down.
 - [x] Record findings.
 
 ## Findings (partial)
