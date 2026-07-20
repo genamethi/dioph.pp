@@ -1,37 +1,52 @@
-# coverings/ — reference import from `verification-patches`
+# coverings/ — SHARED-ANCESTOR code (corrected provenance)
 
-These sources are **imported for reading**, not wired into the build. They are
-the sieve / covering-system tooling written on the `verification-patches`
-branch, brought onto `pp-graph-sieve` (based on `pp-graph-exp`) so they can be
-viewed alongside the current work. The Makefile does not compile them; they
-predate the current `scan/` planner and `source_scan` seam, so building any of
-them means rebasing onto the current interfaces first.
+**Correction.** These C++ sources were first imported here as "verification-patches
+work." That was wrong. They are **unchanged from the merge-base `bd64b0e`** — the
+common ancestor of both `verification-patches` and `tui-query`. `tui-query` later
+deleted them in its cleanup; `verification-patches` inherited them without
+modifying them. So they predate the branch and are not its contribution. The one
+genuinely branch-authored file here is `cov_emit_main.cc` (the cap3 covering
+emitter, a containerized eval-task artifact — likely a dead end).
 
-Provenance: the code is the user's to reuse; only the original working sessions
-were proprietary and were intentionally deleted. This import carries no session
-history — just the source.
+Not wired into the Makefile. Reference only. The code is the user's to reuse.
 
-## What each file is
+## The genuine verification-patches covering work is elsewhere
 
-| file | binary it was | what it does |
-|---|---|---|
-| `mersenne_main.cc` | `primeparts-mersenne` | builds `mersenne_factors` (d, prime, exponent, ord2, is_primitive) — the obstruction moduli ℓ keyed by ord₂(ℓ) |
-| `mdiff_main.cc` | `primeparts-mdiff` | builds `mdiff_k{K}` as `(p, hit_mask)`; one sorted pass over `partitions`, run-detection on p-ordered rows |
-| `primitive_factors.{h,cc}` | library | `MersenneHelper`, `HitMaskDiffs` (mask → pairwise index-difference multiset), `GetBackboneMask` / `GetCoverageMask` |
-| `covering_sieve_main.cc` | `primeparts-covering-sieve` | iterative merge-on-read delete sieve: one modulus per pass, position-deletes newly fully-covered primes, advances a snapshot |
-| `cov_emit_main.cc` | `primeparts-cov-emit` | cap-bounded covering certificate emitter (containerized eval-task artifact; likely a dead end) |
-| `primitive_factors_main.cc` | test/driver | exercises the primitive-factor helpers |
-| `../catalog/pp_row_delta.{cc,h}` | library | the repo's only committable merge-on-read position-delete implementation (subclasses the vendored SnapshotUpdate) |
-| `../catalog/pp_sieve_clone.{cc,h}` | library | shallow v2 MOR clone used to seed `primes_k0_sieve` |
-| `../mersenne_sidecar.cc` | sidecar | marked "may be obsolete" in its own header |
+Recovered into `markdown/reference/covering-vp/` and `scripts/coverings/`, because
+the human-readable part was **dropped before the branch head** (added `06362e7`,
+deleted `1c8b2a5`):
 
-## Why it is here (the sieve/null connection)
+- `markdown/reference/covering-vp/covering-families.md` — the handoff note: the
+  per-prime minimal covering systems, the global order distribution, and the
+  open "combine the families by density" program with its three obstacles.
+- `scripts/coverings/{recipe,recipe2,pm2_table,global_sample}.py` — the Sage
+  analysis behind that note.
+- `markdown/reference/covering-vp/covering_sieve_main.method3.cc.txt` — the
+  `--classify/--overgen/--method3` version of the covering builder (added
+  `49d6c5d`, **reverted to base in `bb1100a`**, so absent from the branch head).
+- The live generation-time covering filter is on `verification-patches` in
+  `native/src/core.c` (commits `5ba7ecc`, `5e7491a`, `ea18498`, `4666468`) — a
+  `{3,5,7,11,13,17}` filter applied during generation with k-range and
+  count-only modes; not recovered here (it is a diff against `core.c`, best read
+  from the commits).
 
-The `pp-graph` phase 03 "null" question — what survival rate a chain *should*
-have from local congruence data alone — is the Eisenstein part of the
-Eisenstein/cusp split (see `markdown/math/chain_hermite_primer.md` §7). The
-covering-corrected survival probability per residue class is the object these
-tools compute at scale. Reusing this machinery (rather than rebuilding a naive
-`1/ln` null) is the path to a *meaningful* null; `markdown/math/lab-notes.md`
-records the results, and `markdown/math/modular-filter-idea.md` records the
-hot-path design pedigree.
+## The methods these shared-ancestor helpers actually provide
+
+`primitive_factors.{h,cc}` (the reusable, data-free library):
+
+- `BuildMersenneHelper(max_d)` / `GetOrd2(ℓ)` — `ord₂(ℓ)`, the period of the
+  congruence progression modulus ℓ kills.
+- `GetCoverageMask(p, ℓ, d, max_m)` / `GetBackboneMask(p, max_m)` — per-prime
+  bitmask of positions `m` killed by ℓ (or the backbone `{3,5,7,11,13,17}`).
+- `PrimitiveFactorsForTerm(p, m)` — the primitive Mersenne factors dividing
+  `p − 2^m` (which moduli are active at that position).
+- `HitMaskDiffs(mask)` — decode a hit-position mask into the pairwise
+  index-difference multiset (the k ≥ 2 S-unit constraint geometry).
+
+## Terminology
+
+Per `covering-families.md`'s own convention line — "ℓ is the generator of the
+⟨2⟩ discrete-log action, **not a divisibility sieve**" — this is a **covering
+system** (Erdős), not a sieve. Congruence: `ℓ | (p − 2^m)`, `d = ord_ℓ(2)`,
+phase `r = m mod d`, covering density `1/d`. "Sieve" is not used here and must
+not cross into tui-query.
