@@ -31,6 +31,7 @@ ICEBERG_LDLIBS += \
 	-l:libiceberg_vendored_cpr.a -l:libiceberg_vendored_avrocpp.a \
 	-l:libiceberg.a \
 	-l:libiceberg_vendored_nanoarrow.a -l:libiceberg_vendored_croaring.a \
+	-l:libarrow_compute.a \
 	$(PREFIX)/lib/libparquet.a $(PREFIX)/lib/libarrow.a \
 	$(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --libs --static parquet arrow | sed -e 's/-lparquet[ ]//g' -e 's/-larrow[ ]//g' -e 's/-L[^ ]*[ ]//g') \
 	-lcurl -lssl -lcrypto -ldl -lrt
@@ -65,6 +66,7 @@ PP_COMMIT_OBJ := $(BUILD_DIR)/pp_commit.o
 PLAN_STORE_OBJ := $(BUILD_DIR)/plan_store.o
 PLAN_STATUS_OBJ := $(BUILD_DIR)/plan_status.o
 REST_SCAN_PLAN_OBJ := $(BUILD_DIR)/rest_scan_plan.o
+SESSION_OBJ := $(BUILD_DIR)/session.o
 PARTITION_STATS_OBJ := $(BUILD_DIR)/partition_stats.o
 ICEBERG_SRC_CPPFLAGS := -Ivendor/iceberg-cpp/src
 VERIFY_OBJ := $(BUILD_DIR)/verify.o
@@ -78,7 +80,7 @@ TEST_SUITE_LIBOBJS := $(WRITER_OBJ) $(SCHEMAS_OBJ) $(SCAN_OBJS) $(PARTITION_STAT
 
 E2E_BIN := $(BUILD_DIR)/primeparts-e2e
 E2E_OBJ := $(BUILD_DIR)/e2e_test.o
-E2E_LIBOBJS := $(REST_SCAN_PLAN_OBJ) $(PLAN_STATUS_OBJ) $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(PP_ICEBERG_REST_OBJ) $(PP_COMMIT_OBJ) $(PP_LMDB_STORE_OBJ) $(PARTITION_STATS_OBJ) $(LMDB_LIB)
+E2E_LIBOBJS := $(SESSION_OBJ) $(REST_SCAN_PLAN_OBJ) $(PLAN_STATUS_OBJ) $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(PP_ICEBERG_REST_OBJ) $(PP_COMMIT_OBJ) $(PP_LMDB_STORE_OBJ) $(PARTITION_STATS_OBJ) $(LMDB_LIB)
 
 .PHONY: all clean test e2e install
 
@@ -315,6 +317,11 @@ e2e: $(E2E_BIN) $(BUILD_DIR)/primeparts-catalogd
 clean:
 	rm -rf $(BUILD_DIR)
 
+
+
+$(SESSION_OBJ): src/client/session.cc include/primeparts/client/session.h include/primeparts/catalog/rest_scan_plan.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/scan/scan_plan.h include/primeparts/scan/scan_planner.h include/primeparts/source_scan.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
 GINAC_CPPFLAGS := $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --cflags ginac)
 GINAC_LDLIBS := $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --libs ginac)
 GRAPH_EXP_OBJ := $(BUILD_DIR)/pp_graph_exp.o
@@ -322,7 +329,7 @@ GRAPH_EXP_OBJ := $(BUILD_DIR)/pp_graph_exp.o
 $(GRAPH_EXP_OBJ): src/graph/pp_graph_exp.cc include/primeparts/catalog/rest_scan_plan.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/scan/scan_plan.h include/primeparts/scan/scan_planner.h include/primeparts/source_scan.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(GINAC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/pp-graph-exp: $(GRAPH_EXP_OBJ) $(REST_SCAN_PLAN_OBJ) $(PLAN_STATUS_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
+$(BUILD_DIR)/pp-graph-exp: $(GRAPH_EXP_OBJ) $(SESSION_OBJ) $(REST_SCAN_PLAN_OBJ) $(PLAN_STATUS_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(GINAC_LDLIBS) -lsqlite3 -pthread -o $@
 
 pp-graph-exp: $(BUILD_DIR)/pp-graph-exp

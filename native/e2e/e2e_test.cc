@@ -2,6 +2,8 @@
 #include "primeparts/catalog/pp_commit.h"
 #include "primeparts/catalog/pp_iceberg_rest.h"
 #include "primeparts/catalog/rest_scan_plan.h"
+#include "primeparts/client/session.h"
+#include "primeparts/scan/column_binder.h"
 #include "primeparts/common/arrow_init.h"
 #include "primeparts/query/query_service.h"
 #include "primeparts/scan/scan_planner.h"
@@ -659,6 +661,137 @@ TEST(E2EFreshCommit, PartitionStatsPresentOnFirstCommit) {
   ASSERT_FALSE(stats.rows.empty())
       << "partition statistics missing on first commit to a fresh table";
   fs::remove_all(wh, ec);
+}
+
+TEST_F(E2ETest, SessionLoadsTableMetadataOverRest) {
+  namespace client = primeparts::client;
+  client::SessionOptions options;
+  options.rest_uri = "http://127.0.0.1:18181";
+  options.warehouse = warehouse_.string();
+  std::string error;
+  auto session = client::Session::Open(options, &error);
+  ASSERT_NE(session, nullptr) << error;
+
+  client::TableHandle primes;
+  ASSERT_TRUE(session->LoadTable("primes", &primes, &error)) << error;
+  ASSERT_NE(primes.metadata(), nullptr)
+      << "metadata must arrive from loadTable, not from a metadata.json read";
+  EXPECT_EQ(primes.name(), "primes");
+  EXPECT_EQ(primes.planning_mode(), ppc::ScanPlanningMode::kServer);
+
+  client::TableHandle missing;
+  EXPECT_FALSE(session->LoadTable("not-a-table", &missing, &error));
+}
+
+TEST_F(E2ETest, SessionScanDispatchesOnTheAdvertisedMode) {
+  namespace client = primeparts::client;
+  client::SessionOptions options;
+  options.rest_uri = "http://127.0.0.1:18181";
+  options.warehouse = warehouse_.string();
+  std::string error;
+  auto session = client::Session::Open(options, &error);
+  ASSERT_NE(session, nullptr) << error;
+
+  client::TableHandle primes;
+  ASSERT_TRUE(session->LoadTable("primes", &primes, &error)) << error;
+
+  primeparts::scan::ScanPlanRequest request;
+  auto stream = session->Scan(primes, request, &error);
+  ASSERT_NE(stream, nullptr) << error;
+  EXPECT_EQ(stream->planned_via(), primes.planning_mode())
+      << "the scan must plan through the route the server advertises";
+  EXPECT_EQ(stream->planned_via(), ppc::ScanPlanningMode::kServer);
+  EXPECT_GT(stream->file_count(), 0);
+}
+
+TEST_F(E2ETest, SessionScanYieldsOnlyRowsSatisfyingTheFilter) {
+  namespace client = primeparts::client;
+  client::SessionOptions options;
+  options.rest_uri = "http://127.0.0.1:18181";
+  options.warehouse = warehouse_.string();
+  std::string error;
+  auto session = client::Session::Open(options, &error);
+  ASSERT_NE(session, nullptr) << error;
+
+  client::TableHandle primes;
+  ASSERT_TRUE(session->LoadTable("primes", &primes, &error)) << error;
+
+  primeparts::scan::ScanPlanRequest unfiltered;
+  unfiltered.select = {"p", "k"};
+  auto all = session->Scan(primes, unfiltered, &error);
+  ASSERT_NE(all, nullptr) << error;
+  int64_t total = 0;
+  int64_t expected_k1 = 0;
+  std::shared_ptr<arrow::RecordBatch> batch;
+  while (all->Next(&batch, &error)) {
+    if (!batch) break;
+    const int32_t* ka = primeparts::scan::BindInt32(*batch, "k", &error);
+    ASSERT_NE(ka, nullptr) << error;
+    for (int64_t i = 0; i < batch->num_rows(); ++i) {
+      ++total;
+      if (ka[i] == 1) ++expected_k1;
+    }
+  }
+  ASSERT_TRUE(error.empty()) << error;
+  ASSERT_GT(total, 0);
+
+  primeparts::scan::ScanPlanRequest filtered;
+  filtered.select = {"p", "k"};
+  filtered.filter = iceberg::Expressions::Equal("k", iceberg::Literal::Int(1));
+  auto stream = session->Scan(primes, filtered, &error);
+  ASSERT_NE(stream, nullptr) << error;
+  int64_t seen = 0;
+  while (stream->Next(&batch, &error)) {
+    if (!batch) break;
+    const int32_t* ka = primeparts::scan::BindInt32(*batch, "k", &error);
+    ASSERT_NE(ka, nullptr) << error;
+    for (int64_t i = 0; i < batch->num_rows(); ++i) {
+      ASSERT_EQ(ka[i], 1)
+          << "the module owns the residual: consumers must not re-filter";
+      ++seen;
+    }
+  }
+  ASSERT_TRUE(error.empty()) << error;
+  EXPECT_EQ(seen, expected_k1);
+}
+
+TEST_F(E2ETest, ShardedScanSeesEveryRowExactlyOnce) {
+  namespace client = primeparts::client;
+  std::string error;
+  auto rows_for = [&](int threads, int* shards) {
+    client::SessionOptions options;
+    options.rest_uri = "http://127.0.0.1:18181";
+    options.warehouse = warehouse_.string();
+    options.scan_threads = threads;
+    auto session = client::Session::Open(options, &error);
+    EXPECT_NE(session, nullptr) << error;
+    client::TableHandle primes;
+    EXPECT_TRUE(session->LoadTable("primes", &primes, &error)) << error;
+    primeparts::scan::ScanPlanRequest request;
+    request.select = {"p"};
+    auto stream = session->Scan(primes, request, &error);
+    EXPECT_NE(stream, nullptr) << error;
+    if (shards) *shards = stream->shard_count();
+    std::vector<int64_t> values;
+    std::shared_ptr<arrow::RecordBatch> batch;
+    while (stream->Next(&batch, &error)) {
+      if (!batch) break;
+      const int64_t* pa = primeparts::scan::BindInt64(*batch, "p", &error);
+      EXPECT_NE(pa, nullptr) << error;
+      for (int64_t i = 0; i < batch->num_rows(); ++i) values.push_back(pa[i]);
+    }
+    std::sort(values.begin(), values.end());
+    return values;
+  };
+
+  int single_shards = 0;
+  int many_shards = 0;
+  auto single = rows_for(1, &single_shards);
+  auto many = rows_for(8, &many_shards);
+  ASSERT_FALSE(single.empty());
+  EXPECT_EQ(single_shards, 1);
+  EXPECT_EQ(single, many)
+      << "sharded reads must partition the task set, not duplicate or drop it";
 }
 
 }  // namespace

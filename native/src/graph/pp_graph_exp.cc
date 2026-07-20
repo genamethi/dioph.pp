@@ -22,20 +22,14 @@
 #include "iceberg/catalog.h"
 #include "iceberg/expression/expressions.h"
 #include "iceberg/expression/literal.h"
-#include "iceberg/manifest/manifest_entry.h"
-#include "iceberg/table_metadata.h"
-#include "iceberg/table_scan.h"
-#include "primeparts/catalog/pp_iceberg_rest.h"
-#include "primeparts/catalog/rest_scan_plan.h"
-#include "primeparts/common/arrow_init.h"
+#include "primeparts/client/session.h"
 #include "primeparts/scan/column_binder.h"
 #include "primeparts/scan/scan_plan.h"
-#include "primeparts/scan/scan_planner.h"
-#include "primeparts/source_scan.h"
 
 #include <flint/flint.h>
 #include <flint/ulong_extras.h>
 
+namespace client = primeparts::client;
 namespace ppc = primeparts::catalog;
 namespace scan = primeparts::scan;
 
@@ -54,6 +48,7 @@ struct PowerEdge {
 
 struct Options {
   int64_t bound = 5000000000LL;
+  int threads = 8;
   std::string rest_uri;
   std::string warehouse = kDefaultWarehouse;
 };
@@ -175,10 +170,12 @@ bool ParseArgs(int argc, char** argv, Options* out) {
       out->rest_uri = need("--rest-uri");
     } else if (a == "--warehouse") {
       out->warehouse = need("--warehouse");
+    } else if (a == "--threads") {
+      out->threads = std::atoi(need("--threads"));
     } else {
       std::fprintf(stderr,
-                   "usage: pp-graph-exp [--bound N] [--rest-uri URI] "
-                   "[--warehouse DIR]\n");
+                   "usage: pp-graph-exp [--bound N] [--threads N] "
+                   "[--rest-uri URI] [--warehouse DIR]\n");
       return false;
     }
   }
@@ -194,30 +191,23 @@ bool ParseArgs(int argc, char** argv, Options* out) {
 int main(int argc, char** argv) {
   Options opt;
   if (!ParseArgs(argc, argv, &opt)) return 2;
-  primeparts::common::EnsureArrowRegistration();
 
   std::string error;
-  std::string mode;
-  auto catalog = ppc::OpenCatalog(opt.warehouse, opt.rest_uri, &mode, &error);
-  if (!catalog) {
-    std::fprintf(stderr, "OpenCatalog: %s\n", error.c_str());
+  client::SessionOptions session_options;
+  session_options.rest_uri = opt.rest_uri;
+  session_options.warehouse = opt.warehouse;
+  session_options.scan_threads = opt.threads;
+  auto session = client::Session::Open(session_options, &error);
+  if (!session) {
+    std::fprintf(stderr, "Session::Open: %s\n", error.c_str());
     return 1;
   }
-  auto ns = ppc::ResolveNamespace("");
-  auto io = ppc::LocalIO();
 
-  auto md_path = ppc::TableMetadataPath(catalog, ns, "partitions", &error);
-  if (md_path.empty()) {
-    std::fprintf(stderr, "TableMetadataPath: %s\n", error.c_str());
+  client::TableHandle partitions;
+  if (!session->LoadTable("partitions", &partitions, &error)) {
+    std::fprintf(stderr, "LoadTable: %s\n", error.c_str());
     return 1;
   }
-  auto md_r = iceberg::TableMetadataUtil::Read(*io, md_path.string());
-  if (!md_r.has_value()) {
-    std::fprintf(stderr, "TableMetadataUtil::Read: %s\n",
-                 md_r.error().message.c_str());
-    return 1;
-  }
-  std::shared_ptr<iceberg::TableMetadata> metadata = std::move(md_r.value());
 
   scan::ScanPlanRequest request;
   request.select = {"p", "m_k", "n_k", "q_k"};
@@ -226,57 +216,18 @@ int main(int argc, char** argv) {
       iceberg::Expressions::LessThanOrEqual("p",
                                             iceberg::Literal::Long(opt.bound)));
 
-  ppc::ScanPlanningMode planning_mode = ppc::ScanPlanningMode::kClient;
-  if (!ppc::FetchScanPlanningMode(opt.rest_uri, ns, "partitions",
-                                  &planning_mode, &error)) {
-    std::fprintf(stderr, "FetchScanPlanningMode: %s\n", error.c_str());
-    return 1;
-  }
-
   auto t0 = std::chrono::steady_clock::now();
-  std::vector<std::shared_ptr<iceberg::FileScanTask>> server_tasks;
-  if (!ppc::PlanScanOnServer(opt.rest_uri, ns, "partitions", request, *metadata,
-                             ppc::PlanPollOptions{}, &server_tasks, &error)) {
-    std::fprintf(stderr, "PlanScanOnServer: %s\n", error.c_str());
+  auto stream = session->Scan(partitions, request, &error);
+  if (!stream) {
+    std::fprintf(stderr, "Scan: %s\n", error.c_str());
     return 1;
   }
-  double t_server = Seconds(t0);
+  double t_plan = Seconds(t0);
 
   t0 = std::chrono::steady_clock::now();
-  scan::ScanPlan plan;
-  if (!scan::PlanTableScan(metadata, io, request, &plan, &error)) {
-    std::fprintf(stderr, "PlanTableScan: %s\n", error.c_str());
-    return 1;
-  }
-  double t_local = Seconds(t0);
-
-  std::set<std::string> server_paths;
-  std::set<std::string> local_paths;
-  for (const auto& t : server_tasks)
-    server_paths.insert(t->data_file()->file_path);
-  for (const auto& t : plan.tasks)
-    local_paths.insert(t.inner->data_file()->file_path);
-  const bool agree = server_paths == local_paths;
-
-  std::printf(
-      "[wiring] mode=%s server_tasks=%zu local_tasks=%zu agree=%s "
-      "plan_server=%.2fs plan_local=%.2fs\n",
-      planning_mode == ppc::ScanPlanningMode::kServer ? "server" : "client",
-      server_tasks.size(), plan.tasks.size(), agree ? "yes" : "NO", t_server,
-      t_local);
-
-  plan.tasks.clear();
-  for (const auto& t : server_tasks) plan.tasks.push_back({t, std::nullopt, 0});
-
-  t0 = std::chrono::steady_clock::now();
-  auto reader = primeparts::SourceTableReader::Open(std::move(plan), io, &error);
-  if (!reader) {
-    std::fprintf(stderr, "SourceTableReader::Open: %s\n", error.c_str());
-    return 1;
-  }
   std::vector<PowerEdge> edges;
   std::shared_ptr<arrow::RecordBatch> batch;
-  while (reader->Next(&batch, &error)) {
+  while (stream->Next(&batch, &error)) {
     if (!batch) break;
     const int64_t* pa = scan::BindInt64(*batch, "p", &error);
     const int32_t* ma = scan::BindInt32(*batch, "m_k", &error);
@@ -287,7 +238,6 @@ int main(int argc, char** argv) {
       return 1;
     }
     for (int64_t i = 0; i < batch->num_rows(); ++i) {
-      if (na[i] < 2 || pa[i] > opt.bound) continue;
       edges.push_back({pa[i], qa[i], ma[i], na[i]});
     }
   }
@@ -296,6 +246,14 @@ int main(int argc, char** argv) {
     return 1;
   }
   double t_read = Seconds(t0);
+
+  std::printf(
+      "[wiring] planned_via=%s files=%" PRId64 " shards=%d planned_rows=%" PRId64
+      " plan=%.2fs read=%.2fs\n",
+      stream->planned_via() == ppc::ScanPlanningMode::kServer ? "server"
+                                                              : "client",
+      stream->file_count(), stream->shard_count(), stream->planned_rows(),
+      t_plan, t_read);
 
   int64_t bad = 0;
   for (const auto& e : edges) {
@@ -308,9 +266,9 @@ int main(int argc, char** argv) {
   int32_t predicted = static_cast<int32_t>(
       std::floor(std::log(static_cast<double>(opt.bound)) / std::log(3.0)));
 
-  std::printf("[census] power_edges=%zu read=%.2fs identity_bad=%" PRId64
+  std::printf("[census] power_edges=%zu identity_bad=%" PRId64
               " max_n=%d floor(log3 B)=%d\n",
-              edges.size(), t_read, bad, max_n, predicted);
+              edges.size(), bad, max_n, predicted);
   for (const auto& [n, c] : grading)
     std::printf("[census] n=%d edges=%" PRId64 "\n", n, c);
 
