@@ -8,8 +8,10 @@
 #include <cstdlib>
 #include <map>
 #include <memory>
+#include <queue>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -336,14 +338,43 @@ int main(int argc, char** argv) {
   std::vector<int64_t> nodes(node_set.begin(), node_set.end());
   std::sort(nodes.begin(), nodes.end());
 
+  std::unordered_map<int64_t, int64_t> last_child;
+  for (const auto& e : edges) {
+    auto& lc = last_child[e.q];
+    if (e.p > lc) lc = e.p;
+  }
+
   t0 = std::chrono::steady_clock::now();
   std::unordered_map<int64_t, ClassMap> memo;
-  memo.reserve(nodes.size());
+  std::priority_queue<std::pair<int64_t, int64_t>,
+                      std::vector<std::pair<int64_t, int64_t>>,
+                      std::greater<>>
+      live;
+  int64_t live_entries = 0;
+  int64_t peak_entries = 0;
+
+  const Word seed;
+  std::unordered_set<Word, WordHash> distinct_words;
+  int64_t maximal_classes = 0;
+  int64_t maximal_chains = 0;
+  int64_t max_degree = 0;
+  std::vector<std::tuple<int64_t, int64_t, Word, int64_t>> raws;
+
   for (int64_t v : nodes) {
+    while (!live.empty() && live.top().first < v) {
+      int64_t u = live.top().second;
+      live.pop();
+      auto mit = memo.find(u);
+      if (mit != memo.end()) {
+        live_entries -= static_cast<int64_t>(mit->second.size());
+        memo.erase(mit);
+      }
+    }
+
     ClassMap res;
     auto it = parents.find(v);
     if (it == parents.end()) {
-      res[Class{v, Word{}}] = 1;
+      res[Class{v, seed}] = 1;
     } else {
       for (const auto& e : it->second) {
         const int64_t c = int64_t{1} << e.m;
@@ -354,31 +385,31 @@ int main(int argc, char** argv) {
         }
       }
     }
-    memo[v] = std::move(res);
+
+    if (has_children.count(v)) {
+      live_entries += static_cast<int64_t>(res.size());
+      peak_entries = std::max(peak_entries, live_entries);
+      memo[v] = std::move(res);
+      live.push({last_child[v], v});
+    } else {
+      for (const auto& [cls, cnt] : res) {
+        if (cls.word == seed) continue;
+        ++maximal_classes;
+        maximal_chains += cnt;
+        distinct_words.insert(cls.word);
+        max_degree = std::max(max_degree, WordDegree(cls.word));
+        if (opt.materialize) raws.emplace_back(v, cls.root, cls.word, cnt);
+      }
+    }
   }
   double t_dp = Seconds(t0);
 
-  const Word seed;
-  std::unordered_set<Word, WordHash> distinct_words;
-  int64_t maximal_classes = 0;
-  int64_t maximal_chains = 0;
-  int64_t max_degree = 0;
-  for (int64_t v : nodes) {
-    if (has_children.count(v)) continue;
-    for (const auto& [cls, cnt] : memo[v]) {
-      if (cls.word == seed) continue;
-      ++maximal_classes;
-      maximal_chains += cnt;
-      distinct_words.insert(cls.word);
-      max_degree = std::max(max_degree, WordDegree(cls.word));
-    }
-  }
-
   std::printf(
       "[collapse] maximal_classes=%" PRId64 " distinct_words=%zu "
-      "maximal_chains=%" PRId64 " max_degree=%" PRId64 " dp=%.2fs\n",
-      maximal_classes, distinct_words.size(), maximal_chains, max_degree,
-      t_dp);
+      "maximal_chains=%" PRId64 " max_degree=%" PRId64 " dp=%.2fs "
+      "peak_live_entries=%" PRId64 "\n",
+      maximal_classes, distinct_words.size(), maximal_chains, max_degree, t_dp,
+      peak_entries);
 
   if (!opt.materialize) return 0;
 
@@ -409,15 +440,11 @@ int main(int argc, char** argv) {
   ppq::MaterializeColumn nc_root{"root_id", ppq::ColumnType::kLong, {}, {}, true};
   ppq::MaterializeColumn nc_word{"word_id", ppq::ColumnType::kLong, {}, {}, true};
   ppq::MaterializeColumn nc_mult{"mult", ppq::ColumnType::kLong, {}, {}, false};
-  for (int64_t v : nodes) {
-    if (has_children.count(v)) continue;
-    for (const auto& [cls, cnt] : memo[v]) {
-      if (cls.word == seed) continue;
-      nc_node.ints.push_back(v);
-      nc_root.ints.push_back(cls.root);
-      nc_word.ints.push_back(word_id[cls.word]);
-      nc_mult.ints.push_back(cnt);
-    }
+  for (const auto& [node, root, word, cnt] : raws) {
+    nc_node.ints.push_back(node);
+    nc_root.ints.push_back(root);
+    nc_word.ints.push_back(word_id[word]);
+    nc_mult.ints.push_back(cnt);
   }
 
   ppc::RestOptions ropts;
