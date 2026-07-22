@@ -108,6 +108,21 @@ double Seconds(std::chrono::steady_clock::time_point t0) {
       .count();
 }
 
+std::string Int128Str(__int128 v) {
+  if (v == 0) return "0";
+  bool neg = v < 0;
+  unsigned __int128 u = neg ? -static_cast<unsigned __int128>(v)
+                            : static_cast<unsigned __int128>(v);
+  char buf[40];
+  int i = 40;
+  while (u) {
+    buf[--i] = static_cast<char>('0' + static_cast<int>(u % 10));
+    u /= 10;
+  }
+  std::string s(buf + i, buf + 40);
+  return neg ? "-" + s : s;
+}
+
 std::string StripFileScheme(const std::string& path) {
   if (path.rfind("file://", 0) == 0) return path.substr(7);
   if (path.rfind("file:", 0) == 0) return path.substr(5);
@@ -434,7 +449,7 @@ int main(int argc, char** argv) {
     return id;
   };
   int64_t maximal_classes = 0;
-  int64_t maximal_chains = 0;
+  __int128 maximal_chains = 0;
   int64_t max_degree = 0;
 
   ppc::RestOptions ropts;
@@ -460,6 +475,10 @@ int main(int argc, char** argv) {
     }
   }
 
+  size_t sweep_idx = 0;
+  size_t sweep_step = std::max<size_t>(1, nodes.size() / 20);
+  std::vector<std::pair<int64_t, int64_t>> profile;
+
   for (int64_t v : nodes) {
     while (!live.empty() && live.top().first < v) {
       int64_t u = live.top().second;
@@ -470,6 +489,7 @@ int main(int argc, char** argv) {
         memo.erase(mit);
       }
     }
+    if (sweep_idx++ % sweep_step == 0) profile.emplace_back(v, live_entries);
 
     ClassMap res;
     auto it = parents.find(v);
@@ -509,10 +529,13 @@ int main(int argc, char** argv) {
 
   std::printf(
       "[collapse] maximal_classes=%" PRId64 " distinct_words=%zu "
-      "maximal_chains=%" PRId64 " max_degree=%" PRId64 " dp=%.2fs "
+      "maximal_chains=%s max_degree=%" PRId64 " dp=%.2fs "
       "peak_live_entries=%" PRId64 "\n",
-      maximal_classes, sink_word_id.size(), maximal_chains, max_degree, t_dp,
-      peak_entries);
+      maximal_classes, sink_word_id.size(), Int128Str(maximal_chains).c_str(),
+      max_degree, t_dp, peak_entries);
+  for (const auto& [pos, live] : profile)
+    std::printf("[profile] p<=%" PRId64 " live_entries=%" PRId64 "\n", pos,
+                live);
 
   if (!opt.materialize) return 0;
 
