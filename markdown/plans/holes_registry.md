@@ -121,6 +121,13 @@ assertions stay; capability assertions retire with their holes.
   files. `PlanScanOnServer` yields the task set and `SourceTableReader` reads
   Parquet, but no consumer joins the two — the query engine behind the plan is
   unwritten — filed-by pp_graph 05 — owner: pp-graph
+- DuckDB's iceberg REST client (1.5.4) cannot read data files vended by
+  `pp-catalogd`: its `ATTACH (TYPE ICEBERG)` read path assumes cloud object
+  storage and demands a region / vended credentials, and `DEFAULT_REGION` is
+  rejected as an unhandled ATTACH option. Catalog navigation over `/v1` and
+  direct `read_parquet`/`iceberg_scan(metadata.json)` both work; the local-file
+  read path through the REST catalog does not — filed-by pp_graph 04 (conformance
+  probe 2026-07-22) — owner: pp-graph
 
 **type narrowing — producer side**
 

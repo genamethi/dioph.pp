@@ -334,3 +334,14 @@ $(BUILD_DIR)/pp-graph-exp: $(GRAPH_EXP_OBJ) $(SESSION_OBJ) $(REST_SCAN_PLAN_OBJ)
 
 pp-graph-exp: $(BUILD_DIR)/pp-graph-exp
 .PHONY: pp-graph-exp
+
+PP_FIXTURE_OBJ := $(BUILD_DIR)/pp_fixture_warehouse.o
+
+$(PP_FIXTURE_OBJ): e2e/pp_fixture_warehouse.cc include/primeparts/catalog/pp_commit.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/catalog/partition_stats.h include/primeparts/schemas.h include/primeparts/writer.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/pp-fixture-warehouse: $(PP_FIXTURE_OBJ) $(WRITER_OBJ) $(SCHEMAS_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_COMMIT_OBJ) $(PP_LMDB_STORE_OBJ) $(PARTITION_STATS_OBJ) $(LMDB_LIB)
+	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
+
+pp-fixture-warehouse: $(BUILD_DIR)/pp-fixture-warehouse
+.PHONY: pp-fixture-warehouse
