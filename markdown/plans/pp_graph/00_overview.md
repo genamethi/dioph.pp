@@ -23,8 +23,12 @@ the reference numbers, composite-degree spectrum full.
 
 ## Invariants
 
-- Read-only against the live warehouse throughout this plan; live-warehouse
-  mutations are user-only.
+- Source tables (`primes`, `partitions`) are not mutated by pp-graph. pp-graph
+  creates/replaces its own derived tables (`primes_k0`, `chain_words`,
+  `node_classes`) through the standard IRC write path (`createTable`/`updateTable`),
+  exactly as `generate` and `MaterializeIntColumns` already do — normal protocol,
+  not a special dispensation (the spec defines these writes). The
+  merge-to-`tui-query` call stays user-only.
 - Zero code comments; spec names for new types.
 - Every phase boundary compiles; one commit per phase, message = the phase
   document.

@@ -32,7 +32,11 @@ competing constraints to be met together, not traded off.
 - `vendor/` untouched — no patches to vendored sources. Build flags and CMake
   options the vendored trees expose are NOT patches and are in scope.
 - Deleted capability is deleted. Every phase boundary compiles.
-- Live-warehouse mutations are user-only; the user makes merge calls.
+- pp-graph does not mutate the source tables (`primes`, `partitions`); it
+  creates/replaces its own derived tables (`primes_k0`, `chain_words`,
+  `node_classes`) via the standard IRC write path (`createTable`/`updateTable`),
+  as `generate` and `MaterializeIntColumns` already do. Merge-to-`tui-query` calls
+  stay user-only.
 - Hole entries document what is missing only. Resolutions live in the separate
   section at the end. Unowned → `owner: unassigned`.
 

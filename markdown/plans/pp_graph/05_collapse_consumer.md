@@ -15,6 +15,12 @@ registry: open ground). Built on the phase-04 substrate. The math is settled in
       (cached, not fully materialized)**; termination points from the
       `primes ⟝ partitions` anti-join (= k=0 roots). A chain terminates at a node
       iff it is a **k=0 prime** OR sits **below the previous frontier**.
+- [ ] **Regenerate `primes_k0`** from that anti-join, materialized under the pp
+      convention (`primeparts/primes_k0`, bare paths). The existing
+      `primeparts.db/primes_k0` (3.87B rows) is a foreign pyiceberg layout
+      (`file:` URIs, `.crc` sidecars, `<ns>.db` dir) baked into its manifests;
+      pp-graph owns the k=0 roots and writes them fresh rather than migrating the
+      foreign metadata. `primes_k0_sieve` is left untouched.
 - [ ] Two derived tables via `MaterializeIntColumns` (Iceberg MVs):
       `chain_words(word_id stable/append-only, degree, skeleton, translations,
       hermite, symbolic)` and `node_classes(node_id, root_id, word_id, mult)`.
