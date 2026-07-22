@@ -354,11 +354,18 @@ int main(int argc, char** argv) {
   int64_t peak_entries = 0;
 
   const Word seed;
-  std::unordered_set<Word, WordHash> distinct_words;
+  std::unordered_map<Word, int64_t, WordHash> sink_word_id;
+  auto intern_sink = [&](const Word& w) -> int64_t {
+    auto f = sink_word_id.find(w);
+    if (f != sink_word_id.end()) return f->second;
+    int64_t id = static_cast<int64_t>(sink_word_id.size());
+    sink_word_id.emplace(w, id);
+    return id;
+  };
   int64_t maximal_classes = 0;
   int64_t maximal_chains = 0;
   int64_t max_degree = 0;
-  std::vector<std::tuple<int64_t, int64_t, Word, int64_t>> raws;
+  std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t>> raws;
 
   for (int64_t v : nodes) {
     while (!live.empty() && live.top().first < v) {
@@ -396,9 +403,9 @@ int main(int argc, char** argv) {
         if (cls.word == seed) continue;
         ++maximal_classes;
         maximal_chains += cnt;
-        distinct_words.insert(cls.word);
+        int64_t wid = intern_sink(cls.word);
         max_degree = std::max(max_degree, WordDegree(cls.word));
-        if (opt.materialize) raws.emplace_back(v, cls.root, cls.word, cnt);
+        if (opt.materialize) raws.emplace_back(v, cls.root, wid, cnt);
       }
     }
   }
@@ -408,16 +415,20 @@ int main(int argc, char** argv) {
       "[collapse] maximal_classes=%" PRId64 " distinct_words=%zu "
       "maximal_chains=%" PRId64 " max_degree=%" PRId64 " dp=%.2fs "
       "peak_live_entries=%" PRId64 "\n",
-      maximal_classes, distinct_words.size(), maximal_chains, max_degree, t_dp,
+      maximal_classes, sink_word_id.size(), maximal_chains, max_degree, t_dp,
       peak_entries);
 
   if (!opt.materialize) return 0;
 
-  std::vector<Word> words(distinct_words.begin(), distinct_words.end());
-  std::sort(words.begin(), words.end());
-  std::unordered_map<Word, int64_t, WordHash> word_id;
-  word_id.reserve(words.size());
-  for (size_t i = 0; i < words.size(); ++i) word_id[words[i]] = static_cast<int64_t>(i);
+  std::vector<Word> words(sink_word_id.size());
+  for (const auto& [w, id] : sink_word_id) words[id] = w;
+  std::vector<int64_t> order(words.size());
+  for (size_t i = 0; i < order.size(); ++i) order[i] = static_cast<int64_t>(i);
+  std::sort(order.begin(), order.end(),
+            [&](int64_t a, int64_t b) { return words[a] < words[b]; });
+  std::vector<int64_t> final_id(words.size());
+  for (size_t i = 0; i < order.size(); ++i)
+    final_id[order[i]] = static_cast<int64_t>(i);
 
   GiNaC::symbol x("x");
   ppq::MaterializeColumn cw_id{"word_id", ppq::ColumnType::kLong, {}, {}, true};
@@ -426,8 +437,8 @@ int main(int argc, char** argv) {
   ppq::MaterializeColumn cw_tr{"translations", ppq::ColumnType::kString, {}, {}, false};
   ppq::MaterializeColumn cw_he{"hermite", ppq::ColumnType::kString, {}, {}, false};
   ppq::MaterializeColumn cw_sym{"symbolic", ppq::ColumnType::kString, {}, {}, false};
-  for (size_t i = 0; i < words.size(); ++i) {
-    Features f = WordFeatures(words[i], x);
+  for (size_t i = 0; i < order.size(); ++i) {
+    Features f = WordFeatures(words[order[i]], x);
     cw_id.ints.push_back(static_cast<int64_t>(i));
     cw_deg.ints.push_back(f.degree);
     cw_sk.strings.push_back(f.skeleton);
@@ -440,10 +451,10 @@ int main(int argc, char** argv) {
   ppq::MaterializeColumn nc_root{"root_id", ppq::ColumnType::kLong, {}, {}, true};
   ppq::MaterializeColumn nc_word{"word_id", ppq::ColumnType::kLong, {}, {}, true};
   ppq::MaterializeColumn nc_mult{"mult", ppq::ColumnType::kLong, {}, {}, false};
-  for (const auto& [node, root, word, cnt] : raws) {
+  for (const auto& [node, root, wid, cnt] : raws) {
     nc_node.ints.push_back(node);
     nc_root.ints.push_back(root);
-    nc_word.ints.push_back(word_id[word]);
+    nc_word.ints.push_back(final_id[wid]);
     nc_mult.ints.push_back(cnt);
   }
 
@@ -471,6 +482,6 @@ int main(int argc, char** argv) {
     return 1;
   }
   std::printf("[materialize] chain_words rows=%zu node_classes rows=%zu pub=%.2fs\n",
-              words.size(), nc_node.ints.size(), Seconds(t_pub));
+              order.size(), nc_node.ints.size(), Seconds(t_pub));
   return 0;
 }
