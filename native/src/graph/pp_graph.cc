@@ -1,11 +1,14 @@
 #include <duckdb.hpp>
+#include <ginac/ginac.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -18,10 +21,12 @@
 #include "primeparts/catalog/pp_iceberg_rest.h"
 #include "primeparts/catalog/rest_scan_plan.h"
 #include "primeparts/client/session.h"
+#include "primeparts/query/materialize.h"
 #include "primeparts/scan/scan_plan.h"
 
 namespace client = primeparts::client;
 namespace ppc = primeparts::catalog;
+namespace ppq = primeparts::query;
 namespace scan = primeparts::scan;
 
 namespace {
@@ -33,8 +38,10 @@ constexpr const char* kDefaultRestUri = "http://127.0.0.1:8181";
 struct Options {
   int64_t bound = 5000000000LL;
   int threads = 8;
+  bool materialize = false;
   std::string rest_uri;
   std::string warehouse = kDefaultWarehouse;
+  std::string ns_name;
 };
 
 struct Edge {
@@ -49,6 +56,10 @@ struct Word {
   std::vector<std::pair<int32_t, int64_t>> segs;
   bool operator==(const Word& o) const {
     return a0 == o.a0 && segs == o.segs;
+  }
+  bool operator<(const Word& o) const {
+    if (a0 != o.a0) return a0 < o.a0;
+    return segs < o.segs;
   }
 };
 
@@ -125,6 +136,80 @@ int64_t WordDegree(const Word& w) {
   return d;
 }
 
+GiNaC::ex He(int n, const GiNaC::symbol& x) {
+  GiNaC::ex a = 1;
+  GiNaC::ex b = x;
+  if (n == 0) return a;
+  for (int k = 1; k < n; ++k) {
+    GiNaC::ex c = GiNaC::expand(x * b - k * a);
+    a = b;
+    b = c;
+  }
+  return b;
+}
+
+std::map<int, GiNaC::ex> ToHermite(GiNaC::ex P, const GiNaC::symbol& x) {
+  std::map<int, GiNaC::ex> out;
+  P = GiNaC::expand(P);
+  while (!P.is_zero()) {
+    int d = P.degree(x);
+    GiNaC::ex c = P.lcoeff(x);
+    out[d] = c;
+    P = GiNaC::expand(P - c * He(d, x));
+    if (d == 0) break;
+  }
+  return out;
+}
+
+std::string JsonInts(const std::vector<int64_t>& v) {
+  std::string s = "[";
+  for (size_t i = 0; i < v.size(); ++i) {
+    if (i) s += ", ";
+    s += std::to_string(v[i]);
+  }
+  s += "]";
+  return s;
+}
+
+struct Features {
+  int64_t degree = 1;
+  std::string skeleton;
+  std::string translations;
+  std::string hermite;
+  std::string symbolic;
+};
+
+Features WordFeatures(const Word& w, const GiNaC::symbol& x) {
+  GiNaC::ex p = x + GiNaC::numeric(static_cast<long>(w.a0));
+  std::vector<int64_t> sk;
+  std::vector<int64_t> tr{w.a0};
+  for (const auto& [n, c] : w.segs) {
+    p = GiNaC::pow(p, n) + GiNaC::numeric(static_cast<long>(c));
+    sk.push_back(n);
+    tr.push_back(c);
+  }
+  auto hd = ToHermite(p, x);
+  Features f;
+  f.degree = WordDegree(w);
+  f.skeleton = JsonInts(sk);
+  f.translations = JsonInts(tr);
+  std::string h = "{";
+  bool first = true;
+  for (const auto& [k, coef] : hd) {
+    if (!first) h += ",";
+    first = false;
+    std::ostringstream cs;
+    cs << coef;
+    h += "\"" + std::to_string(k) + "\":" + cs.str();
+  }
+  h += "}";
+  f.hermite = h;
+  std::ostringstream ss;
+  ss << GiNaC::expand(p);
+  f.symbolic = ss.str();
+  return f;
+}
+
 bool ParseArgs(int argc, char** argv, Options* out) {
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -141,12 +226,16 @@ bool ParseArgs(int argc, char** argv, Options* out) {
       out->rest_uri = need("--rest-uri");
     } else if (a == "--warehouse") {
       out->warehouse = need("--warehouse");
+    } else if (a == "--namespace") {
+      out->ns_name = need("--namespace");
     } else if (a == "--threads") {
       out->threads = std::atoi(need("--threads"));
+    } else if (a == "--materialize") {
+      out->materialize = true;
     } else {
       std::fprintf(stderr,
-                   "usage: pp-graph [--bound N] [--threads N] "
-                   "[--rest-uri URI] [--warehouse DIR]\n");
+                   "usage: pp-graph [--bound N] [--threads N] [--materialize] "
+                   "[--rest-uri URI] [--warehouse DIR] [--namespace NS]\n");
       return false;
     }
   }
@@ -185,7 +274,7 @@ int main(int argc, char** argv) {
   request.filter = iceberg::Expressions::LessThanOrEqual(
       "p", iceberg::Literal::Long(opt.bound));
 
-  const auto ns = ppc::ResolveNamespace("");
+  const auto ns = ppc::ResolveNamespace(opt.ns_name);
   auto t0 = std::chrono::steady_clock::now();
   std::vector<std::shared_ptr<iceberg::FileScanTask>> tasks;
   if (!ppc::PlanScanOnServer(opt.rest_uri, ns, "partitions", request,
@@ -269,11 +358,11 @@ int main(int argc, char** argv) {
   }
   double t_dp = Seconds(t0);
 
+  const Word seed;
   std::unordered_set<Word, WordHash> distinct_words;
   int64_t maximal_classes = 0;
   int64_t maximal_chains = 0;
   int64_t max_degree = 0;
-  const Word seed;
   for (int64_t v : nodes) {
     if (has_children.count(v)) continue;
     for (const auto& [cls, cnt] : memo[v]) {
@@ -290,5 +379,71 @@ int main(int argc, char** argv) {
       "maximal_chains=%" PRId64 " max_degree=%" PRId64 " dp=%.2fs\n",
       maximal_classes, distinct_words.size(), maximal_chains, max_degree,
       t_dp);
+
+  if (!opt.materialize) return 0;
+
+  std::vector<Word> words(distinct_words.begin(), distinct_words.end());
+  std::sort(words.begin(), words.end());
+  std::unordered_map<Word, int64_t, WordHash> word_id;
+  word_id.reserve(words.size());
+  for (size_t i = 0; i < words.size(); ++i) word_id[words[i]] = static_cast<int64_t>(i);
+
+  GiNaC::symbol x("x");
+  ppq::MaterializeColumn cw_id{"word_id", ppq::ColumnType::kLong, {}, {}, true};
+  ppq::MaterializeColumn cw_deg{"degree", ppq::ColumnType::kLong, {}, {}, true};
+  ppq::MaterializeColumn cw_sk{"skeleton", ppq::ColumnType::kString, {}, {}, false};
+  ppq::MaterializeColumn cw_tr{"translations", ppq::ColumnType::kString, {}, {}, false};
+  ppq::MaterializeColumn cw_he{"hermite", ppq::ColumnType::kString, {}, {}, false};
+  ppq::MaterializeColumn cw_sym{"symbolic", ppq::ColumnType::kString, {}, {}, false};
+  for (size_t i = 0; i < words.size(); ++i) {
+    Features f = WordFeatures(words[i], x);
+    cw_id.ints.push_back(static_cast<int64_t>(i));
+    cw_deg.ints.push_back(f.degree);
+    cw_sk.strings.push_back(f.skeleton);
+    cw_tr.strings.push_back(f.translations);
+    cw_he.strings.push_back(f.hermite);
+    cw_sym.strings.push_back(f.symbolic);
+  }
+
+  ppq::MaterializeColumn nc_node{"node_id", ppq::ColumnType::kLong, {}, {}, true};
+  ppq::MaterializeColumn nc_root{"root_id", ppq::ColumnType::kLong, {}, {}, true};
+  ppq::MaterializeColumn nc_word{"word_id", ppq::ColumnType::kLong, {}, {}, true};
+  ppq::MaterializeColumn nc_mult{"mult", ppq::ColumnType::kLong, {}, {}, false};
+  for (int64_t v : nodes) {
+    if (has_children.count(v)) continue;
+    for (const auto& [cls, cnt] : memo[v]) {
+      if (cls.word == seed) continue;
+      nc_node.ints.push_back(v);
+      nc_root.ints.push_back(cls.root);
+      nc_word.ints.push_back(word_id[cls.word]);
+      nc_mult.ints.push_back(cnt);
+    }
+  }
+
+  ppc::RestOptions ropts;
+  ropts.rest_uri = opt.rest_uri;
+  std::string mode;
+  auto catalog = ppc::MakeCatalog(ropts, opt.warehouse, &mode, &error);
+  if (!catalog) {
+    std::fprintf(stderr, "MakeCatalog: %s\n", error.c_str());
+    return 1;
+  }
+
+  auto t_pub = std::chrono::steady_clock::now();
+  std::string meta;
+  std::vector<ppq::MaterializeColumn> cw{cw_id, cw_deg, cw_sk, cw_tr, cw_he, cw_sym};
+  if (!ppq::MaterializeColumns(catalog, ns, opt.warehouse, "chain_words", cw,
+                               &meta, &error)) {
+    std::fprintf(stderr, "materialize chain_words: %s\n", error.c_str());
+    return 1;
+  }
+  std::vector<ppq::MaterializeColumn> nc{nc_node, nc_root, nc_word, nc_mult};
+  if (!ppq::MaterializeColumns(catalog, ns, opt.warehouse, "node_classes", nc,
+                               &meta, &error)) {
+    std::fprintf(stderr, "materialize node_classes: %s\n", error.c_str());
+    return 1;
+  }
+  std::printf("[materialize] chain_words rows=%zu node_classes rows=%zu pub=%.2fs\n",
+              words.size(), nc_node.ints.size(), Seconds(t_pub));
   return 0;
 }

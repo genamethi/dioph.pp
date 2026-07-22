@@ -352,11 +352,11 @@ pp-fixture-warehouse: $(BUILD_DIR)/pp-fixture-warehouse
 
 PP_GRAPH_OBJ := $(BUILD_DIR)/pp_graph.o
 
-$(PP_GRAPH_OBJ): src/graph/pp_graph.cc include/primeparts/catalog/rest_scan_plan.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/scan/scan_plan.h include/primeparts/scan/scan_planner.h include/primeparts/client/session.h | $(BUILD_DIR)
-	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(DUCKDB_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+$(PP_GRAPH_OBJ): src/graph/pp_graph.cc include/primeparts/catalog/rest_scan_plan.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/scan/scan_plan.h include/primeparts/scan/scan_planner.h include/primeparts/client/session.h include/primeparts/query/materialize.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(DUCKDB_CPPFLAGS) $(GINAC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/pp-graph: $(PP_GRAPH_OBJ) $(SESSION_OBJ) $(REST_SCAN_PLAN_OBJ) $(PLAN_STATUS_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
-	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $(DUCKDB_RPATH) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(DUCKDB_LDLIBS) -lsqlite3 -pthread -o $@
+$(BUILD_DIR)/pp-graph: $(PP_GRAPH_OBJ) $(SESSION_OBJ) $(REST_SCAN_PLAN_OBJ) $(PLAN_STATUS_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(PP_ICEBERG_REST_OBJ) $(PP_COMMIT_OBJ) $(PARTITION_STATS_OBJ) $(PP_LMDB_STORE_OBJ) $(BUILD_DIR)/materialize.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(LMDB_LIB)
+	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $(DUCKDB_RPATH) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(DUCKDB_LDLIBS) $(GINAC_LDLIBS) -lsqlite3 -pthread -o $@
 
 pp-graph: $(BUILD_DIR)/pp-graph
 .PHONY: pp-graph
