@@ -18,13 +18,29 @@ registry: open ground). Built on the phase-04 substrate. The math is settled in
       at B=1e3 (197 words / 201 classes, round-tripped via DuckDB `iceberg_scan`).
       GiNaC `He`/`ToHermite` for the Hermite features. `word_id` is dense-by-sorted
       today; stable/append-only across bounds is a scaling concern.
-- [ ] **Scaling / incremental machinery (active).** Incremental frontier passes
-      (`OpenIncremental` `from_snapshot_id_exclusive` + bound-invariance) under a
-      **24 GB working-set cap**; the `q_k->p` pivot **DuckDB-managed** (out-of-core,
-      per-pass in-memory window via range-query); the native memo **flushed to
-      parquet between passes**. Termination: a chain ends at a node iff it is a k=0
-      prime OR sits below the previous frontier. Feature computation to parallelize
-      (currently serial); DP sweep to parallelize per-sink.
+- [ ] **Data model (done 2026-07-22).** Trie-DAG word store (`Seg{parent,n,C}` +
+      interned words) = the Hopf coproduct; memo = int32 word-id sets; root derived
+      (`q=W⁻¹(p)`, unique), count dropped; `node_classes = (node, word)`. Memo is
+      now tiny; the persistent **store is the product**, destined for disk. See
+      `../../math/hopf_structure.md`.
+- [ ] **Optimization backlog — do NOT drop these (discussed, not yet built):**
+      1. **Parallel workers on a shared memo** — the core ask. Dispatch nodes (one
+         at a time, or a slice per worker) to a thread pool; each does top-down
+         `paths_down`, **breaking the moment it hits a node already in the shared
+         memo** (membership = reuse). Target: saturate all cores. Needs a
+         concurrent (sharded-lock) memo + store.
+      2. **Hybrid prune** — memo-and-kill the empirically low-value tails first
+         (`n=1` pure translation chains, `k=0` = roots, `k=1`) so the expensive
+         traversal only runs on the long-chain core. Candidates are data-driven;
+         revisit as the spectrum data grows.
+      3. **Flush the store to disk at a set batch size** — batch sized to fill
+         memory (>20 GB) + cores, tuned *after* the algorithm is right. Not 10x-B
+         jumps — finer steps; large B is not the sole goal.
+      4. **Fuse the two-level intern** (seg then word) — the ~2x `Push` slowdown is
+         double hashing; one hash or a better key fixes it.
+      5. Parallelize the **GiNaC feature pass** (the `pub` bottleneck).
+      Termination for incremental: a chain ends at a node iff it is a k=0 prime OR
+      below the previous frontier.
 - [ ] **Injectivity lemma** (collapse classes = canonical words; Ritt, nonzero
       inter-power constants) written down — underwrites the word representation.
 - [ ] **Regenerate `primes_k0`** — **deferred TODO, out of scope for now.** From
