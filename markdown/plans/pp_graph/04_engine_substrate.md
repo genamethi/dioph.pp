@@ -25,11 +25,13 @@ extension. No JVM; Rust only with a killer app (none yet).
       separately (`ExtensionHelper::LoadAllExtensions` unresolved), so **shared +
       rpath** is the default (matches notcurses); static is a follow-up.
 - [x] **Conformance probe = spec-surface audit** (2026-07-22) — see results below.
-- [ ] Wire the consumer data path: `rest_scan_plan::PlanScanOnServer` →
-      FileScanTask → **in-process DuckDB** reads the returned data files
-      (`read_parquet([paths])` on the plan's file set); Substrait as the relational
-      plan IR where a plan needs to cross to Acero. Data reads never cross the
-      server.
+- [x] Wire the consumer data path (`native/src/graph/pp_graph.cc`, `make
+      pp-graph`): `PlanScanOnServer` → FileScanTask paths → **in-process DuckDB**
+      `read_parquet([paths])`. Verified live over `partitions`: B=1e8 → 10.8M edges
+      in 0.8s read / 0.03s plan, `max_n = floor(log_3 B)` exact (12 at 1e6, 16 at
+      1e8). The DuckDB↔static-iceberg/arrow link is clean (no symbol clash).
+      Substrait→Acero is only for a plan that needs to cross out of DuckDB — not
+      yet needed. Data reads never cross the server.
 - [x] Decision recorded — **bought vs built**: *bought* = DuckDB as the
       in-process relational engine / point-lookup / out-of-core cache, reading the
       Parquet the scan plan points to (the pivot is DuckDB-managed, not a full
