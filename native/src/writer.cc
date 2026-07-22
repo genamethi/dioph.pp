@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <optional>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -78,35 +79,49 @@ struct ResolvedStatColumn {
   bool sorted = false;
 };
 
-std::pair<int64_t, int64_t> BatchColumnBounds(const arrow::Array& array,
-                                              iceberg::TypeId type,
-                                              bool sorted) {
+std::pair<iceberg::Literal, iceberg::Literal> BatchColumnBounds(
+    const arrow::Array& array, iceberg::TypeId type, bool sorted) {
   const int64_t n = array.length();
   if (type == iceberg::TypeId::kInt) {
     const auto& a = static_cast<const arrow::Int32Array&>(array);
-    if (sorted) return {a.Value(0), a.Value(n - 1)};
+    if (sorted)
+      return {iceberg::Literal::Int(a.Value(0)),
+              iceberg::Literal::Int(a.Value(n - 1))};
     int32_t lo = a.Value(0), hi = a.Value(0);
     for (int64_t i = 1; i < n; ++i) {
       lo = std::min(lo, a.Value(i));
       hi = std::max(hi, a.Value(i));
     }
-    return {lo, hi};
+    return {iceberg::Literal::Int(lo), iceberg::Literal::Int(hi)};
+  }
+  if (type == iceberg::TypeId::kString) {
+    const auto& a = static_cast<const arrow::StringArray&>(array);
+    if (sorted)
+      return {iceberg::Literal::String(a.GetString(0)),
+              iceberg::Literal::String(a.GetString(n - 1))};
+    std::string lo = a.GetString(0), hi = a.GetString(0);
+    for (int64_t i = 1; i < n; ++i) {
+      std::string v = a.GetString(i);
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+    }
+    return {iceberg::Literal::String(std::move(lo)),
+            iceberg::Literal::String(std::move(hi))};
   }
   const auto& a = static_cast<const arrow::Int64Array&>(array);
-  if (sorted) return {a.Value(0), a.Value(n - 1)};
+  if (sorted)
+    return {iceberg::Literal::Long(a.Value(0)),
+            iceberg::Literal::Long(a.Value(n - 1))};
   int64_t lo = a.Value(0), hi = a.Value(0);
   for (int64_t i = 1; i < n; ++i) {
     lo = std::min(lo, a.Value(i));
     hi = std::max(hi, a.Value(i));
   }
-  return {lo, hi};
+  return {iceberg::Literal::Long(lo), iceberg::Literal::Long(hi)};
 }
 
-iceberg::Literal TypedLiteral(iceberg::TypeId type, int64_t value) {
-  if (type == iceberg::TypeId::kInt) {
-    return iceberg::Literal::Int(static_cast<int32_t>(value));
-  }
-  return iceberg::Literal::Long(value);
+bool LiteralLess(const iceberg::Literal& a, const iceberg::Literal& b) {
+  return (a <=> b) < 0;
 }
 
 bool PutBound(std::map<int32_t, std::vector<uint8_t>>* bounds, int32_t field_id,
@@ -212,7 +227,8 @@ struct BucketParquetWriter::Impl {
   fs::path tmp_path;
   fs::path final_path;
   WrittenFile current_record;
-  std::vector<std::pair<int64_t, int64_t>> current_bounds;
+  std::vector<std::optional<std::pair<iceberg::Literal, iceberg::Literal>>>
+      current_bounds;
 
   std::vector<WrittenFile> done;
 
@@ -261,7 +277,7 @@ bool BucketParquetWriter::Impl::OpenIfNeeded(std::string* error) {
   current_record.table = config.table_name;
   current_record.bucket_version = config.bucket_version;
   current_record.bucket = config.bucket;
-  current_bounds.assign(stat_columns.size(), {0, 0});
+  current_bounds.assign(stat_columns.size(), std::nullopt);
   return true;
 }
 
@@ -323,11 +339,9 @@ bool BucketParquetWriter::Impl::CloseCurrent(std::string* error) {
   current_record.path = final_path;
   if (current_record.rows > 0) {
     for (size_t i = 0; i < stat_columns.size(); ++i) {
-      const auto& rs = stat_columns[i];
-      current_record.bounds.emplace(
-          rs.field_id,
-          std::make_pair(TypedLiteral(rs.type, current_bounds[i].first),
-                         TypedLiteral(rs.type, current_bounds[i].second)));
+      if (!current_bounds[i]) continue;
+      current_record.bounds.emplace(stat_columns[i].field_id,
+                                    *current_bounds[i]);
     }
   }
   if (!BuildDataFile(config, partition_spec, current_record,
@@ -381,14 +395,12 @@ std::unique_ptr<BucketParquetWriter> BucketParquetWriter::Make(
       if (error) *error = "stat column not in schema: " + sc.name;
       return nullptr;
     }
-    if (rs.type != iceberg::TypeId::kInt && rs.type != iceberg::TypeId::kLong) {
+    if (rs.type != iceberg::TypeId::kInt && rs.type != iceberg::TypeId::kLong &&
+        rs.type != iceberg::TypeId::kString) {
       if (error) {
         *error = "NotImplemented: declared stat column '" + sc.name +
                  "' has type " + type_name +
-                 "; bound capture is implemented for int and long only — "
-                 "honoring this declaration requires computing min/max as an "
-                 "iceberg::Literal of that type and serializing it via "
-                 "Literal::Serialize";
+                 "; bound capture is implemented for int, long, and string only";
       }
       return nullptr;
     }
@@ -456,12 +468,12 @@ bool BucketParquetWriter::Write(const arrow::RecordBatch& batch,
       const auto& rs = impl_->stat_columns[i];
       auto [lo, hi] = BatchColumnBounds(*rb->column(rs.arrow_index), rs.type,
                                         rs.sorted);
-      if (cur.rows == 0) {
-        impl_->current_bounds[i] = {lo, hi};
+      auto& acc = impl_->current_bounds[i];
+      if (!acc) {
+        acc = std::make_pair(std::move(lo), std::move(hi));
       } else {
-        auto& acc = impl_->current_bounds[i];
-        acc.first = std::min(acc.first, lo);
-        acc.second = std::max(acc.second, hi);
+        if (LiteralLess(lo, acc->first)) acc->first = std::move(lo);
+        if (LiteralLess(acc->second, hi)) acc->second = std::move(hi);
       }
     }
   }

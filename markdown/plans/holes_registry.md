@@ -60,6 +60,7 @@ assertions stay; capability assertions retire with their holes.
 | 2026-07-18 | `min-rows-requested` is a planning early-stop counted against *proven* row counts only |
 | 2026-07-18 | plan-level residual stays **complete**; the key window is a hint a consumer may decline |
 | 2026-07-18 | `ScanPlan.key_lo/key_hi` retained, carried as `iceberg::Literal` |
+| 2026-07-22 | producer stat-bounds generalized to `iceberg::Literal` (int/long/string): `BatchColumnBounds` returns typed literals and handles utf8, the running accumulator is `optional<pair<Literal,Literal>>`, `TypedLiteral` removed. Unlocks string-column derived tables (e.g. `chain_words`) that record bounds, so the expressions interface can plan-scan them |
 | 2026-07-18 | **server-side planning: implement in full** — all four routes plus plan-id lifecycle, flipping `scan-planning-mode` to `server`. Next branch. |
 | 2026-07-18 | `createTable`: the server ensures the table location exists, expressed so it is a no-op where directories are not a concept |
 | 2026-07-18 | existing-table declaration: **REST-only**, no local tool |
@@ -136,12 +137,10 @@ assertions stay; capability assertions retire with their holes.
 **type narrowing — producer side**
 
 The plan path is closed (`DecodeIntegerBound` deleted, `Literal` key window,
-`Literal` task ordering). Two sites remain, both behind the interface.
+`Literal` task ordering). The `writer.cc` stat-bounds site is closed (2026-07-22:
+`BatchColumnBounds`/accumulator are `Literal`-typed and cover int/long/string).
+One site remains, behind the interface.
 
-- `writer.cc` stat-column bounds: `BatchColumnBounds` reads an arrow array to
-  `pair<int64_t,int64_t>` and `TypedLiteral` rebuilds a `Literal` from it, so a
-  non-int stat column cannot record bounds. `WriterStatColumns.StringStatColumnCapturesBounds`
-  is red pending this — owner: unassigned
 - `partition_stats.cc` tuple values and partition source types: tuples are
   `std::vector<int64_t>` used as `std::map` keys. A `Literal` tuple needs a
   **total** order, but `Literal::operator<=>` yields `std::partial_ordering` —
@@ -234,13 +233,12 @@ The plan path is closed (`DecodeIntegerBound` deleted, `Literal` key window,
 
 ## known-red tests (expected; do not "fix" without closing the hole)
 
-As of 2026-07-19: unit 43 passing / 3 red (`make test`), e2e 18 passing / 1 red
+As of 2026-07-22: unit 44 passing / 2 red (`make test`), e2e 18 passing / 1 red
 (`make e2e`). Every red is deliberate — a test written to assert correct
 behavior that is not yet implemented, so it goes green when its hole closes.
 
 | test | hole |
 |---|---|
-| `WriterStatColumns.StringStatColumnCapturesBounds` | type narrowing — `writer.cc` stat bounds |
 | `PartitionStatsTest.BucketTransformResolves` | transform coverage — `partition_stats` identity-only guard |
 | `PartitionStatsTest.TruncateTransformResolves` | transform coverage — same guard |
 | `E2ETest.FullTableReadSynthesizesIdentityColumns` | read-path — identity-partition synthesis |
@@ -259,7 +257,7 @@ metadata rather than by giving the fixture a sort order.
 | server surface — location creation, branch schema, pagination et al. | 2 | P2 |
 | read-path synthesis — identity-partition columns | 2 | P2 |
 | transform coverage | 3 | P2 |
-| type narrowing — producer side | 3 | P2 (behind the interface) |
+| type narrowing — producer side | 2 | P2 (behind the interface) |
 | test + build | 2 | P2 |
 | mutation + lifecycle | 4 | P3 |
 | writer shape | 2 | P4 |

@@ -64,6 +64,14 @@ int32_t BoundI32(const std::map<int32_t, std::vector<uint8_t>>& bounds,
   return lit.has_value() ? std::get<int32_t>(lit.value().value()) : 0;
 }
 
+std::string BoundStr(const std::map<int32_t, std::vector<uint8_t>>& bounds,
+                     int32_t field_id) {
+  auto lit =
+      iceberg::Literal::Deserialize(bounds.at(field_id), iceberg::string());
+  EXPECT_TRUE(lit.has_value()) << (lit.has_value() ? "" : lit.error().message);
+  return lit.has_value() ? std::get<std::string>(lit.value().value()) : "";
+}
+
 primeparts::WriterConfig BaseConfig(
     const std::filesystem::path& out,
     const std::shared_ptr<iceberg::Schema>& schema,
@@ -198,25 +206,46 @@ TEST(WriterStatColumns, StringStatColumnCapturesBounds) {
       iceberg::SchemaField::MakeRequired(2, "label", iceberg::string()));
   auto schema = std::make_shared<iceberg::Schema>(std::move(fields), 0);
 
-  primeparts::WriterConfig cfg;
-  cfg.output_dir =
+  const auto dir =
       std::filesystem::temp_directory_path() / "pp-writer-stat-string";
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+
+  primeparts::WriterConfig cfg;
+  cfg.output_dir = dir;
   cfg.schema = schema;
   cfg.table_name = "t";
   cfg.filename_prefix = "t";
   cfg.delta_columns = {"p"};
-  cfg.stat_columns = {{"label", true}};
+  cfg.stat_columns = {{"label", false}};
   cfg.partition_spec = iceberg::PartitionSpec::Unpartitioned();
   cfg.simple_filename = true;
   cfg.compression_level = 1;
 
   std::string error;
   auto writer = primeparts::BucketParquetWriter::Make(std::move(cfg), &error);
-  EXPECT_NE(writer, nullptr) << error;
+  ASSERT_NE(writer, nullptr) << error;
 
-  std::error_code ec;
-  std::filesystem::remove_all(
-      std::filesystem::temp_directory_path() / "pp-writer-stat-string", ec);
+  arrow::Int64Builder p;
+  arrow::StringBuilder label;
+  for (int64_t value : {3, 5, 7}) EXPECT_TRUE(p.Append(value).ok());
+  for (const char* value : {"gamma", "alpha", "beta"})
+    EXPECT_TRUE(label.Append(value).ok());
+  auto in_schema = arrow::schema(
+      {arrow::field("p", arrow::int64()), arrow::field("label", arrow::utf8())});
+  auto batch = arrow::RecordBatch::Make(in_schema, 3,
+                                        {FinishOrDie(p), FinishOrDie(label)});
+
+  std::vector<primeparts::WrittenFile> written;
+  ASSERT_TRUE(writer->Write(*batch, &error)) << error;
+  ASSERT_TRUE(writer->Close(&written, &error)) << error;
+  ASSERT_EQ(written.size(), 1u);
+
+  const auto& df = *written[0].data_file;
+  EXPECT_EQ(BoundStr(df.lower_bounds, 2), "alpha");
+  EXPECT_EQ(BoundStr(df.upper_bounds, 2), "gamma");
+
+  std::filesystem::remove_all(dir, ec);
 }
 
 }  // namespace
