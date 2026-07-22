@@ -19,6 +19,7 @@ the reference numbers, composite-degree spectrum full.
 | 2026-07-19 | interfaces are authored header-first and reviewed before implementation |
 | 2026-07-19 | graph/word/satisfaction computation stays hand-built; a query engine is evaluated only for data pipelining (phase 04 decides, nothing pre-committed) |
 | 2026-07-20 | scan cost has two regimes: cold full scan of the 181 GiB table is disk-bound on the USB SATA link (~447 MB/s, ~408s, 131% CPU, batch size irrelevant); a cached or small working set is decode-bound, where read.batch-size dominates (4096 to 262144 = 1.8x at fixed shards) and threads scale with file count. read.batch-size is now a SessionOptions knob. The power-edge slice is ~2 MB, so extracting it once puts all downstream work in the fast decode-bound regime |
+| 2026-07-21 | 04/05 reworked after the collapse exploration: substrate-first (DuckDB + Acero + Substrait, non-JVM) then the collapse consumer (first FileScanTask consumer + query engine). Edges are read from `partitions`, never `is_prime_power`'d; the `q_k->p` pivot is DuckDB-managed (cached, not fully materialized); termination points come from the `primes ⟝ partitions` anti-join (k=0 roots). Collapse is lossless and bound-invariant (resumable) — see `../../math/collapse_findings.md` |
 
 ## Invariants
 
@@ -31,9 +32,14 @@ the reference numbers, composite-degree spectrum full.
 
 ## Phases
 
-- 01 shared client module, header first
-- 02 full-dataset run
-- 03 routing multiplicities against the sieve null
+- 01 shared client module, header first (done)
+- 02 full-dataset run (done)
+- 03 routing multiplicities (done)
 - 03a exponent tail and the 3|n obstruction (done)
-- 04 query-engine evaluation (DuckDB candidate)
-- 05 permanent-fixture decision
+- 04 engine substrate — DuckDB + Acero + Substrait, non-JVM (substrate-first)
+- 05 the collapse consumer + derived representation
+- 06 config + merge (bracketed)
+
+The collapse exploration (`../../math/collapse_findings.md`) reshaped 04/05: they
+now build the first real FileScanTask consumer + the query engine behind it
+(holes registry: open ground), on the committed non-JVM stack.

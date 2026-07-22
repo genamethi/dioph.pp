@@ -115,6 +115,13 @@ assertions stay; capability assertions retire with their holes.
   `unregisterTable`, no views, no functions, metrics is a 204 sink — filed-by
   catalogd_rest_gap.md — owner: unassigned
 
+**consumer surface**
+
+- no `FileScanTask` consumer reads a server plan and then reads its returned data
+  files. `PlanScanOnServer` yields the task set and `SourceTableReader` reads
+  Parquet, but no consumer joins the two — the query engine behind the plan is
+  unwritten — filed-by pp_graph 05 — owner: pp-graph
+
 **type narrowing — producer side**
 
 The plan path is closed (`DecodeIntegerBound` deleted, `Literal` key window,
