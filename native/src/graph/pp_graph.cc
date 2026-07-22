@@ -3,15 +3,19 @@
 #include <ginac/ginac.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cinttypes>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <queue>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
@@ -47,6 +51,7 @@ constexpr const char* kDefaultRestUri = "http://127.0.0.1:8181";
 struct Options {
   int64_t bound = 5000000000LL;
   int threads = 8;
+  int workers = 1;
   int cone_probe = 0;
   bool materialize = false;
   std::string rest_uri;
@@ -262,6 +267,198 @@ Features WordFeatures(int64_t a0,
   return f;
 }
 
+// Concurrent trie store: sharded by key so interning does not serialize. A gid
+// encodes (shard << 23 | local); each shard owns its vectors + map + mutex. The
+// word carries its own degree so Degree/Push never chase a cross-shard seg for
+// it; only the n=1 fold reads the tail seg's fields.
+struct ConcStore {
+  static constexpr int SH = 256;
+  struct SegShard {
+    std::mutex mu;
+    std::unordered_map<SegKey, int32_t, SegKeyHash> ix;
+    std::vector<int32_t> parent, n;
+    std::vector<int64_t> c, deg;
+  };
+  struct WordShard {
+    std::mutex mu;
+    std::unordered_map<WordKey, int32_t, WordKeyHash> ix;
+    std::vector<int64_t> a0, deg;
+    std::vector<int32_t> tail;
+  };
+  SegShard sseg[SH];
+  WordShard sword[SH];
+  int32_t seed;
+
+  ConcStore() { seed = InternWord(0, -1, 1); }
+
+  int32_t InternSeg(int32_t parent, int32_t n, int64_t c, int64_t deg) {
+    SegKey k{parent, n, c};
+    int s = SegKeyHash{}(k) & (SH - 1);
+    auto& sh = sseg[s];
+    std::lock_guard<std::mutex> g(sh.mu);
+    auto it = sh.ix.find(k);
+    if (it != sh.ix.end()) return it->second;
+    int32_t local = static_cast<int32_t>(sh.parent.size());
+    sh.parent.push_back(parent);
+    sh.n.push_back(n);
+    sh.c.push_back(c);
+    sh.deg.push_back(deg);
+    int32_t gid = (s << 23) | local;
+    sh.ix.emplace(k, gid);
+    return gid;
+  }
+  void ReadSeg(int32_t gid, int32_t* parent, int32_t* n, int64_t* c) {
+    auto& sh = sseg[gid >> 23];
+    int32_t local = gid & 0x7FFFFF;
+    std::lock_guard<std::mutex> g(sh.mu);
+    *parent = sh.parent[local];
+    *n = sh.n[local];
+    *c = sh.c[local];
+  }
+  int32_t InternWord(int64_t a0, int32_t tail, int64_t deg) {
+    WordKey k{a0, tail};
+    int s = WordKeyHash{}(k) & (SH - 1);
+    auto& sh = sword[s];
+    std::lock_guard<std::mutex> g(sh.mu);
+    auto it = sh.ix.find(k);
+    if (it != sh.ix.end()) return it->second;
+    int32_t local = static_cast<int32_t>(sh.a0.size());
+    sh.a0.push_back(a0);
+    sh.tail.push_back(tail);
+    sh.deg.push_back(deg);
+    int32_t gid = (s << 23) | local;
+    sh.ix.emplace(k, gid);
+    return gid;
+  }
+  void ReadWord(int32_t gid, int64_t* a0, int32_t* tail, int64_t* deg) {
+    auto& sh = sword[gid >> 23];
+    int32_t local = gid & 0x7FFFFF;
+    std::lock_guard<std::mutex> g(sh.mu);
+    *a0 = sh.a0[local];
+    *tail = sh.tail[local];
+    *deg = sh.deg[local];
+  }
+  int32_t Push(int32_t w, int32_t n, int64_t c) {
+    int64_t a0, deg;
+    int32_t tail;
+    ReadWord(w, &a0, &tail, &deg);
+    if (n == 1) {
+      if (tail < 0) return InternWord(a0 + c, -1, deg);
+      int32_t tp, tn;
+      int64_t tc;
+      ReadSeg(tail, &tp, &tn, &tc);
+      return InternWord(a0, InternSeg(tp, tn, tc + c, deg), deg);
+    }
+    return InternWord(a0, InternSeg(tail, n, c, deg * n), deg * n);
+  }
+  int64_t Degree(int32_t w) {
+    int64_t a0, deg;
+    int32_t tail;
+    ReadWord(w, &a0, &tail, &deg);
+    return deg;
+  }
+};
+
+struct ParResult {
+  int64_t node_word_pairs = 0;
+  int64_t distinct_words = 0;
+  int64_t max_degree = 0;
+};
+
+// Parallel topological sweep (Kahn). A node is ready once every distinct parent
+// is computed; workers pull ready nodes, merge parents' word-id sets through the
+// shared ConcStore, publish memo[v], then release children. qmu is the single
+// synchronization point (guards ready/indeg/memo publication), so parent memos
+// are always visible before a child is popped.
+ParResult RunParallel(
+    const std::vector<int64_t>& nodes,
+    const std::unordered_map<int64_t, std::vector<Edge>>& parents,
+    const std::unordered_set<int64_t>& has_children, int workers) {
+  const int32_t N = static_cast<int32_t>(nodes.size());
+  std::unordered_map<int64_t, int32_t> idx;
+  idx.reserve(N);
+  for (int32_t i = 0; i < N; ++i) idx[nodes[i]] = i;
+
+  std::vector<std::vector<int32_t>> children(N);
+  std::vector<int> indeg(N, 0);
+  for (int32_t vi = 0; vi < N; ++vi) {
+    auto it = parents.find(nodes[vi]);
+    if (it == parents.end()) continue;
+    std::unordered_set<int64_t> pq;
+    for (const auto& e : it->second) pq.insert(e.q);
+    indeg[vi] = static_cast<int>(pq.size());
+    for (int64_t q : pq) children[idx[q]].push_back(vi);
+  }
+
+  ConcStore store;
+  std::vector<std::vector<int32_t>> memo(N);
+
+  std::mutex qmu;
+  std::condition_variable cv;
+  std::vector<int32_t> ready;
+  int64_t remaining = N;
+  bool done = false;
+  for (int32_t i = 0; i < N; ++i)
+    if (indeg[i] == 0) ready.push_back(i);
+
+  std::mutex omu;
+  std::unordered_map<int32_t, int64_t> sink_out;
+  int64_t pairs = 0, maxdeg = 0;
+
+  auto worker = [&]() {
+    while (true) {
+      int32_t v;
+      {
+        std::unique_lock<std::mutex> lk(qmu);
+        cv.wait(lk, [&] { return !ready.empty() || done; });
+        if (ready.empty()) return;
+        v = ready.back();
+        ready.pop_back();
+      }
+      const int64_t vv = nodes[v];
+      std::unordered_set<int32_t> res;
+      auto it = parents.find(vv);
+      if (it == parents.end()) {
+        res.insert(store.seed);
+      } else {
+        for (const auto& e : it->second) {
+          const int64_t c = int64_t{1} << e.m;
+          for (int32_t w : memo[idx[e.q]]) res.insert(store.Push(w, e.n, c));
+        }
+      }
+      if (has_children.count(vv)) {
+        memo[v].assign(res.begin(), res.end());
+      } else {
+        std::lock_guard<std::mutex> g(omu);
+        for (int32_t w : res) {
+          if (w == store.seed) continue;
+          ++pairs;
+          int64_t d = store.Degree(w);
+          if (d > maxdeg) maxdeg = d;
+          sink_out.emplace(w, static_cast<int64_t>(sink_out.size()));
+        }
+      }
+      {
+        std::lock_guard<std::mutex> lk(qmu);
+        for (int32_t c : children[v])
+          if (--indeg[c] == 0) ready.push_back(c);
+        if (--remaining == 0) done = true;
+        cv.notify_all();
+      }
+    }
+  };
+
+  std::vector<std::thread> pool;
+  for (int i = 0; i < workers; ++i) pool.emplace_back(worker);
+  for (auto& t : pool) t.join();
+
+  ParResult r;
+  r.node_word_pairs = pairs;
+  r.distinct_words = static_cast<int64_t>(sink_out.size());
+  r.max_degree = maxdeg;
+  return r;
+}
+
 struct NodeClassWriter {
   std::shared_ptr<iceberg::Schema> schema;
   std::shared_ptr<arrow::Schema> aschema;
@@ -339,6 +536,8 @@ bool ParseArgs(int argc, char** argv, Options* out) {
       out->ns_name = need("--namespace");
     } else if (a == "--threads") {
       out->threads = std::atoi(need("--threads"));
+    } else if (a == "--workers") {
+      out->workers = std::atoi(need("--workers"));
     } else if (a == "--cone-probe") {
       out->cone_probe = std::atoi(need("--cone-probe"));
     } else if (a == "--materialize") {
@@ -480,6 +679,17 @@ int main(int argc, char** argv) {
       std::printf("[cone] batch %d sinks[%zu,%zu) cone_nodes=%zu (%.1f%%)\n", b,
                   lo, hi, cone.size(), 100.0 * cone.size() / nodes.size());
     }
+    return 0;
+  }
+
+  if (opt.workers > 1) {
+    t0 = std::chrono::steady_clock::now();
+    ParResult pr = RunParallel(nodes, parents, has_children, opt.workers);
+    std::printf(
+        "[collapse] node_word_pairs=%" PRId64 " distinct_words=%" PRId64
+        " max_degree=%" PRId64 " dp=%.2fs workers=%d\n",
+        pr.node_word_pairs, pr.distinct_words, pr.max_degree, Seconds(t0),
+        opt.workers);
     return 0;
   }
 
