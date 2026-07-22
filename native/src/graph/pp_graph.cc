@@ -47,6 +47,7 @@ constexpr const char* kDefaultRestUri = "http://127.0.0.1:8181";
 struct Options {
   int64_t bound = 5000000000LL;
   int threads = 8;
+  int cone_probe = 0;
   bool materialize = false;
   std::string rest_uri;
   std::string warehouse = kDefaultWarehouse;
@@ -60,67 +61,106 @@ struct Edge {
   int32_t n = 0;
 };
 
-struct Word {
-  int64_t a0 = 0;
-  std::vector<std::pair<int32_t, int64_t>> segs;
-  bool operator==(const Word& o) const {
-    return a0 == o.a0 && segs == o.segs;
+struct SegKey {
+  int32_t parent;
+  int32_t n;
+  int64_t c;
+  bool operator==(const SegKey& o) const {
+    return parent == o.parent && n == o.n && c == o.c;
   }
-  bool operator<(const Word& o) const {
-    if (a0 != o.a0) return a0 < o.a0;
-    return segs < o.segs;
+};
+struct SegKeyHash {
+  size_t operator()(const SegKey& k) const {
+    size_t h = std::hash<int32_t>{}(k.parent);
+    h ^= std::hash<int32_t>{}(k.n) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+    h ^= std::hash<int64_t>{}(k.c) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+    return h;
+  }
+};
+struct WordKey {
+  int64_t a0;
+  int32_t tail;
+  bool operator==(const WordKey& o) const {
+    return a0 == o.a0 && tail == o.tail;
+  }
+};
+struct WordKeyHash {
+  size_t operator()(const WordKey& k) const {
+    size_t h = std::hash<int64_t>{}(k.a0);
+    h ^= std::hash<int32_t>{}(k.tail) + 0x9e3779b97f4a7c15ULL + (h << 6) +
+         (h >> 2);
+    return h;
   }
 };
 
-struct Class {
-  int64_t root = 0;
-  Word word;
-  bool operator==(const Class& o) const {
-    return root == o.root && word == o.word;
-  }
-};
+// Trie-DAG of composition words. A word is (a0, tail), tail indexing a chain of
+// segments (n_i, C_i) via parent links (-1 = empty). Segments and words are
+// interned, so every shared prefix is shared. Push composes: n=1 folds a
+// translation into the tail (or a0), n>=2 appends a segment. The trie is the
+// coproduct; degree is the product of the tail's exponents.
+struct WordStore {
+  std::vector<int32_t> seg_parent;
+  std::vector<int32_t> seg_n;
+  std::vector<int64_t> seg_c;
+  std::vector<int64_t> seg_deg;
+  std::unordered_map<SegKey, int32_t, SegKeyHash> seg_ix;
 
-struct WordHash {
-  size_t operator()(const Word& w) const {
-    size_t h = std::hash<int64_t>{}(w.a0);
-    for (const auto& [n, c] : w.segs) {
-      h ^= (std::hash<int32_t>{}(n) + 0x9e3779b97f4a7c15ULL + (h << 6) +
-            (h >> 2));
-      h ^= (std::hash<int64_t>{}(c) + 0x9e3779b97f4a7c15ULL + (h << 6) +
-            (h >> 2));
+  std::vector<int64_t> word_a0;
+  std::vector<int32_t> word_tail;
+  std::unordered_map<WordKey, int32_t, WordKeyHash> word_ix;
+  int32_t seed = 0;
+
+  WordStore() { seed = InternWord(0, -1); }
+
+  int32_t InternSeg(int32_t parent, int32_t n, int64_t c) {
+    SegKey k{parent, n, c};
+    auto it = seg_ix.find(k);
+    if (it != seg_ix.end()) return it->second;
+    int32_t id = static_cast<int32_t>(seg_parent.size());
+    seg_parent.push_back(parent);
+    seg_n.push_back(n);
+    seg_c.push_back(c);
+    seg_deg.push_back((parent < 0 ? 1 : seg_deg[parent]) * n);
+    seg_ix.emplace(k, id);
+    return id;
+  }
+  int32_t InternWord(int64_t a0, int32_t tail) {
+    WordKey k{a0, tail};
+    auto it = word_ix.find(k);
+    if (it != word_ix.end()) return it->second;
+    int32_t id = static_cast<int32_t>(word_a0.size());
+    word_a0.push_back(a0);
+    word_tail.push_back(tail);
+    word_ix.emplace(k, id);
+    return id;
+  }
+  int32_t Push(int32_t w, int32_t n, int64_t c) {
+    int64_t a0 = word_a0[w];
+    int32_t tail = word_tail[w];
+    if (n == 1) {
+      if (tail < 0) return InternWord(a0 + c, -1);
+      return InternWord(a0,
+                        InternSeg(seg_parent[tail], seg_n[tail], seg_c[tail] + c));
     }
-    return h;
+    return InternWord(a0, InternSeg(tail, n, c));
+  }
+  int64_t Degree(int32_t w) const {
+    int32_t tail = word_tail[w];
+    return tail < 0 ? 1 : seg_deg[tail];
+  }
+  void Reconstruct(int32_t w, int64_t* a0,
+                   std::vector<std::pair<int32_t, int64_t>>* segs) const {
+    *a0 = word_a0[w];
+    segs->clear();
+    for (int32_t s = word_tail[w]; s >= 0; s = seg_parent[s])
+      segs->emplace_back(seg_n[s], seg_c[s]);
+    std::reverse(segs->begin(), segs->end());
   }
 };
-
-struct ClassHash {
-  size_t operator()(const Class& c) const {
-    size_t h = std::hash<int64_t>{}(c.root);
-    h ^= (WordHash{}(c.word) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2));
-    return h;
-  }
-};
-
-using ClassMap = std::unordered_map<Class, int64_t, ClassHash>;
 
 double Seconds(std::chrono::steady_clock::time_point t0) {
   return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
       .count();
-}
-
-std::string Int128Str(__int128 v) {
-  if (v == 0) return "0";
-  bool neg = v < 0;
-  unsigned __int128 u = neg ? -static_cast<unsigned __int128>(v)
-                            : static_cast<unsigned __int128>(v);
-  char buf[40];
-  int i = 40;
-  while (u) {
-    buf[--i] = static_cast<char>('0' + static_cast<int>(u % 10));
-    u /= 10;
-  }
-  std::string s(buf + i, buf + 40);
-  return neg ? "-" + s : s;
 }
 
 std::string StripFileScheme(const std::string& path) {
@@ -142,22 +182,6 @@ std::string QuoteList(const std::vector<std::string>& paths) {
   }
   out += "]";
   return out;
-}
-
-Word WordPush(Word w, int32_t n, int64_t c) {
-  if (n == 1) {
-    if (!w.segs.empty()) w.segs.back().second += c;
-    else w.a0 += c;
-  } else {
-    w.segs.emplace_back(n, c);
-  }
-  return w;
-}
-
-int64_t WordDegree(const Word& w) {
-  int64_t d = 1;
-  for (const auto& [n, c] : w.segs) d *= n;
-  return d;
 }
 
 GiNaC::ex He(int n, const GiNaC::symbol& x) {
@@ -203,18 +227,22 @@ struct Features {
   std::string symbolic;
 };
 
-Features WordFeatures(const Word& w, const GiNaC::symbol& x) {
-  GiNaC::ex p = x + GiNaC::numeric(static_cast<long>(w.a0));
+Features WordFeatures(int64_t a0,
+                      const std::vector<std::pair<int32_t, int64_t>>& segs,
+                      const GiNaC::symbol& x) {
+  GiNaC::ex p = x + GiNaC::numeric(static_cast<long>(a0));
   std::vector<int64_t> sk;
-  std::vector<int64_t> tr{w.a0};
-  for (const auto& [n, c] : w.segs) {
+  std::vector<int64_t> tr{a0};
+  int64_t degree = 1;
+  for (const auto& [n, c] : segs) {
     p = GiNaC::pow(p, n) + GiNaC::numeric(static_cast<long>(c));
     sk.push_back(n);
     tr.push_back(c);
+    degree *= n;
   }
   auto hd = ToHermite(p, x);
   Features f;
-  f.degree = WordDegree(w);
+  f.degree = degree;
   f.skeleton = JsonInts(sk);
   f.translations = JsonInts(tr);
   std::string h = "{";
@@ -238,28 +266,25 @@ struct NodeClassWriter {
   std::shared_ptr<iceberg::Schema> schema;
   std::shared_ptr<arrow::Schema> aschema;
   std::unique_ptr<primeparts::BucketParquetWriter> writer;
-  arrow::Int64Builder node, root, word, mult;
+  arrow::Int64Builder node, word;
   int64_t buffered = 0;
   int64_t total = 0;
 
   bool Flush(std::string* err) {
     if (buffered == 0) return true;
-    std::shared_ptr<arrow::Array> na, ra, wa, ma;
-    if (!node.Finish(&na).ok() || !root.Finish(&ra).ok() ||
-        !word.Finish(&wa).ok() || !mult.Finish(&ma).ok()) {
+    std::shared_ptr<arrow::Array> na, wa;
+    if (!node.Finish(&na).ok() || !word.Finish(&wa).ok()) {
       if (err) *err = "node_classes: array finish failed";
       return false;
     }
-    auto batch = arrow::RecordBatch::Make(aschema, buffered, {na, ra, wa, ma});
+    auto batch = arrow::RecordBatch::Make(aschema, buffered, {na, wa});
     buffered = 0;
     return writer->Write(*batch, err);
   }
 
-  bool Add(int64_t n, int64_t r, int64_t w, int64_t m, std::string* err) {
+  bool Add(int64_t n, int64_t w, std::string* err) {
     (void)node.Append(n);
-    (void)root.Append(r);
     (void)word.Append(w);
-    (void)mult.Append(m);
     ++buffered;
     ++total;
     if (buffered >= 65536) return Flush(err);
@@ -273,14 +298,10 @@ std::unique_ptr<NodeClassWriter> MakeNodeClassWriter(
   auto w = std::make_unique<NodeClassWriter>();
   std::vector<iceberg::SchemaField> f;
   f.push_back(iceberg::SchemaField::MakeRequired(1, "node_id", iceberg::int64()));
-  f.push_back(iceberg::SchemaField::MakeRequired(2, "root_id", iceberg::int64()));
-  f.push_back(iceberg::SchemaField::MakeRequired(3, "word_id", iceberg::int64()));
-  f.push_back(iceberg::SchemaField::MakeRequired(4, "mult", iceberg::int64()));
+  f.push_back(iceberg::SchemaField::MakeRequired(2, "word_id", iceberg::int64()));
   w->schema = std::make_shared<iceberg::Schema>(std::move(f), 0);
   w->aschema = arrow::schema({arrow::field("node_id", arrow::int64()),
-                              arrow::field("root_id", arrow::int64()),
-                              arrow::field("word_id", arrow::int64()),
-                              arrow::field("mult", arrow::int64())});
+                              arrow::field("word_id", arrow::int64())});
   primeparts::WriterConfig cfg;
   cfg.output_dir =
       primeparts::catalog::StagingDataDir(warehouse, ns, "node_classes");
@@ -290,7 +311,7 @@ std::unique_ptr<NodeClassWriter> MakeNodeClassWriter(
   cfg.partition_spec = iceberg::PartitionSpec::Unpartitioned();
   cfg.partition_values = std::make_shared<iceberg::PartitionValues>(
       std::vector<iceberg::Literal>{});
-  cfg.stat_columns = {{"node_id", false}, {"root_id", false}, {"word_id", false}};
+  cfg.stat_columns = {{"node_id", false}, {"word_id", false}};
   cfg.simple_filename = true;
   cfg.target_rows_per_file = 4000000;
   w->writer = primeparts::BucketParquetWriter::Make(cfg, err);
@@ -318,6 +339,8 @@ bool ParseArgs(int argc, char** argv, Options* out) {
       out->ns_name = need("--namespace");
     } else if (a == "--threads") {
       out->threads = std::atoi(need("--threads"));
+    } else if (a == "--cone-probe") {
+      out->cone_probe = std::atoi(need("--cone-probe"));
     } else if (a == "--materialize") {
       out->materialize = true;
     } else {
@@ -430,8 +453,40 @@ int main(int argc, char** argv) {
     if (e.p > lc) lc = e.p;
   }
 
+  if (opt.cone_probe > 0) {
+    std::vector<int64_t> sinks;
+    for (int64_t v : nodes)
+      if (!has_children.count(v)) sinks.push_back(v);
+    const int K = opt.cone_probe;
+    const size_t per = (sinks.size() + K - 1) / K;
+    std::printf("[cone] nodes=%zu sinks=%zu batches=%d (~%zu sinks/batch)\n",
+                nodes.size(), sinks.size(), K, per);
+    for (int b = 0; b < K; ++b) {
+      std::unordered_set<int64_t> cone;
+      std::vector<int64_t> stack;
+      const size_t lo = static_cast<size_t>(b) * per;
+      const size_t hi = std::min(lo + per, sinks.size());
+      if (lo >= hi) break;
+      for (size_t i = lo; i < hi; ++i)
+        if (cone.insert(sinks[i]).second) stack.push_back(sinks[i]);
+      while (!stack.empty()) {
+        int64_t v = stack.back();
+        stack.pop_back();
+        auto it = parents.find(v);
+        if (it == parents.end()) continue;
+        for (const auto& e : it->second)
+          if (cone.insert(e.q).second) stack.push_back(e.q);
+      }
+      std::printf("[cone] batch %d sinks[%zu,%zu) cone_nodes=%zu (%.1f%%)\n", b,
+                  lo, hi, cone.size(), 100.0 * cone.size() / nodes.size());
+    }
+    return 0;
+  }
+
   t0 = std::chrono::steady_clock::now();
-  std::unordered_map<int64_t, ClassMap> memo;
+  WordStore store;
+  const int32_t seed = store.seed;
+  std::unordered_map<int64_t, std::vector<int32_t>> memo;
   std::priority_queue<std::pair<int64_t, int64_t>,
                       std::vector<std::pair<int64_t, int64_t>>,
                       std::greater<>>
@@ -439,17 +494,15 @@ int main(int argc, char** argv) {
   int64_t live_entries = 0;
   int64_t peak_entries = 0;
 
-  const Word seed;
-  std::unordered_map<Word, int64_t, WordHash> sink_word_id;
-  auto intern_sink = [&](const Word& w) -> int64_t {
-    auto f = sink_word_id.find(w);
-    if (f != sink_word_id.end()) return f->second;
-    int64_t id = static_cast<int64_t>(sink_word_id.size());
-    sink_word_id.emplace(w, id);
+  std::unordered_map<int32_t, int64_t> sink_out;
+  auto sink_id = [&](int32_t w) -> int64_t {
+    auto f = sink_out.find(w);
+    if (f != sink_out.end()) return f->second;
+    int64_t id = static_cast<int64_t>(sink_out.size());
+    sink_out.emplace(w, id);
     return id;
   };
   int64_t maximal_classes = 0;
-  __int128 maximal_chains = 0;
   int64_t max_degree = 0;
 
   ppc::RestOptions ropts;
@@ -491,34 +544,31 @@ int main(int argc, char** argv) {
     }
     if (sweep_idx++ % sweep_step == 0) profile.emplace_back(v, live_entries);
 
-    ClassMap res;
+    std::unordered_set<int32_t> res;
     auto it = parents.find(v);
     if (it == parents.end()) {
-      res[Class{v, seed}] = 1;
+      res.insert(seed);
     } else {
       for (const auto& e : it->second) {
         const int64_t c = int64_t{1} << e.m;
         auto pit = memo.find(e.q);
         if (pit == memo.end()) continue;
-        for (const auto& [cls, cnt] : pit->second) {
-          res[Class{cls.root, WordPush(cls.word, e.n, c)}] += cnt;
-        }
+        for (int32_t w : pit->second) res.insert(store.Push(w, e.n, c));
       }
     }
 
     if (has_children.count(v)) {
       live_entries += static_cast<int64_t>(res.size());
       peak_entries = std::max(peak_entries, live_entries);
-      memo[v] = std::move(res);
+      memo[v] = std::vector<int32_t>(res.begin(), res.end());
       live.push({last_child[v], v});
     } else {
-      for (const auto& [cls, cnt] : res) {
-        if (cls.word == seed) continue;
+      for (int32_t w : res) {
+        if (w == seed) continue;
         ++maximal_classes;
-        maximal_chains += cnt;
-        int64_t wid = intern_sink(cls.word);
-        max_degree = std::max(max_degree, WordDegree(cls.word));
-        if (ncw && !ncw->Add(v, cls.root, wid, cnt, &error)) {
+        max_degree = std::max(max_degree, store.Degree(w));
+        int64_t oid = sink_id(w);
+        if (ncw && !ncw->Add(v, oid, &error)) {
           std::fprintf(stderr, "node_classes write: %s\n", error.c_str());
           return 1;
         }
@@ -528,11 +578,9 @@ int main(int argc, char** argv) {
   double t_dp = Seconds(t0);
 
   std::printf(
-      "[collapse] maximal_classes=%" PRId64 " distinct_words=%zu "
-      "maximal_chains=%s max_degree=%" PRId64 " dp=%.2fs "
-      "peak_live_entries=%" PRId64 "\n",
-      maximal_classes, sink_word_id.size(), Int128Str(maximal_chains).c_str(),
-      max_degree, t_dp, peak_entries);
+      "[collapse] node_word_pairs=%" PRId64 " distinct_words=%zu "
+      "max_degree=%" PRId64 " dp=%.2fs peak_live_entries=%" PRId64 "\n",
+      maximal_classes, sink_out.size(), max_degree, t_dp, peak_entries);
   for (const auto& [pos, live] : profile)
     std::printf("[profile] p<=%" PRId64 " live_entries=%" PRId64 "\n", pos,
                 live);
@@ -540,8 +588,8 @@ int main(int argc, char** argv) {
   if (!opt.materialize) return 0;
 
   auto t_pub = std::chrono::steady_clock::now();
-  std::vector<Word> words(sink_word_id.size());
-  for (const auto& [w, id] : sink_word_id) words[id] = w;
+  std::vector<int32_t> out_word(sink_out.size());
+  for (const auto& [w, id] : sink_out) out_word[id] = w;
 
   GiNaC::symbol x("x");
   ppq::MaterializeColumn cw_id{"word_id", ppq::ColumnType::kLong, {}, {}, true};
@@ -550,8 +598,11 @@ int main(int argc, char** argv) {
   ppq::MaterializeColumn cw_tr{"translations", ppq::ColumnType::kString, {}, {}, false};
   ppq::MaterializeColumn cw_he{"hermite", ppq::ColumnType::kString, {}, {}, false};
   ppq::MaterializeColumn cw_sym{"symbolic", ppq::ColumnType::kString, {}, {}, false};
-  for (size_t i = 0; i < words.size(); ++i) {
-    Features f = WordFeatures(words[i], x);
+  int64_t a0;
+  std::vector<std::pair<int32_t, int64_t>> segs;
+  for (size_t i = 0; i < out_word.size(); ++i) {
+    store.Reconstruct(out_word[i], &a0, &segs);
+    Features f = WordFeatures(a0, segs, x);
     cw_id.ints.push_back(static_cast<int64_t>(i));
     cw_deg.ints.push_back(f.degree);
     cw_sk.strings.push_back(f.skeleton);
@@ -589,6 +640,6 @@ int main(int argc, char** argv) {
   std::printf(
       "[materialize] chain_words rows=%zu node_classes rows=%" PRId64
       " files=%zu pub=%.2fs\n",
-      words.size(), ncw->total, files.size(), Seconds(t_pub));
+      out_word.size(), ncw->total, files.size(), Seconds(t_pub));
   return 0;
 }
