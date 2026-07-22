@@ -1,3 +1,4 @@
+#include <arrow/api.h>
 #include <duckdb.hpp>
 #include <ginac/ginac.h>
 
@@ -20,11 +21,17 @@
 #include "iceberg/expression/literal.h"
 #include "iceberg/manifest/manifest_entry.h"
 #include "iceberg/table_scan.h"
+#include "iceberg/partition_spec.h"
+#include "iceberg/row/partition_values.h"
+#include "iceberg/schema.h"
+#include "iceberg/schema_field.h"
+#include "iceberg/type.h"
 #include "primeparts/catalog/pp_iceberg_rest.h"
 #include "primeparts/catalog/rest_scan_plan.h"
 #include "primeparts/client/session.h"
 #include "primeparts/query/materialize.h"
 #include "primeparts/scan/scan_plan.h"
+#include "primeparts/writer.h"
 
 namespace client = primeparts::client;
 namespace ppc = primeparts::catalog;
@@ -212,6 +219,70 @@ Features WordFeatures(const Word& w, const GiNaC::symbol& x) {
   return f;
 }
 
+struct NodeClassWriter {
+  std::shared_ptr<iceberg::Schema> schema;
+  std::shared_ptr<arrow::Schema> aschema;
+  std::unique_ptr<primeparts::BucketParquetWriter> writer;
+  arrow::Int64Builder node, root, word, mult;
+  int64_t buffered = 0;
+  int64_t total = 0;
+
+  bool Flush(std::string* err) {
+    if (buffered == 0) return true;
+    std::shared_ptr<arrow::Array> na, ra, wa, ma;
+    if (!node.Finish(&na).ok() || !root.Finish(&ra).ok() ||
+        !word.Finish(&wa).ok() || !mult.Finish(&ma).ok()) {
+      if (err) *err = "node_classes: array finish failed";
+      return false;
+    }
+    auto batch = arrow::RecordBatch::Make(aschema, buffered, {na, ra, wa, ma});
+    buffered = 0;
+    return writer->Write(*batch, err);
+  }
+
+  bool Add(int64_t n, int64_t r, int64_t w, int64_t m, std::string* err) {
+    (void)node.Append(n);
+    (void)root.Append(r);
+    (void)word.Append(w);
+    (void)mult.Append(m);
+    ++buffered;
+    ++total;
+    if (buffered >= 65536) return Flush(err);
+    return true;
+  }
+};
+
+std::unique_ptr<NodeClassWriter> MakeNodeClassWriter(
+    const std::string& warehouse, const iceberg::Namespace& ns,
+    std::string* err) {
+  auto w = std::make_unique<NodeClassWriter>();
+  std::vector<iceberg::SchemaField> f;
+  f.push_back(iceberg::SchemaField::MakeRequired(1, "node_id", iceberg::int64()));
+  f.push_back(iceberg::SchemaField::MakeRequired(2, "root_id", iceberg::int64()));
+  f.push_back(iceberg::SchemaField::MakeRequired(3, "word_id", iceberg::int64()));
+  f.push_back(iceberg::SchemaField::MakeRequired(4, "mult", iceberg::int64()));
+  w->schema = std::make_shared<iceberg::Schema>(std::move(f), 0);
+  w->aschema = arrow::schema({arrow::field("node_id", arrow::int64()),
+                              arrow::field("root_id", arrow::int64()),
+                              arrow::field("word_id", arrow::int64()),
+                              arrow::field("mult", arrow::int64())});
+  primeparts::WriterConfig cfg;
+  cfg.output_dir =
+      primeparts::catalog::StagingDataDir(warehouse, ns, "node_classes");
+  cfg.schema = w->schema;
+  cfg.table_name = "node_classes";
+  cfg.filename_prefix = "node_classes";
+  cfg.partition_spec = iceberg::PartitionSpec::Unpartitioned();
+  cfg.partition_values = std::make_shared<iceberg::PartitionValues>(
+      std::vector<iceberg::Literal>{});
+  cfg.stat_columns = {{"node_id", false}, {"root_id", false}, {"word_id", false}};
+  cfg.simple_filename = true;
+  cfg.target_rows_per_file = 4000000;
+  w->writer = primeparts::BucketParquetWriter::Make(cfg, err);
+  if (!w->writer) return nullptr;
+  return w;
+}
+
 bool ParseArgs(int argc, char** argv, Options* out) {
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -365,7 +436,29 @@ int main(int argc, char** argv) {
   int64_t maximal_classes = 0;
   int64_t maximal_chains = 0;
   int64_t max_degree = 0;
-  std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t>> raws;
+
+  ppc::RestOptions ropts;
+  ropts.rest_uri = opt.rest_uri;
+  std::shared_ptr<iceberg::Catalog> catalog;
+  std::unique_ptr<NodeClassWriter> ncw;
+  if (opt.materialize) {
+    std::string mode;
+    catalog = ppc::MakeCatalog(ropts, opt.warehouse, &mode, &error);
+    if (!catalog) {
+      std::fprintf(stderr, "MakeCatalog: %s\n", error.c_str());
+      return 1;
+    }
+    if (!ppc::DropTable(catalog, ns, opt.warehouse, "node_classes", true,
+                        &error)) {
+      std::fprintf(stderr, "DropTable node_classes: %s\n", error.c_str());
+      return 1;
+    }
+    ncw = MakeNodeClassWriter(opt.warehouse, ns, &error);
+    if (!ncw) {
+      std::fprintf(stderr, "node_classes writer: %s\n", error.c_str());
+      return 1;
+    }
+  }
 
   for (int64_t v : nodes) {
     while (!live.empty() && live.top().first < v) {
@@ -405,7 +498,10 @@ int main(int argc, char** argv) {
         maximal_chains += cnt;
         int64_t wid = intern_sink(cls.word);
         max_degree = std::max(max_degree, WordDegree(cls.word));
-        if (opt.materialize) raws.emplace_back(v, cls.root, wid, cnt);
+        if (ncw && !ncw->Add(v, cls.root, wid, cnt, &error)) {
+          std::fprintf(stderr, "node_classes write: %s\n", error.c_str());
+          return 1;
+        }
       }
     }
   }
@@ -420,15 +516,9 @@ int main(int argc, char** argv) {
 
   if (!opt.materialize) return 0;
 
+  auto t_pub = std::chrono::steady_clock::now();
   std::vector<Word> words(sink_word_id.size());
   for (const auto& [w, id] : sink_word_id) words[id] = w;
-  std::vector<int64_t> order(words.size());
-  for (size_t i = 0; i < order.size(); ++i) order[i] = static_cast<int64_t>(i);
-  std::sort(order.begin(), order.end(),
-            [&](int64_t a, int64_t b) { return words[a] < words[b]; });
-  std::vector<int64_t> final_id(words.size());
-  for (size_t i = 0; i < order.size(); ++i)
-    final_id[order[i]] = static_cast<int64_t>(i);
 
   GiNaC::symbol x("x");
   ppq::MaterializeColumn cw_id{"word_id", ppq::ColumnType::kLong, {}, {}, true};
@@ -437,8 +527,8 @@ int main(int argc, char** argv) {
   ppq::MaterializeColumn cw_tr{"translations", ppq::ColumnType::kString, {}, {}, false};
   ppq::MaterializeColumn cw_he{"hermite", ppq::ColumnType::kString, {}, {}, false};
   ppq::MaterializeColumn cw_sym{"symbolic", ppq::ColumnType::kString, {}, {}, false};
-  for (size_t i = 0; i < order.size(); ++i) {
-    Features f = WordFeatures(words[order[i]], x);
+  for (size_t i = 0; i < words.size(); ++i) {
+    Features f = WordFeatures(words[i], x);
     cw_id.ints.push_back(static_cast<int64_t>(i));
     cw_deg.ints.push_back(f.degree);
     cw_sk.strings.push_back(f.skeleton);
@@ -446,42 +536,36 @@ int main(int argc, char** argv) {
     cw_he.strings.push_back(f.hermite);
     cw_sym.strings.push_back(f.symbolic);
   }
-
-  ppq::MaterializeColumn nc_node{"node_id", ppq::ColumnType::kLong, {}, {}, true};
-  ppq::MaterializeColumn nc_root{"root_id", ppq::ColumnType::kLong, {}, {}, true};
-  ppq::MaterializeColumn nc_word{"word_id", ppq::ColumnType::kLong, {}, {}, true};
-  ppq::MaterializeColumn nc_mult{"mult", ppq::ColumnType::kLong, {}, {}, false};
-  for (const auto& [node, root, wid, cnt] : raws) {
-    nc_node.ints.push_back(node);
-    nc_root.ints.push_back(root);
-    nc_word.ints.push_back(final_id[wid]);
-    nc_mult.ints.push_back(cnt);
-  }
-
-  ppc::RestOptions ropts;
-  ropts.rest_uri = opt.rest_uri;
-  std::string mode;
-  auto catalog = ppc::MakeCatalog(ropts, opt.warehouse, &mode, &error);
-  if (!catalog) {
-    std::fprintf(stderr, "MakeCatalog: %s\n", error.c_str());
-    return 1;
-  }
-
-  auto t_pub = std::chrono::steady_clock::now();
   std::string meta;
-  std::vector<ppq::MaterializeColumn> cw{cw_id, cw_deg, cw_sk, cw_tr, cw_he, cw_sym};
+  std::vector<ppq::MaterializeColumn> cw{cw_id, cw_deg, cw_sk,
+                                         cw_tr, cw_he, cw_sym};
   if (!ppq::MaterializeColumns(catalog, ns, opt.warehouse, "chain_words", cw,
                                &meta, &error)) {
     std::fprintf(stderr, "materialize chain_words: %s\n", error.c_str());
     return 1;
   }
-  std::vector<ppq::MaterializeColumn> nc{nc_node, nc_root, nc_word, nc_mult};
-  if (!ppq::MaterializeColumns(catalog, ns, opt.warehouse, "node_classes", nc,
-                               &meta, &error)) {
-    std::fprintf(stderr, "materialize node_classes: %s\n", error.c_str());
+
+  if (!ncw->Flush(&error)) {
+    std::fprintf(stderr, "node_classes flush: %s\n", error.c_str());
     return 1;
   }
-  std::printf("[materialize] chain_words rows=%zu node_classes rows=%zu pub=%.2fs\n",
-              order.size(), nc_node.ints.size(), Seconds(t_pub));
+  std::vector<primeparts::WrittenFile> written;
+  if (!ncw->writer->Close(&written, &error)) {
+    std::fprintf(stderr, "node_classes close: %s\n", error.c_str());
+    return 1;
+  }
+  std::vector<std::shared_ptr<iceberg::DataFile>> files;
+  for (const auto& wf : written)
+    if (wf.data_file) files.push_back(wf.data_file);
+  if (!ppc::CommitFiles(catalog, ns, opt.warehouse, "node_classes", ncw->schema,
+                        iceberg::PartitionSpec::Unpartitioned(),
+                        ppc::TableDeclaration{}, files, &meta, &error)) {
+    std::fprintf(stderr, "commit node_classes: %s\n", error.c_str());
+    return 1;
+  }
+  std::printf(
+      "[materialize] chain_words rows=%zu node_classes rows=%" PRId64
+      " files=%zu pub=%.2fs\n",
+      words.size(), ncw->total, files.size(), Seconds(t_pub));
   return 0;
 }
