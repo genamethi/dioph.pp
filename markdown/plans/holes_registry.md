@@ -220,6 +220,14 @@ One site remains, behind the interface.
   `CreateTableRequest.properties` can set per table at creation.
   `bucket_target_bytes` has no spec counterpart — filed-by 2026-07-18 —
   owner: unassigned
+- tables written before stat-bounds support carry no min/max bounds, so scan
+  planning cannot file-prune them. Every MV published via `MaterializeIntColumns`
+  declared no stat columns (design flaw; the seam gained per-column stat support
+  2026-07-22 in `MaterializeColumns`, but the already-written MVs — `mtuple_k*`,
+  `q_k_freq*`, `q_k_histogram`, `r_freq`, and the pyiceberg `primes_k0*` — predate
+  it). Those tables are stale against the current writer; the remedy is a rewrite,
+  folded into re-wiring `generate.cc` — filed-by pp_graph 05 (2026-07-22) —
+  owner: unassigned
 
 **test and build**
 
