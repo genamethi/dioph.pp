@@ -61,6 +61,7 @@ assertions stay; capability assertions retire with their holes.
 | 2026-07-18 | plan-level residual stays **complete**; the key window is a hint a consumer may decline |
 | 2026-07-18 | `ScanPlan.key_lo/key_hi` retained, carried as `iceberg::Literal` |
 | 2026-07-22 | producer stat-bounds generalized to `iceberg::Literal` (int/long/string): `BatchColumnBounds` returns typed literals and handles utf8, the running accumulator is `optional<pair<Literal,Literal>>`, `TypedLiteral` removed. Unlocks string-column derived tables (e.g. `chain_words`) that record bounds, so the expressions interface can plan-scan them |
+| 2026-07-22 | catalogd binds `:port` with `SO_REUSEADDR` only, not `SO_REUSEPORT` (`svr.set_socket_options`, overriding cpp-httplib's default). `SO_REUSEPORT` let a second instance silently co-bind the same port; the kernel round-robined connections between two processes with **separate in-memory plan stores**, so a plan submitted to one 404'd (`NoSuchPlanIdException`) when polled on the other. A second instance now fails to bind (`EADDRINUSE`) loudly instead |
 | 2026-07-18 | **server-side planning: implement in full** — all four routes plus plan-id lifecycle, flipping `scan-planning-mode` to `server`. Next branch. |
 | 2026-07-18 | `createTable`: the server ensures the table location exists, expressed so it is a no-op where directories are not a concept |
 | 2026-07-18 | existing-table declaration: **REST-only**, no local tool |

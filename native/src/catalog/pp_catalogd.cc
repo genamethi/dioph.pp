@@ -399,6 +399,11 @@ int RunCatalogd(const CatalogdOptions& opts) {
       .ttl = std::chrono::seconds(opts.plan_ttl_seconds)});
 
   httplib::Server svr;
+  svr.set_socket_options([](int sock) {
+    int yes = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR,
+               reinterpret_cast<const void*>(&yes), sizeof(yes));
+  });
   RouteTable routes(svr);
 
   routes.Get("/v1/namespaces", "/v1/{prefix}/namespaces", {"GET"},
