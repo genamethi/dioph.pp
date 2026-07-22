@@ -1,11 +1,14 @@
 #include <duckdb.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "iceberg/expression/expressions.h"
@@ -34,6 +37,52 @@ struct Options {
   std::string warehouse = kDefaultWarehouse;
 };
 
+struct Edge {
+  int64_t p = 0;
+  int64_t q = 0;
+  int32_t m = 0;
+  int32_t n = 0;
+};
+
+struct Word {
+  int64_t a0 = 0;
+  std::vector<std::pair<int32_t, int64_t>> segs;
+  bool operator==(const Word& o) const {
+    return a0 == o.a0 && segs == o.segs;
+  }
+};
+
+struct Class {
+  int64_t root = 0;
+  Word word;
+  bool operator==(const Class& o) const {
+    return root == o.root && word == o.word;
+  }
+};
+
+struct WordHash {
+  size_t operator()(const Word& w) const {
+    size_t h = std::hash<int64_t>{}(w.a0);
+    for (const auto& [n, c] : w.segs) {
+      h ^= (std::hash<int32_t>{}(n) + 0x9e3779b97f4a7c15ULL + (h << 6) +
+            (h >> 2));
+      h ^= (std::hash<int64_t>{}(c) + 0x9e3779b97f4a7c15ULL + (h << 6) +
+            (h >> 2));
+    }
+    return h;
+  }
+};
+
+struct ClassHash {
+  size_t operator()(const Class& c) const {
+    size_t h = std::hash<int64_t>{}(c.root);
+    h ^= (WordHash{}(c.word) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2));
+    return h;
+  }
+};
+
+using ClassMap = std::unordered_map<Class, int64_t, ClassHash>;
+
 double Seconds(std::chrono::steady_clock::time_point t0) {
   return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
       .count();
@@ -58,6 +107,22 @@ std::string QuoteList(const std::vector<std::string>& paths) {
   }
   out += "]";
   return out;
+}
+
+Word WordPush(Word w, int32_t n, int64_t c) {
+  if (n == 1) {
+    if (!w.segs.empty()) w.segs.back().second += c;
+    else w.a0 += c;
+  } else {
+    w.segs.emplace_back(n, c);
+  }
+  return w;
+}
+
+int64_t WordDegree(const Word& w) {
+  int64_t d = 1;
+  for (const auto& [n, c] : w.segs) d *= n;
+  return d;
 }
 
 bool ParseArgs(int argc, char** argv, Options* out) {
@@ -145,28 +210,85 @@ int main(int argc, char** argv) {
   duckdb::Connection con(db);
 
   std::string sql =
-      "SELECT count(*) AS edges, min(p) AS minp, max(p) AS maxp, "
-      "max(n_k) AS max_n, count(*) FILTER (n_k = 1) AS n1 "
-      "FROM read_parquet(" +
-      QuoteList(paths) +
+      "SELECT p, m_k, n_k, q_k FROM read_parquet(" + QuoteList(paths) +
       ") WHERE p <= " + std::to_string(opt.bound);
 
   t0 = std::chrono::steady_clock::now();
-  auto result = con.Query(sql);
+  std::vector<Edge> edges;
+  auto result = con.SendQuery(sql);
   if (result->HasError()) {
     std::fprintf(stderr, "duckdb: %s\n", result->GetError().c_str());
     return 1;
   }
+  while (auto chunk = result->Fetch()) {
+    duckdb::idx_t n = chunk->size();
+    if (n == 0) break;
+    auto* pv = duckdb::FlatVector::GetData<int64_t>(chunk->data[0]);
+    auto* mv = duckdb::FlatVector::GetData<int32_t>(chunk->data[1]);
+    auto* nv = duckdb::FlatVector::GetData<int32_t>(chunk->data[2]);
+    auto* qv = duckdb::FlatVector::GetData<int64_t>(chunk->data[3]);
+    for (duckdb::idx_t i = 0; i < n; ++i)
+      edges.push_back({pv[i], qv[i], mv[i], nv[i]});
+  }
   double t_read = Seconds(t0);
 
-  std::printf("[wiring] files=%zu plan=%.2fs read=%.2fs (in-process duckdb)\n",
-              paths.size(), t_plan, t_read);
+  std::printf("[wiring] files=%zu plan=%.2fs read=%.2fs edges=%zu\n",
+              paths.size(), t_plan, t_read, edges.size());
+
+  std::unordered_map<int64_t, std::vector<Edge>> parents;
+  std::unordered_set<int64_t> has_children;
+  std::unordered_set<int64_t> node_set;
+  for (const auto& e : edges) {
+    parents[e.p].push_back(e);
+    has_children.insert(e.q);
+    node_set.insert(e.p);
+    node_set.insert(e.q);
+  }
+  std::vector<int64_t> nodes(node_set.begin(), node_set.end());
+  std::sort(nodes.begin(), nodes.end());
+
+  t0 = std::chrono::steady_clock::now();
+  std::unordered_map<int64_t, ClassMap> memo;
+  memo.reserve(nodes.size());
+  for (int64_t v : nodes) {
+    ClassMap res;
+    auto it = parents.find(v);
+    if (it == parents.end()) {
+      res[Class{v, Word{}}] = 1;
+    } else {
+      for (const auto& e : it->second) {
+        const int64_t c = int64_t{1} << e.m;
+        auto pit = memo.find(e.q);
+        if (pit == memo.end()) continue;
+        for (const auto& [cls, cnt] : pit->second) {
+          res[Class{cls.root, WordPush(cls.word, e.n, c)}] += cnt;
+        }
+      }
+    }
+    memo[v] = std::move(res);
+  }
+  double t_dp = Seconds(t0);
+
+  std::unordered_set<Word, WordHash> distinct_words;
+  int64_t maximal_classes = 0;
+  int64_t maximal_chains = 0;
+  int64_t max_degree = 0;
+  const Word seed;
+  for (int64_t v : nodes) {
+    if (has_children.count(v)) continue;
+    for (const auto& [cls, cnt] : memo[v]) {
+      if (cls.word == seed) continue;
+      ++maximal_classes;
+      maximal_chains += cnt;
+      distinct_words.insert(cls.word);
+      max_degree = std::max(max_degree, WordDegree(cls.word));
+    }
+  }
+
   std::printf(
-      "[census] edges=%s minp=%s maxp=%s max_n=%s n1=%s\n",
-      result->GetValue(0, 0).ToString().c_str(),
-      result->GetValue(1, 0).ToString().c_str(),
-      result->GetValue(2, 0).ToString().c_str(),
-      result->GetValue(3, 0).ToString().c_str(),
-      result->GetValue(4, 0).ToString().c_str());
+      "[collapse] maximal_classes=%" PRId64 " distinct_words=%zu "
+      "maximal_chains=%" PRId64 " max_degree=%" PRId64 " dp=%.2fs\n",
+      maximal_classes, distinct_words.size(), maximal_chains, max_degree,
+      t_dp);
   return 0;
 }
