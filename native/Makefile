@@ -22,6 +22,10 @@ NOTCURSES_RPATH ?= -Wl,-rpath,$(PREFIX)/lib
 LUA_CPPFLAGS ?= -I$(PREFIX)/include
 LUA_LDLIBS ?= $(PREFIX)/lib/liblua.a -lm -ldl
 
+DUCKDB_CPPFLAGS ?= -I$(PREFIX)/include
+DUCKDB_LDLIBS ?= -lduckdb
+DUCKDB_RPATH ?= -Wl,-rpath,$(abspath $(PREFIX)/lib)
+
 ICEBERG_CPPFLAGS += -I$(PREFIX)/include $(ICEBERG_FALLBACK_CPPFLAGS)
 ICEBERG_LDFLAGS +=
 # -l:libfoo.a searches -L paths but matches only the archive, so stale or

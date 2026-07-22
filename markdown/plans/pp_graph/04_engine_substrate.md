@@ -12,19 +12,30 @@ extension. No JVM; Rust only with a killer app (none yet).
       is absent** and stays downstream (phase 06); 04/05 do not need it. Linking
       Acero/Substrait into a target is a link-flag change only, no rebuild.
 - [x] Provision **DuckDB CLI + iceberg + substrait(community) extensions** via
-      `native/configure` (idempotent presence checks, user-local, no sudo). This
-      replaces "vendor DuckDB as a gitlink": the probe (below) shows DuckDB's role
-      is an **out-of-process direct reader / relational engine**, not a library
-      linked into `pp-graph`. Whether to later vendor+link `libduckdb` for the
-      pivot cache / point-lookup is deferred to phase 05 with measurements — open.
+      `native/configure` (idempotent presence checks, user-local, no sudo) — the
+      CLI is for probing/spec-audit against the IRC.
+- [x] Provision **libduckdb (in-process engine)** via `native/configure`: the
+      prebuilt bundle (`libduckdb.so` + `libduckdb_static.a` + `duckdb.hpp`/`.h`),
+      pinned to the CLI version, installed to `$PREFIX` like arrow/iceberg. Make
+      link vars `DUCKDB_CPPFLAGS` / `DUCKDB_LDLIBS` (`-lduckdb`) / `DUCKDB_RPATH`.
+      **Decision (2026-07-22): DuckDB is linked in-process, not out-of-process.**
+      In-process is the engine the user's design calls for (DuckDB-managed pivot
+      cache, point lookup, out-of-core over the plan's Parquet). Smoke-tested:
+      shared-link works; the static `.a` needs the extension objects linked
+      separately (`ExtensionHelper::LoadAllExtensions` unresolved), so **shared +
+      rpath** is the default (matches notcurses); static is a follow-up.
 - [x] **Conformance probe = spec-surface audit** (2026-07-22) — see results below.
 - [ ] Wire the consumer data path: `rest_scan_plan::PlanScanOnServer` →
-      FileScanTask → **direct Parquet read** (DuckDB `read_parquet` / Acero /
-      `SourceTableReader`); Substrait as the relational plan IR. Data reads never
-      cross the server.
-- [ ] Decision recorded: what is **bought** (DuckDB relational / point-lookup /
-      out-of-core; pivot DuckDB-managed, not a full Iceberg table) vs **built**
-      (the bespoke DP), with measurements — not vibes.
+      FileScanTask → **in-process DuckDB** reads the returned data files
+      (`read_parquet([paths])` on the plan's file set); Substrait as the relational
+      plan IR where a plan needs to cross to Acero. Data reads never cross the
+      server.
+- [x] Decision recorded — **bought vs built**: *bought* = DuckDB as the
+      in-process relational engine / point-lookup / out-of-core cache, reading the
+      Parquet the scan plan points to (the pivot is DuckDB-managed, not a full
+      Iceberg table); *built* = the bespoke collapse DP + canonical-word encoding.
+      DuckDB-over-REST is explicitly **not** the read path (its REST reader assumes
+      cloud storage — see probe + hole).
 
 ## Probe results (2026-07-22)
 
@@ -41,16 +52,16 @@ read-only.
 | `ATTACH … (TYPE ICEBERG)` **data read** | **diverges** — DuckDB's REST read path is wired for cloud object storage; it demands a region / vended S3 credentials and will not read local-filesystem data files vended by the catalog. `DEFAULT_REGION` is rejected as an unhandled option in 1.5.4 |
 | `read_parquet('<data-file-path>')` on a plan's data file | **conformant** — rows + relational aggregation (`GROUP BY`) work directly |
 
-**Conclusion (informs bought/built, not yet the full decision):** DuckDB earns
-its keep as a **direct reader + relational engine over the Parquet/metadata the
-scan plan points to** (`read_parquet([paths])`, `iceberg_scan(metadata.json)`) —
-which *is* the architecture ("consumers read Parquet directly; data reads never
-cross the server"). DuckDB-over-REST is **not** the read path: catalog navigation
-against our IRC works (a real interop win — validates `pp-catalogd`'s spec
-surface against a client we did not write), but its data-read path assumes cloud
-storage and cannot serve our local warehouse. So: catalog = planning; data =
-direct. Filed the storage gap as a hole. The probe de-risked the DuckDB bet
-before any vendoring.
+**Conclusion:** DuckDB is the **in-process relational engine over the
+Parquet/metadata the scan plan points to** (`read_parquet([paths])`,
+`iceberg_scan(metadata.json)`) — which *is* the architecture ("consumers read
+Parquet directly; data reads never cross the server"). DuckDB-over-REST is **not**
+the read path: catalog navigation against our IRC works (a real interop win —
+validates `pp-catalogd`'s spec surface against a client we did not write), but its
+data-read path assumes cloud storage and cannot serve our local warehouse. So:
+catalog = planning (over `/v1`); data = read directly by the in-process engine.
+Filed the storage gap as a hole. The probe settled bought-vs-built before wiring
+the consumer.
 
 `partitions` loadTable confirms the phase-05 projection: fields
 `p:long, m_k:int, n_k:int, q_k:long, prime_rank:long, p_bucket_version:int,
