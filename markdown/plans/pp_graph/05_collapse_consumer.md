@@ -23,24 +23,35 @@ registry: open ground). Built on the phase-04 substrate. The math is settled in
       (`q=W⁻¹(p)`, unique), count dropped; `node_classes = (node, word)`. Memo is
       now tiny; the persistent **store is the product**, destined for disk. See
       `../../math/hopf_structure.md`.
-- [ ] **Optimization backlog — do NOT drop these (discussed, not yet built):**
-      1. **Parallel workers on a shared memo** — the core ask. Dispatch nodes (one
-         at a time, or a slice per worker) to a thread pool; each does top-down
-         `paths_down`, **breaking the moment it hits a node already in the shared
-         memo** (membership = reuse). Target: saturate all cores. Needs a
-         concurrent (sharded-lock) memo + store.
-      2. **Hybrid prune** — memo-and-kill the empirically low-value tails first
-         (`n=1` pure translation chains, `k=0` = roots, `k=1`) so the expensive
-         traversal only runs on the long-chain core. Candidates are data-driven;
-         revisit as the spectrum data grows.
-      3. **Flush the store to disk at a set batch size** — batch sized to fill
-         memory (>20 GB) + cores, tuned *after* the algorithm is right. Not 10x-B
-         jumps — finer steps; large B is not the sole goal.
-      4. **Fuse the two-level intern** (seg then word) — the ~2x `Push` slowdown is
-         double hashing; one hash or a better key fixes it.
-      5. Parallelize the **GiNaC feature pass** (the `pub` bottleneck).
-      Termination for incremental: a chain ends at a node iff it is a k=0 prime OR
-      below the previous frontier.
+- [x] **Parallel sweep (done 2026-07-22, `e22d874`).** `--workers W` runs a Kahn
+      topological sweep over a 256-shard concurrent `ConcStore`. ~2.9x at 12–20
+      workers, contention-limited by the single `qmu`. A batched-queue contention
+      fix was tried and reverted (liveness bug); revisit with a proper work-stealing
+      deque or sharded queue, tuned after the sliced algorithm is right.
+- [ ] **Sliced sweep — CONFIRMED DESIGN (the main remaining build).** Bound RAM to
+      a 24 GB-per-slice cap by processing contiguous p-ranges and **dumping each
+      slice independently — no frontier memo carried across the boundary.**
+      - Within a slice, trace normally. When a chain reaches a node **below the
+        current range**, that node is the meeting point: it is either a k=0 root
+        (chain ends) or a node an earlier slice already computed. Either way
+        **stop, record the connection (the node id), do not re-trace, hold nothing
+        from the prior slice.** This is "membership against known chains."
+      - The trie makes it fall out: a word crossing the frontier is
+        `(upper segments, connection -> node q below)`, `q` an id into the earlier
+        slice's on-disk dump. Within-slice `Push` extends these partial words and
+        dedups them; the connection is **opaque during the slice**, so *no read of
+        the prior slice happens during compute*.
+      - A below-range parent acts as a **local seed tagged `q`** (like a root, but
+        connected). Every node, once referenced by a later slice, is just a
+        connection-seed — memos are never reloaded/carried across slices.
+      - Per-slice output: `(node, partial-word, connection)` + the slice's trie.
+        The whole graph = the union of slice files **stitched at connection nodes**.
+      - **Full word / Hermite features are assembled at reassembly / query time**
+        by following connections into earlier slice files — never in RAM mid-sweep.
+      - Slices read via `OpenIncremental` (p-range); finer steps, not 10x-B jumps.
+- [ ] **Deferred optimizations:** fuse the two-level `Push` intern (kills the ~2x
+      trie slowdown); parallelize the GiNaC feature pass (the `pub` bottleneck);
+      fix the parallel contention (work-stealing).
 - [ ] **Injectivity lemma** (collapse classes = canonical words; Ritt, nonzero
       inter-power constants) written down — underwrites the word representation.
 - [ ] **Regenerate `primes_k0`** — **deferred TODO, out of scope for now.** From
