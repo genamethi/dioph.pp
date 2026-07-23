@@ -358,6 +358,21 @@ struct ConcStore {
     ReadWord(w, &a0, &tail, &deg);
     return deg;
   }
+  void Reconstruct(int32_t w, int64_t* a0,
+                   std::vector<std::pair<int32_t, int64_t>>* segs) {
+    int64_t deg;
+    int32_t tail;
+    ReadWord(w, a0, &tail, &deg);
+    segs->clear();
+    for (int32_t s = tail; s >= 0;) {
+      int32_t p, n;
+      int64_t c;
+      ReadSeg(s, &p, &n, &c);
+      segs->emplace_back(n, c);
+      s = p;
+    }
+    std::reverse(segs->begin(), segs->end());
+  }
 };
 
 struct ParResult {
@@ -485,7 +500,8 @@ struct MemoEntryHash {
 // push sequence (its a0 as an n=1 fold, then each segment) onto base. This is
 // exactly the deconcatenation coproduct run in reverse: Push(base, ...) built up
 // from upper's (a0, segs).
-int32_t Compose(WordStore& s, int32_t base, int32_t upper) {
+template <class Store>
+int32_t Compose(Store& s, int32_t base, int32_t upper) {
   int64_t a0;
   std::vector<std::pair<int32_t, int64_t>> segs;
   s.Reconstruct(upper, &a0, &segs);
@@ -495,7 +511,8 @@ int32_t Compose(WordStore& s, int32_t base, int32_t upper) {
   return t;
 }
 
-void Expand(WordStore& s,
+template <class Store>
+void Expand(Store& s,
             const std::unordered_map<int64_t, std::vector<MemoEntry>>& memo,
             int32_t word, int64_t conn, std::unordered_set<int32_t>& out) {
   if (conn < 0) {
@@ -554,6 +571,115 @@ ParResult RunSliced(
     for (const auto& me : memo[v]) {
       if (me.word == store.seed && me.conn < 0) continue;
       Expand(store, memo, me.word, me.conn, complete);
+    }
+    r.node_word_pairs += static_cast<int64_t>(complete.size());
+    for (int32_t w : complete) {
+      distinct.insert(w);
+      int64_t d = store.Degree(w);
+      if (d > r.max_degree) r.max_degree = d;
+    }
+  }
+  r.distinct_words = static_cast<int64_t>(distinct.size());
+  return r;
+}
+
+// Parallel sliced sweep. A node is ready once its *in-slice* parents are done
+// (parents in an earlier slice are connections, always available), so the Kahn
+// sweep parallelizes within a slice through the concurrent store. memo entries
+// carry (word, conn); below-slice parents defer as connections. In-memory
+// validation form: the whole memo is held and reassembled here; the per-slice
+// disk dump/reload that bounds RAM is the next step.
+ParResult RunSlicedParallel(
+    const std::vector<int64_t>& nodes,
+    const std::unordered_map<int64_t, std::vector<Edge>>& parents,
+    const std::unordered_set<int64_t>& has_children, int64_t slice_width,
+    int workers) {
+  const int32_t N = static_cast<int32_t>(nodes.size());
+  std::unordered_map<int64_t, int32_t> idx;
+  idx.reserve(N);
+  for (int32_t i = 0; i < N; ++i) idx[nodes[i]] = i;
+  auto slice_of = [&](int64_t p) { return p / slice_width; };
+
+  std::vector<std::vector<int32_t>> children(N);
+  std::vector<std::atomic<int>> indeg(N);
+  for (int32_t i = 0; i < N; ++i) indeg[i].store(0, std::memory_order_relaxed);
+  for (int32_t vi = 0; vi < N; ++vi) {
+    auto it = parents.find(nodes[vi]);
+    if (it == parents.end()) continue;
+    const int64_t vs = slice_of(nodes[vi]);
+    std::unordered_set<int64_t> inslice;
+    for (const auto& e : it->second)
+      if (slice_of(e.q) == vs) inslice.insert(e.q);
+    indeg[vi].store(static_cast<int>(inslice.size()), std::memory_order_relaxed);
+    for (int64_t q : inslice) children[idx[q]].push_back(vi);
+  }
+
+  ConcStore store;
+  std::vector<std::vector<MemoEntry>> memo(N);
+
+  std::mutex qmu;
+  std::condition_variable cv;
+  std::vector<int32_t> ready;
+  std::atomic<int64_t> remaining{N};
+  std::atomic<bool> done{false};
+  for (int32_t i = 0; i < N; ++i)
+    if (indeg[i].load(std::memory_order_relaxed) == 0) ready.push_back(i);
+
+  auto worker = [&]() {
+    while (true) {
+      int32_t v;
+      {
+        std::unique_lock<std::mutex> lk(qmu);
+        cv.wait(lk, [&] { return !ready.empty() || done.load(); });
+        if (ready.empty()) return;
+        v = ready.back();
+        ready.pop_back();
+      }
+      const int64_t vv = nodes[v];
+      const int64_t vs = slice_of(vv);
+      std::unordered_set<MemoEntry, MemoEntryHash> res;
+      auto it = parents.find(vv);
+      if (it == parents.end()) {
+        res.insert({store.seed, -1});
+      } else {
+        for (const auto& e : it->second) {
+          const int64_t c = int64_t{1} << e.m;
+          if (slice_of(e.q) < vs) {
+            res.insert({store.Push(store.seed, e.n, c), e.q});
+          } else {
+            for (const auto& me : memo[idx[e.q]])
+              res.insert({store.Push(me.word, e.n, c), me.conn});
+          }
+        }
+      }
+      memo[v].assign(res.begin(), res.end());
+      {
+        std::lock_guard<std::mutex> lk(qmu);
+        for (int32_t c : children[v])
+          if (indeg[c].fetch_sub(1, std::memory_order_acq_rel) == 1)
+            ready.push_back(c);
+        if (remaining.fetch_sub(1, std::memory_order_acq_rel) == 1)
+          done.store(true);
+        cv.notify_all();
+      }
+    }
+  };
+  std::vector<std::thread> pool;
+  for (int i = 0; i < workers; ++i) pool.emplace_back(worker);
+  for (auto& t : pool) t.join();
+
+  std::unordered_map<int64_t, std::vector<MemoEntry>> flat;
+  flat.reserve(N);
+  for (int32_t i = 0; i < N; ++i) flat[nodes[i]] = memo[i];
+
+  ParResult r;
+  std::unordered_set<int32_t> distinct;
+  for (int64_t v : nodes) {
+    if (has_children.count(v)) continue;
+    std::unordered_set<int32_t> complete;
+    for (const auto& me : memo[idx[v]]) {
+      if (me.word == store.seed && me.conn < 0) continue;
+      Expand(store, flat, me.word, me.conn, complete);
     }
     r.node_word_pairs += static_cast<int64_t>(complete.size());
     for (int32_t w : complete) {
@@ -804,10 +930,11 @@ int main(int argc, char** argv) {
 
   if (opt.workers > 1) {
     t0 = std::chrono::steady_clock::now();
-    ParResult pr = RunParallel(nodes, parents, has_children, opt.workers);
+    ParResult pr =
+        RunSlicedParallel(nodes, parents, has_children, 1000000, opt.workers);
     std::printf(
         "[collapse] node_word_pairs=%" PRId64 " distinct_words=%" PRId64
-        " max_degree=%" PRId64 " dp=%.2fs workers=%d\n",
+        " max_degree=%" PRId64 " dp=%.2fs workers=%d sliced\n",
         pr.node_word_pairs, pr.distinct_words, pr.max_degree, Seconds(t0),
         opt.workers);
     return 0;
