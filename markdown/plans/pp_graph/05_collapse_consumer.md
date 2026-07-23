@@ -49,6 +49,22 @@ registry: open ground). Built on the phase-04 substrate. The math is settled in
       - **Full word / Hermite features are assembled at reassembly / query time**
         by following connections into earlier slice files — never in RAM mid-sweep.
       - Slices read via `OpenIncremental` (p-range); finer steps, not 10x-B jumps.
+- [ ] **Sliced sweep — progress (2026-07-22).** `RunSliced` (serial) and
+      `RunSlicedParallel` (parallel Kahn, 1e6-width slices, `ConcStore`) both
+      validated: connection-tag algebra reproduces single-pass exactly (serial to
+      K=16 @1e5; parallel to 1e6). Slice width = 1e6, default 12 workers, no flag
+      (wiring TODO). Still in-memory; per-slice disk dump/reload = the RAM bound.
+      **Key finding:** the naive recursive `Expand` reassembly is near-cartesian
+      across boundary crossings and blows up at multi-slice scale (2e6 parallel
+      timed out in reassembly). Reassembly must be **lazy per-query** (the bulk
+      form is only for validation) and, where bulk is needed at compaction,
+      **bottom-up + memoized** (expand each boundary node's chains once, cache).
+- [ ] **Persist the trie/coproduct** as a first-class table `words(word_id,
+      parent, n, C, slice, conn)` — the Hopf coproduct on disk. `chain_words`
+      (features) becomes a materialized view over it. Raw append-only log per
+      slice during the sweep; **compact into 1-2 GB parquet with ~128-256 MB row
+      groups** (sorted: `node_words` by node_id, `words` by word_id) — avoids the
+      small-file swamp.
 - [ ] **Deferred optimizations:** fuse the two-level `Push` intern (kills the ~2x
       trie slowdown); parallelize the GiNaC feature pass (the `pub` bottleneck);
       fix the parallel contention (work-stealing).
