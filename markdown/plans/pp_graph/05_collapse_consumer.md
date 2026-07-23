@@ -2,82 +2,79 @@
 
 The first real FileScanTask consumer + the query engine behind it (holes
 registry: open ground). Built on the phase-04 substrate. The math is settled in
-`../../math/collapse_findings.md`.
+`../../math/collapse_findings.md`; the algebraic backbone in
+`../../math/hopf_structure.md`.
 
-- [x] Port the collapse DP to **native C++** (`native/src/graph/pp_graph.cc`).
-      Reads `partitions` via the server plan (`PlanScanOnServer`) + in-process
-      DuckDB `read_parquet` — edges **read**, never `is_prime_power`'d. Forward
-      sweep in p-order (every parent `q<p`), no recursion. Validated exact vs the
-      Sage reference at 1e3/1e4; 1e6 matches the documented findings (1.18M words,
-      8.42e12 chains); ~29x faster / 2.4x lighter than the Python prototype.
-- [x] Two derived tables via `MaterializeColumns` (typed int/long/string, stat
-      bounds): `chain_words(word_id, degree, skeleton, translations, hermite,
-      symbolic)` + `node_classes(node_id, root_id, word_id, mult)`. Published over
-      the **REST catalog** (`MakeCatalog({rest_uri}, warehouse)`) through the
-      daemon; parquet on the warehouse FS, metadata CAS by catalogd. Verified live
-      at B=1e3 (197 words / 201 classes, round-tripped via DuckDB `iceberg_scan`).
-      GiNaC `He`/`ToHermite` for the Hermite features. `word_id` is dense-by-sorted
-      today; stable/append-only across bounds is a scaling concern.
-- [ ] **Data model (done 2026-07-22).** Trie-DAG word store (`Seg{parent,n,C}` +
-      interned words) = the Hopf coproduct; memo = int32 word-id sets; root derived
-      (`q=W⁻¹(p)`, unique), count dropped; `node_classes = (node, word)`. Memo is
-      now tiny; the persistent **store is the product**, destined for disk. See
-      `../../math/hopf_structure.md`.
-- [x] **Parallel sweep (done 2026-07-22, `e22d874`).** `--workers W` runs a Kahn
-      topological sweep over a 256-shard concurrent `ConcStore`. ~2.9x at 12–20
-      workers, contention-limited by the single `qmu`. A batched-queue contention
-      fix was tried and reverted (liveness bug); revisit with a proper work-stealing
-      deque or sharded queue, tuned after the sliced algorithm is right.
-- [ ] **Sliced sweep — CONFIRMED DESIGN (the main remaining build).** Bound RAM to
-      a 24 GB-per-slice cap by processing contiguous p-ranges and **dumping each
-      slice independently — no frontier memo carried across the boundary.**
-      - Within a slice, trace normally. When a chain reaches a node **below the
-        current range**, that node is the meeting point: it is either a k=0 root
-        (chain ends) or a node an earlier slice already computed. Either way
-        **stop, record the connection (the node id), do not re-trace, hold nothing
-        from the prior slice.** This is "membership against known chains."
-      - The trie makes it fall out: a word crossing the frontier is
-        `(upper segments, connection -> node q below)`, `q` an id into the earlier
-        slice's on-disk dump. Within-slice `Push` extends these partial words and
-        dedups them; the connection is **opaque during the slice**, so *no read of
-        the prior slice happens during compute*.
-      - A below-range parent acts as a **local seed tagged `q`** (like a root, but
-        connected). Every node, once referenced by a later slice, is just a
-        connection-seed — memos are never reloaded/carried across slices.
-      - Per-slice output: `(node, partial-word, connection)` + the slice's trie.
-        The whole graph = the union of slice files **stitched at connection nodes**.
-      - **Full word / Hermite features are assembled at reassembly / query time**
-        by following connections into earlier slice files — never in RAM mid-sweep.
-      - Slices read via `OpenIncremental` (p-range); finer steps, not 10x-B jumps.
-- [ ] **Sliced sweep — progress (2026-07-22).** `RunSliced` (serial) and
-      `RunSlicedParallel` (parallel Kahn, 1e6-width slices, `ConcStore`) both
-      validated: connection-tag algebra reproduces single-pass exactly (serial to
-      K=16 @1e5; parallel to 1e6). Slice width = 1e6, default 12 workers, no flag
-      (wiring TODO). Still in-memory; per-slice disk dump/reload = the RAM bound.
-      **Key finding:** the naive recursive `Expand` reassembly is near-cartesian
-      across boundary crossings and blows up at multi-slice scale (2e6 parallel
-      timed out in reassembly). Reassembly must be **lazy per-query** (the bulk
-      form is only for validation) and, where bulk is needed at compaction,
-      **bottom-up + memoized** (expand each boundary node's chains once, cache).
-- [ ] **Persist the trie/coproduct** as a first-class table `words(word_id,
-      parent, n, C, slice, conn)` — the Hopf coproduct on disk. `chain_words`
-      (features) becomes a materialized view over it. Raw append-only log per
-      slice during the sweep; **compact into 1-2 GB parquet with ~128-256 MB row
-      groups** (sorted: `node_words` by node_id, `words` by word_id) — avoids the
-      small-file swamp.
-- [ ] **Deferred optimizations:** fuse the two-level `Push` intern (kills the ~2x
-      trie slowdown); parallelize the GiNaC feature pass (the `pub` bottleneck);
-      fix the parallel contention (work-stealing).
-- [ ] **Injectivity lemma** (collapse classes = canonical words; Ritt, nonzero
-      inter-power constants) written down — underwrites the word representation.
-- [ ] **Regenerate `primes_k0`** — **deferred TODO, out of scope for now.** From
-      the `primes ⟝ partitions` anti-join, materialized under the pp convention
-      (`primeparts/primes_k0`, bare paths), obsoleting the foreign
-      `primeparts.db/primes_k0` (3.87B rows, `file:`/`.crc`/`<ns>.db`).
-      `primes_k0_sieve` untouched. Ties into re-wiring `generate.cc` (see the
-      stats-less-tables hole).
-- [ ] **F2P tests** — **deferred to last.** The scoped capability (reading==
-      computing at 1e3/1e4) already holds, so these are regression tests, not
-      fail-to-pass; land them in `e2e_test.cc` once the scaling machinery settles.
-      Incremental idempotence (1e5→1e6 == from-scratch 1e6) becomes a real F2P once
-      incremental passes exist.
+## Done
+
+- **Collapse DP, native** (`native/src/graph/pp_graph.cc`). Reads `partitions`
+  via the server plan (`PlanScanOnServer`) + in-process DuckDB `read_parquet` —
+  edges are read, never `is_prime_power`'d. Forward sweep in p-order (every parent
+  `q < p`), no recursion. Validated exact against the Sage reference; the 1e6 run
+  reproduces the documented spectrum.
+- **Trie-DAG word store** = the Hopf coproduct: a word is `(a0, tail)` over
+  interned segments `Seg{parent, n, C}`, so shared prefixes are shared. The memo
+  is a set of int32 word-ids; the root is derived (`q = W⁻¹(p)`, unique because
+  `W` is monotone), and count is a comodule multiplicity — both dropped from the
+  core. `node_classes = (node, word)`; the store itself is the product, destined
+  for disk.
+- **Derived tables** via `MaterializeColumns` (typed int/long/string, stat
+  bounds) published over the REST catalog (`MakeCatalog({rest_uri}, warehouse)`)
+  through the daemon — parquet on the warehouse FS, metadata CAS by catalogd:
+  `chain_words(word_id, degree, skeleton, translations, hermite, symbolic)` (GiNaC
+  Hermite features) and `node_classes`. `word_id` is dense-by-sort; a
+  stable/append-only id across bounds is a scaling concern.
+- **Parallel sweep** (`--workers`): a Kahn topological sweep over a sharded
+  concurrent store. Contention-limited by a single queue lock; a work-stealing or
+  sharded queue is the lever, tuned after the sliced algorithm settles.
+
+## Sliced sweep (in progress) — the RAM bound
+
+Process contiguous p-range slices (default width 1e6, 12 workers per slice) and
+dump each slice independently — no frontier memo carried across the boundary.
+
+- Trace normally within a slice. When a chain reaches a node **below the current
+  range**, that node is the meeting point (a k=0 root, or a node an earlier slice
+  computed): stop, record the **connection** (the node id), do not re-trace. The
+  trie makes this fall out — a word crossing the boundary is `(upper segments,
+  connection → node q)`, `q` an id into the earlier slice's dump. The connection
+  is opaque during compute, so no prior-slice read happens mid-sweep, and each
+  slice gets a fresh store (connections reference nodes, not words).
+- Per-slice output: `(node, partial-word, connection)` + the slice's trie. The
+  whole graph is the union of slice files stitched at connection nodes.
+- **The connection algebra is validated**: deferring below-range parents as
+  connections and reassembling by composition (replay the upper word's
+  push-sequence onto each connected chain) reproduces the single-pass result
+  exactly, serial and parallel, for any slicing.
+
+Remaining:
+
+- **Per-slice disk dump/reload** — the sweep is proven but still in-memory;
+  dumping each slice to a raw append-only log and freeing is what delivers the
+  24 GB/slice bound. Slices read via `OpenIncremental` (p-range).
+- **Reassembly is lazy per-query.** The bulk recursive expansion is near-cartesian
+  across boundary crossings and does not scale; full words / Hermite features are
+  assembled on demand by following connections into earlier slice files. Where a
+  bulk pass is unavoidable (compaction), it must be bottom-up and memoized —
+  expand each boundary node's chains once and cache.
+
+## Persist the trie/coproduct
+
+Save the coproduct as a first-class table `words(word_id, parent, n, C, slice,
+conn)`; `chain_words` becomes a materialized view over it. Write a raw
+append-only log per slice during the sweep, then **compact into 1–2 GB parquet
+with ~128–256 MB row groups** (sorted: `node_words` by node_id, `words` by
+word_id) to avoid a small-file swamp.
+
+## Deferred
+
+- Fuse the two-level `Push` intern (one hash instead of seg-then-word).
+- Parallelize the GiNaC feature pass.
+- **Injectivity lemma** (collapse classes = canonical words; Ritt, nonzero
+  inter-power constants) written down — underwrites the word representation.
+  Empirically the Hermite vector is a unique fingerprint per word.
+- **Regenerate `primes_k0`** from the `primes ⟝ partitions` anti-join under the pp
+  convention, obsoleting the foreign `primeparts.db/primes_k0`. Ties into
+  re-wiring `generate.cc` (see the stats-less-tables hole).
+- **F2P tests** in `e2e_test.cc`: reading == computing (byte-identical to the Sage
+  reference); incremental idempotence once the sliced disk path exists.
