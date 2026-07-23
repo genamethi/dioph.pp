@@ -52,6 +52,7 @@ struct Options {
   int64_t bound = 5000000000LL;
   int threads = 8;
   int workers = 1;
+  int slices = 0;
   int cone_probe = 0;
   bool materialize = false;
   std::string rest_uri;
@@ -459,6 +460,112 @@ ParResult RunParallel(
   return r;
 }
 
+// A partial chain: `word` is the segments accumulated within the current slice,
+// `conn` is the boundary node it connects to below (-1 = complete, root is a k=0
+// prime derivable as W^-1(p)). Reassembly composes `word` onto each of conn's
+// chains. This is how a slice stays self-contained: a parent below the range is
+// recorded as a connection, never traced.
+struct MemoEntry {
+  int32_t word;
+  int64_t conn;
+  bool operator==(const MemoEntry& o) const {
+    return word == o.word && conn == o.conn;
+  }
+};
+struct MemoEntryHash {
+  size_t operator()(const MemoEntry& e) const {
+    size_t h = std::hash<int32_t>{}(e.word);
+    h ^= std::hash<int64_t>{}(e.conn) + 0x9e3779b97f4a7c15ULL + (h << 6) +
+         (h >> 2);
+    return h;
+  }
+};
+
+// Compose the slice-local `upper` word onto a `base` chain by replaying upper's
+// push sequence (its a0 as an n=1 fold, then each segment) onto base. This is
+// exactly the deconcatenation coproduct run in reverse: Push(base, ...) built up
+// from upper's (a0, segs).
+int32_t Compose(WordStore& s, int32_t base, int32_t upper) {
+  int64_t a0;
+  std::vector<std::pair<int32_t, int64_t>> segs;
+  s.Reconstruct(upper, &a0, &segs);
+  int32_t t = base;
+  if (a0 != 0) t = s.Push(t, 1, a0);
+  for (const auto& [n, c] : segs) t = s.Push(t, n, c);
+  return t;
+}
+
+void Expand(WordStore& s,
+            const std::unordered_map<int64_t, std::vector<MemoEntry>>& memo,
+            int32_t word, int64_t conn, std::unordered_set<int32_t>& out) {
+  if (conn < 0) {
+    out.insert(word);
+    return;
+  }
+  auto it = memo.find(conn);
+  if (it == memo.end()) return;
+  for (const auto& e : it->second)
+    Expand(s, memo, Compose(s, e.word, word), e.conn, out);
+}
+
+// In-memory validation of the sliced connection algebra: process nodes in
+// p-order, but treat a parent in a strictly earlier slice as a connection (defer
+// it) instead of pushing its memo. Then reassemble by expansion. Must reproduce
+// the single-pass counts for any K (the memo is still fully held here; the disk
+// dump/reload that actually bounds RAM is the next step).
+ParResult RunSliced(
+    const std::vector<int64_t>& nodes,
+    const std::unordered_map<int64_t, std::vector<Edge>>& parents,
+    const std::unordered_set<int64_t>& has_children, int K, int64_t bound) {
+  WordStore store;
+  std::unordered_map<int64_t, std::vector<MemoEntry>> memo;
+  auto slice_of = [&](int64_t p) {
+    int s = static_cast<int>((static_cast<__int128>(p) * K) / (bound + 1));
+    return s < 0 ? 0 : (s >= K ? K - 1 : s);
+  };
+
+  for (int64_t v : nodes) {
+    std::unordered_set<MemoEntry, MemoEntryHash> res;
+    auto it = parents.find(v);
+    if (it == parents.end()) {
+      res.insert({store.seed, -1});
+    } else {
+      const int vs = slice_of(v);
+      for (const auto& e : it->second) {
+        const int64_t c = int64_t{1} << e.m;
+        if (slice_of(e.q) < vs) {
+          res.insert({store.Push(store.seed, e.n, c), e.q});
+        } else {
+          auto pit = memo.find(e.q);
+          if (pit == memo.end()) continue;
+          for (const auto& me : pit->second)
+            res.insert({store.Push(me.word, e.n, c), me.conn});
+        }
+      }
+    }
+    memo[v].assign(res.begin(), res.end());
+  }
+
+  ParResult r;
+  std::unordered_set<int32_t> distinct;
+  for (int64_t v : nodes) {
+    if (has_children.count(v)) continue;
+    std::unordered_set<int32_t> complete;
+    for (const auto& me : memo[v]) {
+      if (me.word == store.seed && me.conn < 0) continue;
+      Expand(store, memo, me.word, me.conn, complete);
+    }
+    r.node_word_pairs += static_cast<int64_t>(complete.size());
+    for (int32_t w : complete) {
+      distinct.insert(w);
+      int64_t d = store.Degree(w);
+      if (d > r.max_degree) r.max_degree = d;
+    }
+  }
+  r.distinct_words = static_cast<int64_t>(distinct.size());
+  return r;
+}
+
 struct NodeClassWriter {
   std::shared_ptr<iceberg::Schema> schema;
   std::shared_ptr<arrow::Schema> aschema;
@@ -538,6 +645,8 @@ bool ParseArgs(int argc, char** argv, Options* out) {
       out->threads = std::atoi(need("--threads"));
     } else if (a == "--workers") {
       out->workers = std::atoi(need("--workers"));
+    } else if (a == "--slices") {
+      out->slices = std::atoi(need("--slices"));
     } else if (a == "--cone-probe") {
       out->cone_probe = std::atoi(need("--cone-probe"));
     } else if (a == "--materialize") {
@@ -679,6 +788,17 @@ int main(int argc, char** argv) {
       std::printf("[cone] batch %d sinks[%zu,%zu) cone_nodes=%zu (%.1f%%)\n", b,
                   lo, hi, cone.size(), 100.0 * cone.size() / nodes.size());
     }
+    return 0;
+  }
+
+  if (opt.slices >= 1) {
+    t0 = std::chrono::steady_clock::now();
+    ParResult sr = RunSliced(nodes, parents, has_children, opt.slices, opt.bound);
+    std::printf(
+        "[collapse] node_word_pairs=%" PRId64 " distinct_words=%" PRId64
+        " max_degree=%" PRId64 " dp=%.2fs slices=%d\n",
+        sr.node_word_pairs, sr.distinct_words, sr.max_degree, Seconds(t0),
+        opt.slices);
     return 0;
   }
 
