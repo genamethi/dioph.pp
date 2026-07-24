@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace iceberg {
@@ -22,13 +23,20 @@ struct MaterializeColumn {
   ColumnType type = ColumnType::kLong;
   std::vector<int64_t> ints;
   std::vector<std::string> strings;
-  bool stat = false;
+  bool no_stats = false;
+};
+
+struct MaterializeOptions {
+  std::vector<std::string> sort_keys;
+  std::unordered_map<std::string, std::string> properties;
+  int64_t target_file_bytes = 0;
 };
 
 bool MaterializeColumns(const std::shared_ptr<iceberg::Catalog>& catalog,
                         const iceberg::Namespace& ns, const fs::path& warehouse,
                         const std::string& name,
                         const std::vector<MaterializeColumn>& columns,
+                        const MaterializeOptions& options,
                         std::string* metadata_location, std::string* error);
 
 bool MaterializeIntColumns(

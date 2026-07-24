@@ -166,6 +166,36 @@ One site remains, behind the interface.
 - `partition_stats.cc` errors loudly on snapshots carrying delete manifests and
   on multi-spec tables (partition evolution) — filed-by 05 rework — owner: unassigned
 
+**commit path**
+
+- `CommitFilesAtomic` cannot commit an **Unpartitioned** table.
+  `BuildPartitionStatsForAppend` (`pp_commit.cc`, via `partition_stats.cc`) builds
+  a partition-values struct array with zero child arrays, which Arrow rejects
+  (`Can't infer struct array length with 0 child arrays`). Reached only by the
+  multi-table atomic path on an Unpartitioned table; single-table `CommitFiles`
+  (no partition-stats step) is unaffected and is what the pp-graph derived tables
+  use — filed-by pp_graph 05 (2026-07-23) — owner: unassigned
+
+**writer stats layers**
+
+- parquet **footer** statistics are not explicitly controlled. `ParquetWriterProperties`
+  (`writer.cc:59-73`) sets compression/pagesize/row-group/delta only and leaves
+  statistics to arrow's default, which emits min/max for int columns but not for
+  utf8 (verified: `parquet_metadata()` on `chain_words` shows stats on
+  `word_id`/`degree`, null on `skeleton`/`translations`). This is the *row-group*
+  pruning layer, distinct from the Iceberg *manifest* bounds that `stat_columns`
+  drives (those ARE written for strings via `BatchColumnBounds`). No consumer is
+  affected today because `SelectSplits` row-group pruning is int/long-only
+  (`scan_planner.cc:383-411`); it becomes reachable if string row-group pruning is
+  wanted — filed-by pp_graph 05 (2026-07-24) — owner: unassigned
+- manifest string bounds are **lexicographic**, so bounds on a JSON-encoded column
+  are semantically inert. `chain_words.skeleton` bounds come out `lower='[10]'`,
+  `upper='[]'` (because `']' > digits`), which prune on nothing meaningful (not
+  degree, not length). A range predicate on such a column cannot use its bounds.
+  This is intrinsic to storing structured values as strings — the fix is typing
+  the column (`skeleton_id int32` + dictionary; flat `A0,C1..C4` for translations),
+  not a stats change — filed-by pp_graph 05 (2026-07-24) — owner: pp-graph
+
 **read-path capability**
 
 - selecting identity-partition columns (`p_bucket_version`/`p_bucket`) errors on
@@ -242,8 +272,9 @@ One site remains, behind the interface.
 
 ## known-red tests (expected; do not "fix" without closing the hole)
 
-As of 2026-07-22: unit 44 passing / 2 red (`make test`), e2e 18 passing / 1 red
-(`make e2e`). Every red is deliberate — a test written to assert correct
+As of 2026-07-23: unit 47 passing / 2 red (`make test`; +3 `PpGraphStore` sliced
+disk-path tests), e2e 18 passing / 1 red (`make e2e`). Every red is deliberate — a
+test written to assert correct
 behavior that is not yet implemented, so it goes green when its hole closes.
 
 | test | hole |

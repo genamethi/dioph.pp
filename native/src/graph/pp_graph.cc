@@ -30,11 +30,14 @@
 #include "iceberg/schema.h"
 #include "iceberg/schema_field.h"
 #include "iceberg/type.h"
+#include "primeparts/catalog/pp_commit.h"
 #include "primeparts/catalog/pp_iceberg_rest.h"
 #include "primeparts/catalog/rest_scan_plan.h"
 #include "primeparts/client/session.h"
+#include "primeparts/graph/pp_graph_store.h"
 #include "primeparts/query/materialize.h"
 #include "primeparts/scan/scan_plan.h"
+#include "primeparts/schemas.h"
 #include "primeparts/writer.h"
 
 namespace client = primeparts::client;
@@ -43,6 +46,8 @@ namespace ppq = primeparts::query;
 namespace scan = primeparts::scan;
 
 namespace {
+
+using namespace primeparts::graph;
 
 constexpr const char* kDefaultWarehouse =
     "/media/extssd/research/dioph.pp/data/ib-staging";
@@ -54,114 +59,14 @@ struct Options {
   int workers = 1;
   int slices = 0;
   int cone_probe = 0;
+  int64_t slice_width = 1000000;
   bool materialize = false;
+  bool sweep_only = false;
+  bool stream = false;
   std::string rest_uri;
   std::string warehouse = kDefaultWarehouse;
   std::string ns_name;
-};
-
-struct Edge {
-  int64_t p = 0;
-  int64_t q = 0;
-  int32_t m = 0;
-  int32_t n = 0;
-};
-
-struct SegKey {
-  int32_t parent;
-  int32_t n;
-  int64_t c;
-  bool operator==(const SegKey& o) const {
-    return parent == o.parent && n == o.n && c == o.c;
-  }
-};
-struct SegKeyHash {
-  size_t operator()(const SegKey& k) const {
-    size_t h = std::hash<int32_t>{}(k.parent);
-    h ^= std::hash<int32_t>{}(k.n) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
-    h ^= std::hash<int64_t>{}(k.c) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
-    return h;
-  }
-};
-struct WordKey {
-  int64_t a0;
-  int32_t tail;
-  bool operator==(const WordKey& o) const {
-    return a0 == o.a0 && tail == o.tail;
-  }
-};
-struct WordKeyHash {
-  size_t operator()(const WordKey& k) const {
-    size_t h = std::hash<int64_t>{}(k.a0);
-    h ^= std::hash<int32_t>{}(k.tail) + 0x9e3779b97f4a7c15ULL + (h << 6) +
-         (h >> 2);
-    return h;
-  }
-};
-
-// Trie-DAG of composition words. A word is (a0, tail), tail indexing a chain of
-// segments (n_i, C_i) via parent links (-1 = empty). Segments and words are
-// interned, so every shared prefix is shared. Push composes: n=1 folds a
-// translation into the tail (or a0), n>=2 appends a segment. The trie is the
-// coproduct; degree is the product of the tail's exponents.
-struct WordStore {
-  std::vector<int32_t> seg_parent;
-  std::vector<int32_t> seg_n;
-  std::vector<int64_t> seg_c;
-  std::vector<int64_t> seg_deg;
-  std::unordered_map<SegKey, int32_t, SegKeyHash> seg_ix;
-
-  std::vector<int64_t> word_a0;
-  std::vector<int32_t> word_tail;
-  std::unordered_map<WordKey, int32_t, WordKeyHash> word_ix;
-  int32_t seed = 0;
-
-  WordStore() { seed = InternWord(0, -1); }
-
-  int32_t InternSeg(int32_t parent, int32_t n, int64_t c) {
-    SegKey k{parent, n, c};
-    auto it = seg_ix.find(k);
-    if (it != seg_ix.end()) return it->second;
-    int32_t id = static_cast<int32_t>(seg_parent.size());
-    seg_parent.push_back(parent);
-    seg_n.push_back(n);
-    seg_c.push_back(c);
-    seg_deg.push_back((parent < 0 ? 1 : seg_deg[parent]) * n);
-    seg_ix.emplace(k, id);
-    return id;
-  }
-  int32_t InternWord(int64_t a0, int32_t tail) {
-    WordKey k{a0, tail};
-    auto it = word_ix.find(k);
-    if (it != word_ix.end()) return it->second;
-    int32_t id = static_cast<int32_t>(word_a0.size());
-    word_a0.push_back(a0);
-    word_tail.push_back(tail);
-    word_ix.emplace(k, id);
-    return id;
-  }
-  int32_t Push(int32_t w, int32_t n, int64_t c) {
-    int64_t a0 = word_a0[w];
-    int32_t tail = word_tail[w];
-    if (n == 1) {
-      if (tail < 0) return InternWord(a0 + c, -1);
-      return InternWord(a0,
-                        InternSeg(seg_parent[tail], seg_n[tail], seg_c[tail] + c));
-    }
-    return InternWord(a0, InternSeg(tail, n, c));
-  }
-  int64_t Degree(int32_t w) const {
-    int32_t tail = word_tail[w];
-    return tail < 0 ? 1 : seg_deg[tail];
-  }
-  void Reconstruct(int32_t w, int64_t* a0,
-                   std::vector<std::pair<int32_t, int64_t>>* segs) const {
-    *a0 = word_a0[w];
-    segs->clear();
-    for (int32_t s = word_tail[w]; s >= 0; s = seg_parent[s])
-      segs->emplace_back(seg_n[s], seg_c[s]);
-    std::reverse(segs->begin(), segs->end());
-  }
+  std::string spill_dir;
 };
 
 double Seconds(std::chrono::steady_clock::time_point t0) {
@@ -189,197 +94,6 @@ std::string QuoteList(const std::vector<std::string>& paths) {
   out += "]";
   return out;
 }
-
-GiNaC::ex He(int n, const GiNaC::symbol& x) {
-  GiNaC::ex a = 1;
-  GiNaC::ex b = x;
-  if (n == 0) return a;
-  for (int k = 1; k < n; ++k) {
-    GiNaC::ex c = GiNaC::expand(x * b - k * a);
-    a = b;
-    b = c;
-  }
-  return b;
-}
-
-std::map<int, GiNaC::ex> ToHermite(GiNaC::ex P, const GiNaC::symbol& x) {
-  std::map<int, GiNaC::ex> out;
-  P = GiNaC::expand(P);
-  while (!P.is_zero()) {
-    int d = P.degree(x);
-    GiNaC::ex c = P.lcoeff(x);
-    out[d] = c;
-    P = GiNaC::expand(P - c * He(d, x));
-    if (d == 0) break;
-  }
-  return out;
-}
-
-std::string JsonInts(const std::vector<int64_t>& v) {
-  std::string s = "[";
-  for (size_t i = 0; i < v.size(); ++i) {
-    if (i) s += ", ";
-    s += std::to_string(v[i]);
-  }
-  s += "]";
-  return s;
-}
-
-struct Features {
-  int64_t degree = 1;
-  std::string skeleton;
-  std::string translations;
-  std::string hermite;
-  std::string symbolic;
-};
-
-Features WordFeatures(int64_t a0,
-                      const std::vector<std::pair<int32_t, int64_t>>& segs,
-                      const GiNaC::symbol& x) {
-  GiNaC::ex p = x + GiNaC::numeric(static_cast<long>(a0));
-  std::vector<int64_t> sk;
-  std::vector<int64_t> tr{a0};
-  int64_t degree = 1;
-  for (const auto& [n, c] : segs) {
-    p = GiNaC::pow(p, n) + GiNaC::numeric(static_cast<long>(c));
-    sk.push_back(n);
-    tr.push_back(c);
-    degree *= n;
-  }
-  auto hd = ToHermite(p, x);
-  Features f;
-  f.degree = degree;
-  f.skeleton = JsonInts(sk);
-  f.translations = JsonInts(tr);
-  std::string h = "{";
-  bool first = true;
-  for (const auto& [k, coef] : hd) {
-    if (!first) h += ",";
-    first = false;
-    std::ostringstream cs;
-    cs << coef;
-    h += "\"" + std::to_string(k) + "\":" + cs.str();
-  }
-  h += "}";
-  f.hermite = h;
-  std::ostringstream ss;
-  ss << GiNaC::expand(p);
-  f.symbolic = ss.str();
-  return f;
-}
-
-// Concurrent trie store: sharded by key so interning does not serialize. A gid
-// encodes (shard << 23 | local); each shard owns its vectors + map + mutex. The
-// word carries its own degree so Degree/Push never chase a cross-shard seg for
-// it; only the n=1 fold reads the tail seg's fields.
-struct ConcStore {
-  static constexpr int SH = 256;
-  struct SegShard {
-    std::mutex mu;
-    std::unordered_map<SegKey, int32_t, SegKeyHash> ix;
-    std::vector<int32_t> parent, n;
-    std::vector<int64_t> c, deg;
-  };
-  struct WordShard {
-    std::mutex mu;
-    std::unordered_map<WordKey, int32_t, WordKeyHash> ix;
-    std::vector<int64_t> a0, deg;
-    std::vector<int32_t> tail;
-  };
-  SegShard sseg[SH];
-  WordShard sword[SH];
-  int32_t seed;
-
-  ConcStore() { seed = InternWord(0, -1, 1); }
-
-  int32_t InternSeg(int32_t parent, int32_t n, int64_t c, int64_t deg) {
-    SegKey k{parent, n, c};
-    int s = SegKeyHash{}(k) & (SH - 1);
-    auto& sh = sseg[s];
-    std::lock_guard<std::mutex> g(sh.mu);
-    auto it = sh.ix.find(k);
-    if (it != sh.ix.end()) return it->second;
-    int32_t local = static_cast<int32_t>(sh.parent.size());
-    sh.parent.push_back(parent);
-    sh.n.push_back(n);
-    sh.c.push_back(c);
-    sh.deg.push_back(deg);
-    int32_t gid = (s << 23) | local;
-    sh.ix.emplace(k, gid);
-    return gid;
-  }
-  void ReadSeg(int32_t gid, int32_t* parent, int32_t* n, int64_t* c) {
-    auto& sh = sseg[gid >> 23];
-    int32_t local = gid & 0x7FFFFF;
-    std::lock_guard<std::mutex> g(sh.mu);
-    *parent = sh.parent[local];
-    *n = sh.n[local];
-    *c = sh.c[local];
-  }
-  int32_t InternWord(int64_t a0, int32_t tail, int64_t deg) {
-    WordKey k{a0, tail};
-    int s = WordKeyHash{}(k) & (SH - 1);
-    auto& sh = sword[s];
-    std::lock_guard<std::mutex> g(sh.mu);
-    auto it = sh.ix.find(k);
-    if (it != sh.ix.end()) return it->second;
-    int32_t local = static_cast<int32_t>(sh.a0.size());
-    sh.a0.push_back(a0);
-    sh.tail.push_back(tail);
-    sh.deg.push_back(deg);
-    int32_t gid = (s << 23) | local;
-    sh.ix.emplace(k, gid);
-    return gid;
-  }
-  void ReadWord(int32_t gid, int64_t* a0, int32_t* tail, int64_t* deg) {
-    auto& sh = sword[gid >> 23];
-    int32_t local = gid & 0x7FFFFF;
-    std::lock_guard<std::mutex> g(sh.mu);
-    *a0 = sh.a0[local];
-    *tail = sh.tail[local];
-    *deg = sh.deg[local];
-  }
-  int32_t Push(int32_t w, int32_t n, int64_t c) {
-    int64_t a0, deg;
-    int32_t tail;
-    ReadWord(w, &a0, &tail, &deg);
-    if (n == 1) {
-      if (tail < 0) return InternWord(a0 + c, -1, deg);
-      int32_t tp, tn;
-      int64_t tc;
-      ReadSeg(tail, &tp, &tn, &tc);
-      return InternWord(a0, InternSeg(tp, tn, tc + c, deg), deg);
-    }
-    return InternWord(a0, InternSeg(tail, n, c, deg * n), deg * n);
-  }
-  int64_t Degree(int32_t w) {
-    int64_t a0, deg;
-    int32_t tail;
-    ReadWord(w, &a0, &tail, &deg);
-    return deg;
-  }
-  void Reconstruct(int32_t w, int64_t* a0,
-                   std::vector<std::pair<int32_t, int64_t>>* segs) {
-    int64_t deg;
-    int32_t tail;
-    ReadWord(w, a0, &tail, &deg);
-    segs->clear();
-    for (int32_t s = tail; s >= 0;) {
-      int32_t p, n;
-      int64_t c;
-      ReadSeg(s, &p, &n, &c);
-      segs->emplace_back(n, c);
-      s = p;
-    }
-    std::reverse(segs->begin(), segs->end());
-  }
-};
-
-struct ParResult {
-  int64_t node_word_pairs = 0;
-  int64_t distinct_words = 0;
-  int64_t max_degree = 0;
-};
 
 // Parallel topological sweep (Kahn). A node is ready once every distinct parent
 // is computed; workers pull ready nodes, merge parents' word-id sets through the
@@ -473,56 +187,6 @@ ParResult RunParallel(
   r.distinct_words = static_cast<int64_t>(sink_out.size());
   r.max_degree = maxdeg;
   return r;
-}
-
-// A partial chain: `word` is the segments accumulated within the current slice,
-// `conn` is the boundary node it connects to below (-1 = complete, root is a k=0
-// prime derivable as W^-1(p)). Reassembly composes `word` onto each of conn's
-// chains. This is how a slice stays self-contained: a parent below the range is
-// recorded as a connection, never traced.
-struct MemoEntry {
-  int32_t word;
-  int64_t conn;
-  bool operator==(const MemoEntry& o) const {
-    return word == o.word && conn == o.conn;
-  }
-};
-struct MemoEntryHash {
-  size_t operator()(const MemoEntry& e) const {
-    size_t h = std::hash<int32_t>{}(e.word);
-    h ^= std::hash<int64_t>{}(e.conn) + 0x9e3779b97f4a7c15ULL + (h << 6) +
-         (h >> 2);
-    return h;
-  }
-};
-
-// Compose the slice-local `upper` word onto a `base` chain by replaying upper's
-// push sequence (its a0 as an n=1 fold, then each segment) onto base. This is
-// exactly the deconcatenation coproduct run in reverse: Push(base, ...) built up
-// from upper's (a0, segs).
-template <class Store>
-int32_t Compose(Store& s, int32_t base, int32_t upper) {
-  int64_t a0;
-  std::vector<std::pair<int32_t, int64_t>> segs;
-  s.Reconstruct(upper, &a0, &segs);
-  int32_t t = base;
-  if (a0 != 0) t = s.Push(t, 1, a0);
-  for (const auto& [n, c] : segs) t = s.Push(t, n, c);
-  return t;
-}
-
-template <class Store>
-void Expand(Store& s,
-            const std::unordered_map<int64_t, std::vector<MemoEntry>>& memo,
-            int32_t word, int64_t conn, std::unordered_set<int32_t>& out) {
-  if (conn < 0) {
-    out.insert(word);
-    return;
-  }
-  auto it = memo.find(conn);
-  if (it == memo.end()) return;
-  for (const auto& e : it->second)
-    Expand(s, memo, Compose(s, e.word, word), e.conn, out);
 }
 
 // In-memory validation of the sliced connection algebra: process nodes in
@@ -773,10 +437,19 @@ bool ParseArgs(int argc, char** argv, Options* out) {
       out->workers = std::atoi(need("--workers"));
     } else if (a == "--slices") {
       out->slices = std::atoi(need("--slices"));
+    } else if (a == "--slice-width") {
+      out->slice_width =
+          static_cast<int64_t>(std::strtod(need("--slice-width"), nullptr));
+    } else if (a == "--spill-dir") {
+      out->spill_dir = need("--spill-dir");
     } else if (a == "--cone-probe") {
       out->cone_probe = std::atoi(need("--cone-probe"));
     } else if (a == "--materialize") {
       out->materialize = true;
+    } else if (a == "--sweep-only") {
+      out->sweep_only = true;
+    } else if (a == "--stream") {
+      out->stream = true;
     } else {
       std::fprintf(stderr,
                    "usage: pp-graph [--bound N] [--threads N] [--materialize] "
@@ -789,6 +462,131 @@ bool ParseArgs(int argc, char** argv, Options* out) {
     out->rest_uri = env ? env : kDefaultRestUri;
   }
   return true;
+}
+
+int PublishFromSpill(const Options& opt, const iceberg::Namespace& ns,
+                     int64_t num_slices,
+                     const std::unordered_set<int64_t>& has_children,
+                     const std::unordered_map<int64_t, int64_t>& last_ref_slice,
+                     double t_sweep) {
+  std::string error;
+  auto t0 = std::chrono::steady_clock::now();
+
+  if (opt.materialize) {
+    SkeletonDict dict;
+    CoproductColumns cc;
+    for (int64_t s = 0; s < num_slices; ++s) {
+      if (!BuildCoproductSlice(opt.spill_dir, s, &dict, &cc, &error)) {
+        std::fprintf(stderr, "coproduct: %s\n", error.c_str());
+        return 1;
+      }
+    }
+    double t_build = Seconds(t0);
+    auto t_pub = std::chrono::steady_clock::now();
+
+    ppc::RestOptions ropts;
+    ropts.rest_uri = opt.rest_uri;
+    std::string mode;
+    auto catalog = ppc::MakeCatalog(ropts, opt.warehouse, &mode, &error);
+    if (!catalog) {
+      std::fprintf(stderr, "MakeCatalog: %s\n", error.c_str());
+      return 1;
+    }
+
+    auto to_i64 = [](const std::vector<int32_t>& v) {
+      return std::vector<int64_t>(v.begin(), v.end());
+    };
+    std::string meta;
+    const int64_t gib = int64_t{1} << 30;
+
+    std::vector<ppq::MaterializeColumn> wcols{
+        {"word_id", ppq::ColumnType::kLong, cc.word_id, {}, false},
+        {"a0", ppq::ColumnType::kLong, cc.a0, {}, false},
+        {"skeleton_id", ppq::ColumnType::kInt, to_i64(cc.skeleton_id), {}, false},
+        {"c1", ppq::ColumnType::kLong, cc.c[0], {}, false},
+        {"c2", ppq::ColumnType::kLong, cc.c[1], {}, false},
+        {"c3", ppq::ColumnType::kLong, cc.c[2], {}, false},
+        {"c4", ppq::ColumnType::kLong, cc.c[3], {}, false},
+        {"slice", ppq::ColumnType::kLong, cc.word_slice, {}, false}};
+    ppq::MaterializeOptions wopts;
+    wopts.sort_keys = {"word_id"};
+    wopts.target_file_bytes = gib;
+    if (!ppq::MaterializeColumns(catalog, ns, opt.warehouse, "words", wcols,
+                                 wopts, &meta, &error)) {
+      std::fprintf(stderr, "materialize words: %s\n", error.c_str());
+      return 1;
+    }
+
+    const size_t nw = cc.nw_node.size();
+    std::vector<size_t> ord(nw);
+    for (size_t i = 0; i < nw; ++i) ord[i] = i;
+    std::sort(ord.begin(), ord.end(), [&](size_t a, size_t b) {
+      if (cc.nw_node[a] != cc.nw_node[b]) return cc.nw_node[a] < cc.nw_node[b];
+      return cc.nw_word[a] < cc.nw_word[b];
+    });
+    std::vector<int64_t> nwn(nw), nww(nw), nwc(nw);
+    for (size_t i = 0; i < nw; ++i) {
+      nwn[i] = cc.nw_node[ord[i]];
+      nww[i] = cc.nw_word[ord[i]];
+      nwc[i] = cc.nw_conn[ord[i]];
+    }
+    std::vector<ppq::MaterializeColumn> ncols{
+        {"node_id", ppq::ColumnType::kLong, nwn, {}, false},
+        {"word_id", ppq::ColumnType::kLong, nww, {}, false},
+        {"conn", ppq::ColumnType::kLong, nwc, {}, false}};
+    ppq::MaterializeOptions nopts;
+    nopts.sort_keys = {"node_id"};
+    nopts.target_file_bytes = gib;
+    if (!ppq::MaterializeColumns(catalog, ns, opt.warehouse, "node_words", ncols,
+                                 nopts, &meta, &error)) {
+      std::fprintf(stderr, "materialize node_words: %s\n", error.c_str());
+      return 1;
+    }
+
+    std::vector<int64_t> sk_id, sk_n[kMaxSegments], sk_len;
+    for (size_t i = 0; i < dict.tuples.size(); ++i) {
+      sk_id.push_back(static_cast<int64_t>(i));
+      const auto& t = dict.tuples[i];
+      sk_len.push_back(static_cast<int64_t>(t.size()));
+      for (int j = 0; j < kMaxSegments; ++j)
+        sk_n[j].push_back(j < static_cast<int>(t.size()) ? t[j] : 0);
+    }
+    std::vector<ppq::MaterializeColumn> scols{
+        {"skeleton_id", ppq::ColumnType::kInt, sk_id, {}, false},
+        {"n1", ppq::ColumnType::kInt, sk_n[0], {}, false},
+        {"n2", ppq::ColumnType::kInt, sk_n[1], {}, false},
+        {"n3", ppq::ColumnType::kInt, sk_n[2], {}, false},
+        {"n4", ppq::ColumnType::kInt, sk_n[3], {}, false},
+        {"len", ppq::ColumnType::kInt, sk_len, {}, false}};
+    ppq::MaterializeOptions sopts;
+    sopts.sort_keys = {"skeleton_id"};
+    if (!ppq::MaterializeColumns(catalog, ns, opt.warehouse, "skeletons", scols,
+                                 sopts, &meta, &error)) {
+      std::fprintf(stderr, "materialize skeletons: %s\n", error.c_str());
+      return 1;
+    }
+
+    std::printf(
+        "[coproduct] words=%zu node_words=%zu skeletons=%zu sweep=%.2fs "
+        "build=%.2fs slices=%" PRId64 " width=%" PRId64 " pub=%.2fs\n",
+        cc.word_id.size(), nw, dict.tuples.size(), t_sweep, t_build, num_slices,
+        opt.slice_width, Seconds(t_pub));
+    return 0;
+  }
+
+  ParResult r = ReassembleFromDisk(opt.spill_dir, num_slices, has_children,
+                                   last_ref_slice, &error);
+  if (!error.empty()) {
+    std::fprintf(stderr, "reassemble: %s\n", error.c_str());
+    return 1;
+  }
+  std::printf(
+      "[collapse] node_word_pairs=%" PRId64 " distinct_words=%" PRId64
+      " max_degree=%" PRId64 " sweep=%.2fs reassemble=%.2fs slices=%" PRId64
+      " width=%" PRId64 " disk\n",
+      r.node_word_pairs, r.distinct_words, r.max_degree, t_sweep, Seconds(t0),
+      num_slices, opt.slice_width);
+  return 0;
 }
 
 }  // namespace
@@ -836,6 +634,110 @@ int main(int argc, char** argv) {
   if (paths.empty()) {
     std::printf("[wiring] no data files planned at B=%" PRId64 "\n", opt.bound);
     return 0;
+  }
+
+  if (opt.stream) {
+    if (opt.spill_dir.empty()) {
+      std::fprintf(stderr, "--stream requires --spill-dir\n");
+      return 1;
+    }
+    client::TableHandle primes;
+    if (!session->LoadTable("primes", &primes, &error)) {
+      std::fprintf(stderr, "LoadTable primes: %s\n", error.c_str());
+      return 1;
+    }
+    scan::ScanPlanRequest preq;
+    preq.select = {"p", "k"};
+    preq.filter = iceberg::Expressions::LessThanOrEqual(
+        "p", iceberg::Literal::Long(opt.bound));
+    std::vector<std::shared_ptr<iceberg::FileScanTask>> ptasks;
+    if (!ppc::PlanScanOnServer(opt.rest_uri, ns, "primes", preq,
+                               *primes.metadata(), ppc::PlanPollOptions{},
+                               &ptasks, &error)) {
+      std::fprintf(stderr, "PlanScanOnServer primes: %s\n", error.c_str());
+      return 1;
+    }
+    std::vector<std::string> prime_paths;
+    for (const auto& task : ptasks)
+      prime_paths.push_back(task->data_file()->file_path);
+
+    duckdb::DBConfig sconfig;
+    sconfig.SetOptionByName("threads", duckdb::Value::BIGINT(opt.threads));
+    sconfig.SetOptionByName("temp_directory",
+                            duckdb::Value(opt.spill_dir + "/duckdb_tmp"));
+    duckdb::DuckDB sdb(nullptr, &sconfig);
+    duckdb::Connection scon(sdb);
+
+    const std::string b = std::to_string(opt.bound);
+    const std::string ssql =
+        "SELECT p, m_k, n_k, q_k, false AS is_root FROM read_parquet(" +
+        QuoteList(paths) + ") WHERE p <= " + b +
+        " UNION ALL SELECT p, 0, 0, 0, true AS is_root FROM read_parquet(" +
+        QuoteList(prime_paths) + ") WHERE k = 0 AND p <= " + b +
+        " ORDER BY p";
+
+    t0 = std::chrono::steady_clock::now();
+    SliceSweeper sweeper(opt.spill_dir, opt.slice_width);
+    auto sres = scon.SendQuery(ssql);
+    if (sres->HasError()) {
+      std::fprintf(stderr, "duckdb stream: %s\n", sres->GetError().c_str());
+      return 1;
+    }
+    int64_t cur_p = -1;
+    bool cur_root = false;
+    std::vector<Edge> cur_edges;
+    int64_t edge_count = 0;
+    auto emit = [&](std::string* err) -> bool {
+      if (cur_p < 0) return true;
+      return sweeper.AddNode(cur_p, cur_root, cur_edges, err);
+    };
+    while (auto chunk = sres->Fetch()) {
+      const duckdb::idx_t n = chunk->size();
+      if (n == 0) break;
+      auto* pv = duckdb::FlatVector::GetData<int64_t>(chunk->data[0]);
+      auto* mv = duckdb::FlatVector::GetData<int32_t>(chunk->data[1]);
+      auto* nv = duckdb::FlatVector::GetData<int32_t>(chunk->data[2]);
+      auto* qv = duckdb::FlatVector::GetData<int64_t>(chunk->data[3]);
+      auto* rv = duckdb::FlatVector::GetData<bool>(chunk->data[4]);
+      for (duckdb::idx_t i = 0; i < n; ++i) {
+        if (pv[i] != cur_p) {
+          if (!emit(&error)) {
+            std::fprintf(stderr, "sweep: %s\n", error.c_str());
+            return 1;
+          }
+          cur_p = pv[i];
+          cur_root = false;
+          cur_edges.clear();
+        }
+        if (rv[i]) {
+          cur_root = true;
+        } else {
+          cur_edges.push_back({pv[i], qv[i], mv[i], nv[i]});
+          ++edge_count;
+        }
+      }
+    }
+    if (!emit(&error) || !sweeper.Finish(&error)) {
+      std::fprintf(stderr, "sweep: %s\n", error.c_str());
+      return 1;
+    }
+    const SweepResult& sw = sweeper.result();
+    double t_sweep = Seconds(t0);
+    std::printf("[wiring] part_files=%zu prime_files=%zu plan=%.2fs edges=%" PRId64
+                " nodes=%" PRId64 " stream\n",
+                paths.size(), prime_paths.size(), t_plan, edge_count, sw.nodes);
+
+    if (opt.sweep_only) {
+      std::printf(
+          "[sweep] slices=%" PRId64 " width=%" PRId64 " memo_entries=%" PRId64
+          " words=%" PRId64 " segs=%" PRId64 " connections=%" PRId64
+          " spill_bytes=%" PRId64 " sweep=%.2fs\n",
+          sw.num_slices, opt.slice_width, sw.memo_entries, sw.words, sw.segs,
+          sw.connections, sw.spill_bytes, t_sweep);
+      return 0;
+    }
+    return PublishFromSpill(opt, ns, sw.num_slices, sw.has_children,
+                            sw.last_ref_slice, t_sweep);
   }
 
   duckdb::DBConfig config;
@@ -915,6 +817,32 @@ int main(int argc, char** argv) {
                   lo, hi, cone.size(), 100.0 * cone.size() / nodes.size());
     }
     return 0;
+  }
+
+  if (!opt.spill_dir.empty()) {
+    t0 = std::chrono::steady_clock::now();
+    SweepResult sw;
+    if (!SweepAndSpill(nodes, parents, opt.slice_width, opt.spill_dir, &sw,
+                       &error)) {
+      std::fprintf(stderr, "sweep: %s\n", error.c_str());
+      return 1;
+    }
+    const int64_t num_slices = sw.num_slices;
+    double t_sweep = Seconds(t0);
+    t0 = std::chrono::steady_clock::now();
+
+    if (opt.sweep_only) {
+      std::printf(
+          "[sweep] slices=%" PRId64 " width=%" PRId64 " memo_entries=%" PRId64
+          " words=%" PRId64 " segs=%" PRId64 " connections=%" PRId64
+          " spill_bytes=%" PRId64 " sweep=%.2fs\n",
+          num_slices, opt.slice_width, sw.memo_entries, sw.words, sw.segs,
+          sw.connections, sw.spill_bytes, t_sweep);
+      return 0;
+    }
+
+    return PublishFromSpill(opt, ns, num_slices, has_children, sw.last_ref_slice,
+                            t_sweep);
   }
 
   if (opt.slices >= 1) {
@@ -1049,12 +977,12 @@ int main(int argc, char** argv) {
   for (const auto& [w, id] : sink_out) out_word[id] = w;
 
   GiNaC::symbol x("x");
-  ppq::MaterializeColumn cw_id{"word_id", ppq::ColumnType::kLong, {}, {}, true};
-  ppq::MaterializeColumn cw_deg{"degree", ppq::ColumnType::kLong, {}, {}, true};
+  ppq::MaterializeColumn cw_id{"word_id", ppq::ColumnType::kLong, {}, {}, false};
+  ppq::MaterializeColumn cw_deg{"degree", ppq::ColumnType::kLong, {}, {}, false};
   ppq::MaterializeColumn cw_sk{"skeleton", ppq::ColumnType::kString, {}, {}, false};
   ppq::MaterializeColumn cw_tr{"translations", ppq::ColumnType::kString, {}, {}, false};
-  ppq::MaterializeColumn cw_he{"hermite", ppq::ColumnType::kString, {}, {}, false};
-  ppq::MaterializeColumn cw_sym{"symbolic", ppq::ColumnType::kString, {}, {}, false};
+  ppq::MaterializeColumn cw_he{"hermite", ppq::ColumnType::kString, {}, {}, true};
+  ppq::MaterializeColumn cw_sym{"symbolic", ppq::ColumnType::kString, {}, {}, true};
   int64_t a0;
   std::vector<std::pair<int32_t, int64_t>> segs;
   for (size_t i = 0; i < out_word.size(); ++i) {
@@ -1070,8 +998,11 @@ int main(int argc, char** argv) {
   std::string meta;
   std::vector<ppq::MaterializeColumn> cw{cw_id, cw_deg, cw_sk,
                                          cw_tr, cw_he, cw_sym};
+  ppq::MaterializeOptions cw_opts;
+  cw_opts.sort_keys = {"word_id"};
+  cw_opts.target_file_bytes = int64_t{1} << 30;
   if (!ppq::MaterializeColumns(catalog, ns, opt.warehouse, "chain_words", cw,
-                               &meta, &error)) {
+                               cw_opts, &meta, &error)) {
     std::fprintf(stderr, "materialize chain_words: %s\n", error.c_str());
     return 1;
   }

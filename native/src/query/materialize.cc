@@ -2,8 +2,10 @@
 
 #include <arrow/api.h>
 
+#include <algorithm>
 #include <stdexcept>
 #include <system_error>
+#include <unordered_map>
 
 #include "iceberg/catalog.h"
 #include "iceberg/expression/literal.h"
@@ -16,11 +18,23 @@
 #include "iceberg/type.h"
 
 #include "primeparts/catalog/pp_iceberg_rest.h"
+#include "primeparts/schemas.h"
 #include "primeparts/writer.h"
 
 namespace primeparts::query {
 
 namespace {
+
+int64_t EstimateBytesPerRow(
+    const std::vector<std::shared_ptr<arrow::Array>>& arrays, int64_t nrows) {
+  if (nrows <= 0) return 1;
+  int64_t total = 0;
+  for (const auto& a : arrays)
+    for (const auto& buf : a->data()->buffers)
+      if (buf) total += buf->size();
+  int64_t per = total / nrows;
+  return per < 1 ? 1 : per;
+}
 
 std::shared_ptr<iceberg::Type> IcebergType(ColumnType t) {
   switch (t) {
@@ -80,6 +94,7 @@ bool MaterializeColumns(const std::shared_ptr<iceberg::Catalog>& catalog,
                         const iceberg::Namespace& ns, const fs::path& warehouse,
                         const std::string& name,
                         const std::vector<MaterializeColumn>& columns,
+                        const MaterializeOptions& options,
                         std::string* metadata_location, std::string* error) {
   auto fail = [&](const std::string& m) { if (error) *error = m; return false; };
   if (columns.empty()) return fail("materialize: no columns");
@@ -87,11 +102,15 @@ bool MaterializeColumns(const std::shared_ptr<iceberg::Catalog>& catalog,
   for (const auto& c : columns)
     if (ColumnRows(c) != nrows) return fail("materialize: ragged columns");
 
+  std::unordered_map<std::string, bool> is_sort_key;
+  for (const auto& k : options.sort_keys) is_sort_key[k] = true;
+
   std::vector<iceberg::SchemaField> fields;
   fields.reserve(columns.size());
   std::vector<std::shared_ptr<arrow::Field>> afields;
   std::vector<std::shared_ptr<arrow::Array>> aarrays;
   std::vector<primeparts::WriterConfig::StatColumn> stat_columns;
+  std::unordered_map<std::string, bool> present;
   for (size_t i = 0; i < columns.size(); ++i) {
     const auto& c = columns[i];
     fields.push_back(iceberg::SchemaField::MakeRequired(
@@ -100,14 +119,33 @@ bool MaterializeColumns(const std::shared_ptr<iceberg::Catalog>& catalog,
     std::shared_ptr<arrow::Array> arr;
     if (!BuildArray(c, &arr, error)) return false;
     aarrays.push_back(std::move(arr));
-    if (c.stat) stat_columns.push_back({c.name, false});
+    present[c.name] = true;
+    if (!c.no_stats) stat_columns.push_back({c.name, is_sort_key.count(c.name) > 0});
   }
+  for (const auto& k : options.sort_keys)
+    if (!present.count(k)) return fail("materialize: sort key absent: " + k);
+
   auto schema = std::make_shared<iceberg::Schema>(std::move(fields), 0);
   auto spec = iceberg::PartitionSpec::Unpartitioned();
   auto batch = arrow::RecordBatch::Make(arrow::schema(afields), nrows, aarrays);
 
+  primeparts::catalog::TableDeclaration declare;
+  declare.properties = options.properties;
+  if (!options.sort_keys.empty()) {
+    declare.sort_order =
+        primeparts::AscendingSortOrder(*schema, options.sort_keys, error);
+    if (!declare.sort_order) return false;
+  }
+
   if (!primeparts::catalog::DropTable(catalog, ns, warehouse, name, true, error))
     return false;
+
+  int64_t rows_per_file = 0;
+  if (options.target_file_bytes > 0) {
+    const int64_t bpr = EstimateBytesPerRow(aarrays, nrows);
+    rows_per_file = options.target_file_bytes / bpr;
+    if (rows_per_file < 1) rows_per_file = 1;
+  }
 
   primeparts::WriterConfig cfg;
   cfg.output_dir = primeparts::catalog::StagingDataDir(warehouse, ns, name);
@@ -119,11 +157,19 @@ bool MaterializeColumns(const std::shared_ptr<iceberg::Catalog>& catalog,
       std::make_shared<iceberg::PartitionValues>(std::vector<iceberg::Literal>{});
   cfg.stat_columns = std::move(stat_columns);
   cfg.simple_filename = true;
-  cfg.target_rows_per_file = 0;
+  cfg.target_rows_per_file = rows_per_file;
 
   auto writer = primeparts::BucketParquetWriter::Make(cfg, error);
   if (!writer) return false;
-  if (!writer->Write(*batch, error)) return false;
+  if (rows_per_file > 0) {
+    for (int64_t off = 0; off < nrows; off += rows_per_file) {
+      const int64_t len = std::min(rows_per_file, nrows - off);
+      auto slice = batch->Slice(off, len);
+      if (!writer->Write(*slice, error)) return false;
+    }
+  } else if (!writer->Write(*batch, error)) {
+    return false;
+  }
   std::vector<primeparts::WrittenFile> written;
   if (!writer->Close(&written, error)) return false;
 
@@ -132,9 +178,8 @@ bool MaterializeColumns(const std::shared_ptr<iceberg::Catalog>& catalog,
     if (wf.data_file) files.push_back(wf.data_file);
 
   return primeparts::catalog::CommitFiles(catalog, ns, warehouse, name, schema,
-                                          spec,
-                                          primeparts::catalog::TableDeclaration{},
-                                          files, metadata_location, error);
+                                          spec, declare, files,
+                                          metadata_location, error);
 }
 
 bool MaterializeIntColumns(
@@ -152,7 +197,7 @@ bool MaterializeIntColumns(
   for (size_t i = 0; i < col_names.size(); ++i)
     cols.push_back({col_names[i], ColumnType::kLong, columns[i], {}, false});
   return MaterializeColumns(catalog, ns, warehouse, name, cols,
-                            metadata_location, error);
+                            MaterializeOptions{}, metadata_location, error);
 }
 
 }  // namespace primeparts::query
