@@ -1,0 +1,15 @@
+{
+  "bound": 1000000,
+  "primes": 78497,
+  "edges": 147026,
+  "sinks": 12098,
+  "maximal_classes": 9939483,
+  "distinct_words": 1175715,
+  "maximal_chains": 8415228924365,
+  "max_degree": 12,
+  "t_graph": 0.52,
+  "t_dp": 110.43,
+  "t_feat": 18.71,
+  "peak_rss_mb": 7085.3,
+  "peak_child_rss_mb": 9077.0
+}

@@ -1,0 +1,17 @@
+{
+  "bound": 1000,
+  "primes": 167,
+  "edges": 345,
+  "sinks": 18,
+  "maximal_classes": 201,
+  "distinct_words": 197,
+  "maximal_chains": 12234,
+  "max_degree": 6,
+  "t_graph": 0.0,
+  "t_dp": 0.03,
+  "t_feat": 0.03,
+  "peak_rss_mb": 259.7,
+  "peak_child_rss_mb": 168.7,
+  "validate_brute_maximal_chains": 12234,
+  "validate_ok": true
+}
