@@ -189,4 +189,4 @@ Specific things to test:
 - Agreement across rank ranges, not only the first few primes.
 
 If the branch is implemented, add a debug or benchmark mode that runs both paths
-and asserts identical decompositions before trusting the optimized path.
+and asserts identical partitions before trusting the optimized path.
