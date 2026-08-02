@@ -26,11 +26,7 @@ stating as much. The point is: Leave the high level stuff to the user.
   no primes skipped between 3 and $\max(p)$.
 - `primeparts.partitions`: length-two integer partitions of odd `p` into prime
   power summands — by parity a power of two plus an odd prime power. Each row's
-  `(m_k, n_k, q_k)` **characterizes** one such partition for that `p`; the tuple
-  is not itself the partition. Most edges are `n=1`.
-- `primeparts.primes_k0`: `k=0` primes; flat/unpartitioned, Iceberg format-version
-  2, merge-on-read. **No source file references this table.** It exists in the
-  warehouse or in intent only; nothing creates, reads or verifies it.
+  `(m_k, n_k)` **characterizes** one such partition for that `p`. Most edges are `n=1`.
 
 ## Catalog (operating notes)
 

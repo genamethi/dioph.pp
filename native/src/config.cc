@@ -36,6 +36,8 @@ int config_cfn(lua_State* L) {
 }  // namespace
 
 fs::path ConfigFilePath() {
+  std::error_code ec;
+  if (fs::exists("config.lua", ec)) return "config.lua";
   if (const char* xdg = std::getenv("XDG_CONFIG_HOME"); xdg && *xdg)
     return fs::path(xdg) / "primeparts" / "config.lua";
   if (const char* home = std::getenv("HOME"); home && *home)

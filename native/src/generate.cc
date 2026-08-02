@@ -300,7 +300,7 @@ fs::path default_temp_root() {
   const char* env = std::getenv("FUNBUNS_DATA_DIR");
   fs::path data_dir = env != nullptr && env[0] != '\0'
                           ? fs::path(env)
-                          : fs::path("/media/extssd/research/dioph.pp/data");
+                          : fs::path("./data");
   return data_dir / "tmp" / ("iceberg_temp_" + utc_timestamp_compact());
 }
 
@@ -381,7 +381,6 @@ std::shared_ptr<arrow::RecordBatch> make_partitions_batch(const pp_batch_result&
       arrow::field("p",          arrow::int64()),
       arrow::field("m_k",        arrow::int32()),
       arrow::field("n_k",        arrow::int32()),
-      arrow::field("q_k",        arrow::int64()),
       arrow::field("prime_rank", arrow::int64()),
   });
   int64_t rows = static_cast<int64_t>(batch.partition_count);
@@ -390,7 +389,6 @@ std::shared_ptr<arrow::RecordBatch> make_partitions_batch(const pp_batch_result&
       {int64_array(batch.partition_p, rows),
        int32_array(batch.partition_m, rows),
        int32_array(batch.partition_n, rows),
-       int64_array(batch.partition_q, rows),
        partitions_rank_array(batch, rank_start)});
 }
 
@@ -704,8 +702,8 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
                                 {{"p", true}, {"prime_rank", true}},
                                 true, nullptr});
     tables.push_back(BoundTable{"partitions", d_schema, d_spec,
-                                {"p", "prime_rank", "q_k"},
-                                {{"p", true}, {"prime_rank", true}, {"q_k", false}},
+                                {"p", "prime_rank"},
+                                {{"p", true}, {"prime_rank", true}},
                                 false, nullptr});
     auto writer = AlignedBucketWriter::Make(options.warehouse, options.ns,
                                             std::move(tables), AtomKey{"p"},

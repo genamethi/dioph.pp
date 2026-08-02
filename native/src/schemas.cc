@@ -45,7 +45,6 @@ std::shared_ptr<iceberg::Schema> PartitionsSchema() {
           iceberg::SchemaField::MakeRequired(1, "p",                iceberg::int64()),
           iceberg::SchemaField::MakeRequired(2, "m_k",              iceberg::int32()),
           iceberg::SchemaField::MakeRequired(3, "n_k",              iceberg::int32()),
-          iceberg::SchemaField::MakeRequired(4, "q_k",              iceberg::int64()),
           iceberg::SchemaField::MakeRequired(5, "prime_rank",       iceberg::int64()),
           iceberg::SchemaField::MakeRequired(6, "p_bucket_version", iceberg::int32()),
           iceberg::SchemaField::MakeRequired(7, "p_bucket",         iceberg::int32()),

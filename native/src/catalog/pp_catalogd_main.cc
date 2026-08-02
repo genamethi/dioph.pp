@@ -4,10 +4,12 @@
 
 #include "primeparts/catalog/pp_catalogd.h"
 
+#include "primeparts/config.h"
+
 namespace {
 
 constexpr char kDefaultWarehouse[] =
-    "/media/extssd/research/dioph.pp/data/ib-staging";
+    "./data/iceberg-staging";
 
 void Usage() {
   std::fprintf(stderr,
@@ -26,7 +28,13 @@ void Usage() {
 
 int main(int argc, char** argv) {
   primeparts::catalog::CatalogdOptions opts;
-  opts.warehouse = kDefaultWarehouse;
+  std::string cfg_err;
+  auto cfg = primeparts::config::Load(&cfg_err);
+  if (auto it = cfg.find("warehouse"); it != cfg.end() && !it->second.empty()) {
+    opts.warehouse = it->second;
+  } else {
+    opts.warehouse = kDefaultWarehouse;
+  }
 
   for (int i = 1; i < argc; ++i) {
     std::string f = argv[i];
