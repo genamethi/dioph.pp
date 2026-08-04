@@ -8,6 +8,8 @@
 #include <getopt.h>
 #include <map>
 #include <queue>
+#include <set>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -21,9 +23,13 @@
 #include "iceberg/table_metadata.h"
 #include "iceberg/table_scan.h"
 
+#include <ginac/ginac.h>
+
 #include "primeparts/catalog/pp_iceberg_rest.h"
 #include "primeparts/catalog/rest_scan_plan.h"
 #include "primeparts/client/session.h"
+#include "primeparts/graph/pp_graph_store.h"
+#include "primeparts/query/materialize.h"
 #include "primeparts/scan/scan_plan.h"
 
 namespace ppc = primeparts::catalog;
@@ -42,6 +48,7 @@ struct Options {
   int64_t max_p = kDefaultMax;
   int64_t threads = 8;
   std::string format = "text";
+  std::string mode = "basis";
   int64_t top = 20;
 };
 
@@ -135,6 +142,7 @@ void Usage(FILE* out) {
       "  --warehouse DIR  warehouse root\n"
       "  --namespace NS   catalog namespace (default %s)\n"
       "  --threads N      scan/engine threads (default 8)\n"
+      "  --mode M         basis | hasse (default basis)\n"
       "  --format F       text | dot | json (default text)\n"
       "  --top N          rows to show in text listings (default 20)\n"
       "  --help\n",
@@ -160,6 +168,7 @@ bool ParseArgs(int argc, char** argv, Options* opt) {
       {"threads", required_argument, nullptr, 1005},
       {"format", required_argument, nullptr, 1006},
       {"top", required_argument, nullptr, 1007},
+      {"mode", required_argument, nullptr, 1008},
       {"help", no_argument, nullptr, 'h'},
       {nullptr, 0, nullptr, 0},
   };
@@ -182,6 +191,7 @@ bool ParseArgs(int argc, char** argv, Options* opt) {
       case 1007:
         if (!ParseI64(optarg, &opt->top)) return false;
         break;
+      case 1008: opt->mode = optarg; break;
       case 'h': Usage(stdout); std::exit(0);
       default: return false;
     }
@@ -364,6 +374,85 @@ std::vector<std::vector<int32_t>> ChainDecomposition(const Poset& g,
   return chains;
 }
 
+struct Generator {
+  int32_t m = 0;
+  int32_t n = 0;
+  int64_t occurrences = 0;
+  std::map<int, GiNaC::ex> hermite;
+  bool pivot = false;
+};
+
+bool PlanPaths(const Options& opt, const std::string& table,
+               const scan::ScanPlanRequest& request,
+               std::vector<std::string>* paths, double* t_plan,
+               std::string* error) {
+  client::SessionOptions so;
+  so.rest_uri = opt.rest_uri;
+  so.warehouse = opt.warehouse;
+  so.ns = opt.ns_name;
+  so.scan_threads = static_cast<int>(opt.threads);
+  auto session = client::Session::Open(so, error);
+  if (!session) return false;
+  client::TableHandle handle;
+  if (!session->LoadTable(table, &handle, error)) return false;
+  const auto ns = ppc::ResolveNamespace(opt.ns_name);
+  auto t0 = std::chrono::steady_clock::now();
+  std::vector<std::shared_ptr<iceberg::FileScanTask>> tasks;
+  if (!ppc::PlanScanOnServer(opt.rest_uri, ns, table, request,
+                             *handle.metadata(), ppc::PlanPollOptions{}, &tasks,
+                             error)) {
+    return false;
+  }
+  *t_plan = Seconds(t0);
+  for (const auto& t : tasks) paths->push_back(t->data_file()->file_path);
+  return true;
+}
+
+bool ReduceToBasis(std::vector<Generator>* gens, std::vector<int>* degrees) {
+  std::set<int> deg_set;
+  for (const auto& g : *gens)
+    for (const auto& [d, c] : g.hermite) deg_set.insert(d);
+  degrees->assign(deg_set.begin(), deg_set.end());
+  const size_t width = degrees->size();
+
+  std::vector<std::vector<GiNaC::ex>> rows;
+  rows.reserve(gens->size());
+  for (const auto& g : *gens) {
+    std::vector<GiNaC::ex> r(width, GiNaC::ex(0));
+    for (size_t j = 0; j < width; ++j) {
+      auto it = g.hermite.find((*degrees)[j]);
+      if (it != g.hermite.end()) r[j] = it->second;
+    }
+    rows.push_back(std::move(r));
+  }
+
+  std::vector<std::vector<GiNaC::ex>> reduced;
+  std::vector<size_t> pivot_col;
+  for (size_t i = 0; i < rows.size(); ++i) {
+    std::vector<GiNaC::ex> r = rows[i];
+    for (size_t k = 0; k < reduced.size(); ++k) {
+      const GiNaC::ex factor = GiNaC::normal(r[pivot_col[k]]);
+      if (factor.is_zero()) continue;
+      for (size_t j = 0; j < width; ++j)
+        r[j] = GiNaC::normal(r[j] - factor * reduced[k][j]);
+    }
+    size_t lead = width;
+    for (size_t j = 0; j < width; ++j) {
+      if (!GiNaC::normal(r[j]).is_zero()) {
+        lead = j;
+        break;
+      }
+    }
+    if (lead == width) continue;
+    const GiNaC::ex inv = GiNaC::normal(1 / r[lead]);
+    for (size_t j = 0; j < width; ++j) r[j] = GiNaC::normal(r[j] * inv);
+    reduced.push_back(std::move(r));
+    pivot_col.push_back(lead);
+    (*gens)[i].pivot = true;
+  }
+  return true;
+}
+
 bool ReadEdges(const Options& opt, std::vector<Edge>* out, int64_t* rows_scanned,
                double* t_plan, double* t_read, std::string* error) {
   client::SessionOptions so;
@@ -430,6 +519,128 @@ bool ReadEdges(const Options& opt, std::vector<Edge>* out, int64_t* rows_scanned
   return true;
 }
 
+int RunBasis(const Options& opt) {
+  scan::ScanPlanRequest request;
+  request.select = {"m_k", "n_k"};
+
+  std::vector<std::string> paths;
+  double t_plan = 0.0;
+  std::string error;
+  if (!PlanPaths(opt, "partitions", request, &paths, &t_plan, &error)) {
+    std::fprintf(stderr, "pp-graph: %s\n", error.c_str());
+    return 1;
+  }
+  if (paths.empty()) {
+    std::fprintf(stderr, "pp-graph: partitions has no data files\n");
+    return 1;
+  }
+
+  duckdb::DBConfig cfg;
+  cfg.SetOptionByName("threads", duckdb::Value::BIGINT(opt.threads));
+  duckdb::DuckDB db(nullptr, &cfg);
+  duckdb::Connection con(db);
+
+  const std::string sql =
+      "SELECT m_k, n_k, count(*) AS occurrences FROM read_parquet(" +
+      QuoteList(paths) + ") GROUP BY m_k, n_k ORDER BY n_k, m_k";
+
+  auto t0 = std::chrono::steady_clock::now();
+  auto result = con.Query(sql);
+  if (result->HasError()) {
+    std::fprintf(stderr, "pp-graph: %s\n", result->GetError().c_str());
+    return 1;
+  }
+  std::vector<Generator> gens;
+  int64_t total_edges = 0;
+  for (auto& row : *result) {
+    Generator g;
+    g.m = row.GetValue<int32_t>(0);
+    g.n = row.GetValue<int32_t>(1);
+    g.occurrences = row.GetValue<int64_t>(2);
+    total_edges += g.occurrences;
+    gens.push_back(std::move(g));
+  }
+  const double t_scan = Seconds(t0);
+
+  GiNaC::symbol x("x");
+  t0 = std::chrono::steady_clock::now();
+  for (auto& g : gens) {
+    bool ov = false;
+    const int64_t c = IPow(2, g.m, &ov);
+    if (ov) {
+      std::fprintf(stderr, "pp-graph: 2^%d overflows int64\n", g.m);
+      return 1;
+    }
+    const GiNaC::ex poly =
+        GiNaC::pow(x, g.n) + GiNaC::numeric(static_cast<long>(c));
+    g.hermite = primeparts::graph::ToHermite(poly, x);
+  }
+  std::vector<int> degrees;
+  ReduceToBasis(&gens, &degrees);
+  const double t_alg = Seconds(t0);
+
+  size_t rank = 0;
+  for (const auto& g : gens)
+    if (g.pivot) ++rank;
+
+  std::vector<std::string> names{"m",       "n",       "degree",
+                                 "occurrences", "is_basis", "hermite"};
+  std::vector<primeparts::query::MaterializeColumn> columns(names.size());
+  for (size_t i = 0; i < names.size(); ++i) columns[i].name = names[i];
+  columns[5].type = primeparts::query::ColumnType::kString;
+  columns[5].no_stats = true;
+  for (const auto& g : gens) {
+    columns[0].ints.push_back(g.m);
+    columns[1].ints.push_back(g.n);
+    columns[2].ints.push_back(g.n);
+    columns[3].ints.push_back(g.occurrences);
+    columns[4].ints.push_back(g.pivot ? 1 : 0);
+    std::string h = "{";
+    bool first = true;
+    for (const auto& [d, coef] : g.hermite) {
+      if (!first) h += ",";
+      first = false;
+      std::ostringstream cs;
+      cs << coef;
+      h += "\"" + std::to_string(d) + "\":" + cs.str();
+    }
+    h += "}";
+    columns[5].strings.push_back(std::move(h));
+  }
+
+  std::printf("pp-graph basis (whole dataset, unbounded)\n");
+  std::printf("  partition rows aggregated : %" PRId64 "\n", total_edges);
+  std::printf("  distinct (m, n) generators: %zu\n", gens.size());
+  std::printf("  distinct Hermite degrees  : %zu\n", degrees.size());
+  std::printf("  basis rank                : %zu\n", rank);
+  std::printf("  scan %.3fs  plan %.3fs  algebra %.3fs\n", t_scan, t_plan,
+              t_alg);
+
+  if (opt.warehouse.empty()) {
+    std::printf("\n(no --warehouse; not committing hermite_basis)\n");
+    return 0;
+  }
+  std::string mode;
+  auto catalog = ppc::OpenCatalog(opt.warehouse, opt.rest_uri, &mode, &error);
+  if (!catalog) {
+    std::fprintf(stderr, "pp-graph: OpenCatalog: %s\n", error.c_str());
+    return 1;
+  }
+  const auto ns = ppc::ResolveNamespace(opt.ns_name);
+  primeparts::query::MaterializeOptions mopt;
+  mopt.sort_keys = {"n", "m"};
+  std::string metadata_location;
+  if (!primeparts::query::MaterializeColumns(catalog, ns, opt.warehouse,
+                                             "hermite_basis", columns, mopt,
+                                             &metadata_location, &error)) {
+    std::fprintf(stderr, "pp-graph: MaterializeColumns: %s\n", error.c_str());
+    return 1;
+  }
+  std::printf("\ncommitted %s.hermite_basis (%zu rows, unpartitioned)\n  %s\n",
+              opt.ns_name.c_str(), gens.size(), metadata_location.c_str());
+  return 0;
+}
+
 void EmitDot(const Poset& g,
              const std::vector<std::pair<int32_t, int32_t>>& cover,
              const std::vector<int32_t>& level) {
@@ -456,6 +667,12 @@ int main(int argc, char** argv) {
   Options opt;
   if (!ParseArgs(argc, argv, &opt)) {
     Usage(stderr);
+    return 2;
+  }
+
+  if (opt.mode == "basis") return RunBasis(opt);
+  if (opt.mode != "hasse") {
+    std::fprintf(stderr, "unknown --mode %s (basis | hasse)\n", opt.mode.c_str());
     return 2;
   }
 
