@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -63,10 +64,23 @@ std::shared_ptr<iceberg::Catalog> OpenCatalog(const fs::path& warehouse,
 
 bool RestServerReachable(const std::string& rest_uri);
 
+enum class FieldBoundState {
+  kTableAbsent,
+  kNoSnapshot,
+  kSnapshotNoBound,
+  kPresent,
+};
+
+std::string_view FieldBoundStateName(FieldBoundState state);
+
 bool FetchFieldUpperBound(const std::string& rest_uri,
                           const iceberg::Namespace& ns,
                           const std::string& table, const std::string& field,
                           int64_t* out, bool* present, std::string* error);
+
+bool FetchFieldBound(const std::string& rest_uri, const iceberg::Namespace& ns,
+                     const std::string& table, const std::string& field,
+                     int64_t* out, FieldBoundState* state, std::string* error);
 
 fs::path TableMetadataPath(const std::shared_ptr<iceberg::Catalog>& catalog,
                            const iceberg::Namespace& ns,
