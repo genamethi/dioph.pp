@@ -40,9 +40,3 @@
 	url = https://github.com/apache/iceberg
 	branch = main
 
-[submodule "native/vendor/ginac"]
-	path = native/vendor/ginac
-  url = https://github.com/AlexeiSheplyakov/GiNaC
-  branch = main
-	shallow = true
-	ignore = all
