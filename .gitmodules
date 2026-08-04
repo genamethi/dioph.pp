@@ -29,12 +29,6 @@
 	branch = main
 	shallow = true
 
-[submodule "native/vendor/notcurses"]
-	path = native/vendor/notcurses
-	url = https://github.com/dankamongmen/notcurses
-	branch = master
-	shallow = true
-
 [submodule "iceberg-spec"]
 	path = docs/vendor/iceberg
 	url = https://github.com/apache/iceberg

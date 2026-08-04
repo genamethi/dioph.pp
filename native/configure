@@ -7,8 +7,12 @@ PREFIX="${PREFIX:-/usr/local}"
 JOBS=$(nproc 2>/dev/null || echo 4)
 CXX="${CXX:-g++}"
 
+SUDO=
+[ "$(id -u)" = 0 ] || SUDO=sudo
+
 SANITIZE=
 SANITIZE_VENDOR=
+VENDOR_FLINT=
 for arg in "$@"; do
   case "$arg" in
     --sanitize) SANITIZE=1 ;;
@@ -16,12 +20,18 @@ for arg in "$@"; do
       SANITIZE=1
       SANITIZE_VENDOR=1
       ;;
+    --vendor-flint) VENDOR_FLINT=1 ;;
     *)
-      echo "unknown option: $arg (supported: --sanitize, --sanitize-vendor)"
+      echo "unknown option: $arg (supported: --sanitize, --sanitize-vendor, --vendor-flint)"
       exit 1
       ;;
   esac
 done
+
+have_pc() {
+  command -v pkg-config >/dev/null 2>&1 || return 1
+  PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PKG_CONFIG_PATH" pkg-config --exists "$1"
+}
 
 if [ -n "$SANITIZE_VENDOR" ] && [ "$PREFIX" = "/usr/local" ]; then
   echo "--sanitize-vendor builds instrumented arrow/iceberg and would overwrite the release prefix."
@@ -43,11 +53,17 @@ if command -v pacman >/dev/null 2>&1; then
     echo "yay required (arch target)"
     exit 1
   }
-  PKGS="base-devel pkgconf cmake ninja git curl tar boost \
+  PKGS="base-devel pkgconf cmake ninja git curl tar unzip boost \
 gmp mpfr pari primesieve primecount sqlite openssl \
 nlohmann-json3.12-dev \
-ffmpeg libunistring libdeflate ncurses doctest pandoc-cli \
+ginac notcurses \
 thrift brotli protobuf abseil-cpp re2 utf8proc lz4 zstd zlib bzip2"
+
+  if [ -n "$VENDOR_FLINT" ]; then
+    PKGS="$PKGS autoconf automake libtool"
+  else
+    have_pc flint || PKGS="$PKGS flint"
+  fi
 
   missing=
   for p in $PKGS; do
@@ -58,23 +74,25 @@ elif command -v apt-get >/dev/null 2>&1; then
   DISTRO=debian
   deb_have() { dpkg-query -W -f '${Status}' "$1" 2>/dev/null | grep -q "install ok installed"; }
 
-  PKGS="build-essential pkgconf cmake ninja-build git curl tar \
+  PKGS="build-essential pkgconf cmake ninja-build git curl tar unzip \
 libboost-dev libgmp-dev libmpfr-dev libprimesieve-dev libprimecount-dev \
-libsqlite3-dev libssl-dev libreadline-dev \
+libsqlite3-dev libssl-dev libreadline-dev libginac-dev \
 zlib1g-dev libzstd-dev libbz2-dev libbrotli-dev"
 
   deb_have libcurl4-openssl-dev || deb_have libcurl4-gnutls-dev || PKGS="$PKGS libcurl4-openssl-dev"
   [ -e "$PREFIX/lib/libpari.so" ] || [ -e "$PREFIX/lib/libpari.a" ] || deb_have libpari-dev || PKGS="$PKGS libpari-dev"
-  [ -f "$PREFIX/lib/pkgconfig/flint.pc" ] || PKGS="$PKGS autoconf automake libtool"
-  [ -f "$PREFIX/lib/pkgconfig/notcurses-core.pc" ] ||
-    PKGS="$PKGS doctest-dev libavdevice-dev libswscale-dev libdeflate-dev \
-libncurses-dev libunistring-dev pandoc"
+  if [ -n "$VENDOR_FLINT" ]; then
+    PKGS="$PKGS autoconf automake libtool"
+  else
+    have_pc flint || PKGS="$PKGS libflint-dev"
+  fi
+  have_pc notcurses-core || PKGS="$PKGS libnotcurses-dev"
 
   missing=
   for p in $PKGS; do deb_have "$p" || missing="$missing $p"; done
   if [ -n "$missing" ]; then
-    sudo apt-get update
-    sudo apt-get install -y $missing
+    $SUDO apt-get update
+    $SUDO apt-get install -y $missing
   else
     echo "system deps present"
   fi
@@ -104,12 +122,8 @@ vendor_sync() {
     git -C "$REPO" submodule update --init --remote -- "native/vendor/$1"
 }
 
-vendor_sync lmdb # no install: make compiles it into build/liblmdb.a
+vendor_sync lmdb
 
-# docs/vendor/iceberg is the apache/iceberg spec source, sparse-checked-out to
-# open-api/ only. Sparse config lives in .git and does not survive a fresh
-# clone, so (re)apply it here; without it the submodule materializes the whole
-# Java tree.
 SPEC_SM="$REPO/docs/vendor/iceberg"
 if [ ! -e "$SPEC_SM/.git" ]; then
   git -C "$REPO" submodule update --init --depth 1 -- docs/vendor/iceberg
@@ -125,26 +139,26 @@ else
   exit 1
 fi
 
-if [ ! -f "$PREFIX/lib/pkgconfig/flint.pc" ]; then
+if [ -n "$VENDOR_FLINT" ] && [ ! -f "$PREFIX/lib/pkgconfig/flint.pc" ]; then
   vendor_sync flint
   cd "$VENDOR/flint"
   [ -x configure ] || ./bootstrap.sh
   ./configure --prefix="$PREFIX"
   make -j "$JOBS"
-  sudo make install
+  $SUDO make install
   cd "$ROOT"
-else
+elif have_pc flint; then
   echo "flint present"
+else
+  echo "flint missing (no flint.pc); install the distro flint dev package or rerun with --vendor-flint"
+  exit 1
 fi
 
-if [ ! -f "$PREFIX/lib/pkgconfig/notcurses-core.pc" ]; then
-  vendor_sync notcurses
-  cmake -S "$VENDOR/notcurses" -B "$VENDOR/notcurses/build" -G Ninja \
-    -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_INSTALL_PREFIX="$PREFIX"
-  cmake --build "$VENDOR/notcurses/build" -j "$JOBS"
-  sudo cmake --install "$VENDOR/notcurses/build"
-else
+if have_pc notcurses-core; then
   echo "notcurses present"
+else
+  echo "notcurses missing (no notcurses-core.pc); install the distro notcurses dev package"
+  exit 1
 fi
 
 if [ ! -x /usr/local/bin/lua ] || ! /usr/local/bin/lua -v 2>&1 | grep -q "Lua 5.5"; then
@@ -154,17 +168,13 @@ if [ ! -x /usr/local/bin/lua ] || ! /usr/local/bin/lua -v 2>&1 | grep -q "Lua 5.
   tar zxf lua-5.5.0.tar.gz
   cd lua-5.5.0
   make all test
-  sudo make install
+  $SUDO make install
   cd "$ROOT"
   rm -rf "$tmp"
 else
   echo "lua 5.5 present"
 fi
 
-# Distros ship a *split* httplib.h (impl in libcpp-httplib.so); we compile
-# header-only. First httplib.h on the include path decides, so a header-only
-# copy in $PREFIX/include shadows a split one in /usr/include. If none is
-# header-only, fetch the latest release (unpinned) into the prefix.
 httplib_ok=
 for f in "$PREFIX/include/httplib.h" /usr/local/include/httplib.h /usr/include/httplib.h; do
   [ -f "$f" ] || continue
@@ -184,8 +194,8 @@ if [ -z "$httplib_ok" ]; then
     echo "fetched cpp-httplib $tag is not header-only"
     exit 1
   }
-  sudo mkdir -p "$PREFIX/include"
-  sudo cp "$tmp" "$PREFIX/include/httplib.h"
+  $SUDO mkdir -p "$PREFIX/include"
+  $SUDO cp "$tmp" "$PREFIX/include/httplib.h"
   rm -f "$tmp"
   echo "cpp-httplib $tag (header-only) installed to $PREFIX/include"
 else
@@ -202,7 +212,7 @@ if [ ! -f "$PREFIX/lib/libarrow.a" ]; then
     -DARROW_WITH_SNAPPY=ON -DARROW_BUILD_UTILITIES=ON -DARROW_TESTING=ON \
     $ARROW_SAN_FLAGS
   ninja -j "$JOBS"
-  sudo cmake --install .
+  $SUDO cmake --install .
   cd "$ROOT"
 else
   echo "arrow static present"
@@ -224,33 +234,26 @@ if [ ! -f "$PREFIX/lib/libiceberg_sql_catalog.a" ]; then
     -DICEBERG_BUILD_REST_INTEGRATION_TESTS=ON \
     $ICEBERG_SAN_FLAGS
   cmake --build build -j "$JOBS"
-  sudo cmake --install build
+  $SUDO cmake --install build
   cd "$ROOT"
 else
   echo "iceberg present"
 fi
 
-# iceberg installs headers per-subdir yet src/iceberg/
-# catalog/CMakeLists.txt never calls iceberg_install_all_headers
 ICEBERG_SRC="$VENDOR/iceberg-cpp/src"
 FALLBACK=
 NEED="iceberg/catalog/session_catalog.h iceberg/catalog/session_context.h"
 need_cp=
 for h in $NEED; do [ -f "$PREFIX/include/$h" ] || need_cp=1; done
 if [ -n "$need_cp" ]; then
-  sudo mkdir -p "$PREFIX/include/iceberg/catalog" 2>/dev/null || true
-  sudo cp "$ICEBERG_SRC"/iceberg/catalog/*.h "$PREFIX/include/iceberg/catalog/" 2>/dev/null || true
+  $SUDO mkdir -p "$PREFIX/include/iceberg/catalog" 2>/dev/null || true
+  $SUDO cp "$ICEBERG_SRC"/iceberg/catalog/*.h "$PREFIX/include/iceberg/catalog/" 2>/dev/null || true
   for h in $NEED; do [ -f "$PREFIX/include/$h" ] || FALLBACK=1; done
   [ -n "$FALLBACK" ] && echo "warn: could not install catalog headers to prefix; using vendored src include" || echo "catalog headers installed to prefix"
 else
   echo "iceberg catalog headers present"
 fi
 
-# DuckDB CLI + iceberg/substrait extensions — the pp-graph engine substrate.
-# DuckDB's iceberg extension is the REST client used to probe the native IRC;
-# substrait is the plan IR (Acero, already in vendored arrow, executes it).
-# User-local install, no sudo: the official installer drops the CLI under
-# ~/.duckdb and symlinks ~/.local/bin/duckdb.
 DUCKDB="$(command -v duckdb 2>/dev/null || true)"
 [ -x "$DUCKDB" ] || DUCKDB="$HOME/.duckdb/cli/latest/duckdb"
 if [ ! -x "$DUCKDB" ]; then
@@ -279,11 +282,6 @@ else
   echo "duckdb iceberg + substrait extensions installed"
 fi
 
-# libduckdb — in-process DuckDB (the engine): the pp-graph consumer opens a
-# DuckDB connection to read the plan's data files, manage the q_k->p pivot as a
-# DuckDB-cached table, and serve point lookups. Prebuilt bundle (libduckdb.so +
-# libduckdb_static.a + duckdb.hpp/.h) pinned to the CLI's version so the ABI
-# matches; installed to the prefix like arrow/iceberg.
 if [ ! -f "$PREFIX/include/duckdb.hpp" ] || [ ! -f "$PREFIX/lib/libduckdb.so" ]; then
   DUCKDB_VER="$("$DUCKDB" --version 2>/dev/null | awk '{print $1}')"
   [ -n "$DUCKDB_VER" ] || {
@@ -305,9 +303,9 @@ if [ ! -f "$PREFIX/include/duckdb.hpp" ] || [ ! -f "$PREFIX/lib/libduckdb.so" ];
     exit 1
   }
   (cd "$tmp" && unzip -oq libduckdb.zip)
-  sudo cp -p "$tmp/libduckdb.so" "$tmp/libduckdb_static.a" "$PREFIX/lib/"
-  sudo cp -p "$tmp/duckdb.hpp" "$tmp/duckdb.h" "$PREFIX/include/"
-  sudo ldconfig 2>/dev/null || true
+  $SUDO cp -p "$tmp/libduckdb.so" "$tmp/libduckdb_static.a" "$PREFIX/lib/"
+  $SUDO cp -p "$tmp/duckdb.hpp" "$tmp/duckdb.h" "$PREFIX/include/"
+  $SUDO ldconfig 2>/dev/null || true
   rm -rf "$tmp"
   echo "libduckdb $DUCKDB_VER installed to $PREFIX"
 else

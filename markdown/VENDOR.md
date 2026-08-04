@@ -1,6 +1,6 @@
 # vendored dependencies
 
-Five native submodules under `native/vendor/`, plus the Iceberg spec source
+Four native submodules under `native/vendor/`, plus the Iceberg spec source
 under `docs/vendor/` (see `.gitmodules`). Provisioning and builds are driven
 by `native/configure`.
 
@@ -17,8 +17,7 @@ rerun configure. Bumping the recorded gitlink is a manual
 | Path | Upstream | Branch | Built as |
 |---|---|---|---|
 | `lmdb/` | `LMDB/lmdb` | `mdb.master3` | compiled directly by `native/Makefile` into `build/liblmdb.a` (plus the `mdb_*` tools) |
-| `flint/` | `flintlib/flint` | `main` | autotools → `$PREFIX` (shared), gated on `$PREFIX/lib/pkgconfig/flint.pc` |
-| `notcurses/` | `dankamongmen/notcurses` | `master` | cmake full-option build (multimedia/pandoc/doctest at upstream defaults) → `$PREFIX`, gated on `notcurses-core.pc` |
+| `flint/` | `flintlib/flint` | `main` | **opt-in only** (`./configure --vendor-flint`): autotools → `$PREFIX` (shared). By default flint comes from the distro (`libflint-dev` / `flint`) and configure just requires `pkg-config --exists flint`. |
 | `arrow/` | `apache/arrow` | `main` | `--preset ninja-release -DARROW_BUILD_STATIC=ON -DARROW_TESTING=ON` → `$PREFIX`, gated on `libarrow.a` (and on `include/arrow-gtest/`, which the suite links) |
 | `iceberg-cpp/` | `apache/iceberg-cpp` | `main` | cmake `ICEBERG_BUILD_BUNDLE + ICEBERG_BUILD_SHARED + ICEBERG_SQL_SQLITE + ICEBERG_BUILD_SQL_CATALOG` → `$PREFIX`, gated on `libiceberg_sql_catalog.a` |
 | `docs/vendor/iceberg/` | `apache/iceberg` | `main` | not built — sparse-checked-out to `open-api/` for `rest-catalog-open-api.yaml`, the spec the surfaces are aligned to |
@@ -27,7 +26,8 @@ The only version-capped dep is **lua ≥ 5.5, < 5.6** (ABI), which is not a
 submodule — configure downloads and builds the release tarball.
 
 Truly-system deps (gmp/mpfr, pari, primesieve/primecount, sqlite3, openssl,
-curl, boost headers, zlib/zstd/bz2/brotli, readline) come from the distro;
+curl, boost headers, zlib/zstd/bz2/brotli, readline, ginac, notcurses, and
+flint unless `--vendor-flint`) come from the distro;
 arrow bundles whatever else it needs (`libarrow_bundled_dependencies.a`) and
 iceberg-cpp FetchContents its pinned extras (nlohmann-json, cpr, avro,
 croaring, sqlpp23).

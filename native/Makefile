@@ -84,13 +84,15 @@ E2E_BIN := $(BUILD_DIR)/primeparts-e2e
 E2E_OBJ := $(BUILD_DIR)/e2e_test.o
 E2E_LIBOBJS := $(SESSION_OBJ) $(REST_SCAN_PLAN_OBJ) $(PLAN_STATUS_OBJ) $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(PP_ICEBERG_REST_OBJ) $(PP_COMMIT_OBJ) $(PP_LMDB_STORE_OBJ) $(PARTITION_STATS_OBJ) $(LMDB_LIB)
 
-.PHONY: all clean test e2e install
+.DEFAULT_GOAL := all
+.PHONY: all clean test e2e build-deps install install-service
+
+CONFIGURE_FLAGS ?=
 
 PP_INSTALL_PATH ?= $(HOME)/.local/bin
 
 CATALOGD_UNIT_NAME := primeparts-catalogd.service
-IRCD_USER := ircd
-IRCD_CWD := /var/lib/$(IRCD_USER)
+SYSTEMD_USER_DIR := $(HOME)/.local/share/systemd/user
 
 INSTALL_BINS := \
      $(BUILD_DIR)/primeparts-generate \
@@ -99,42 +101,27 @@ INSTALL_BINS := \
      $(BUILD_DIR)/primeparts-tui \
      $(BUILD_DIR)/primeparts-verify
 
+build-deps:
+	./configure $(CONFIGURE_FLAGS)
+
 install: all
 	mkdir -p "$(PP_INSTALL_PATH)"
 	cp $(INSTALL_BINS) "$(PP_INSTALL_PATH)/"
 	@echo "installed $(words $(INSTALL_BINS)) binaries to $(PP_INSTALL_PATH)"
-	@ans=n; \
-	read -r -p "create dedicated '$(IRCD_USER)' system user/group to run primeparts-catalogd as an isolated systemd service (requires root)? [y/N] " ans < /dev/tty || ans=n; \
-	case "$$ans" in \
-	  [yY]*) \
-	    sudo useradd --system --shell /usr/bin/nologin --user-group $(IRCD_USER) 2>/dev/null || true; \
-	    sudo usermod -aG $(IRCD_USER) "$$(id -un)"; \
-	    sudo install -d -o $(IRCD_USER) -g $(IRCD_USER) -m 750 $(IRCD_CWD)/bin; \
-	    sudo install -o $(IRCD_USER) -g $(IRCD_USER) -m 750 $(BUILD_DIR)/primeparts-catalogd $(IRCD_CWD)/bin/; \
-	    sed -e 's|@IRCD_USER@|$(IRCD_USER)|g' \
-	        -e 's|@IRCD_CWD@|$(IRCD_CWD)|g' \
-	        -e 's|@CATALOGD_BIN@|$(IRCD_CWD)/bin/primeparts-catalogd|g' \
-	        primeparts-catalogd-system.service.in \
-	      | sudo tee /usr/lib/systemd/system/$(CATALOGD_UNIT_NAME) > /dev/null; \
-	    if sudo systemctl daemon-reload && sudo systemctl enable --now $(CATALOGD_UNIT_NAME); then \
-	      echo "installed /usr/lib/systemd/system/$(CATALOGD_UNIT_NAME), running as '$(IRCD_USER)'; you were added to group '$(IRCD_USER)' for data access (log out/in for it to take effect) — use sudo systemctl {start,stop,status} $(CATALOGD_UNIT_NAME)"; \
-	    else \
-	      echo "error: failed to enable $(CATALOGD_UNIT_NAME) — check: sudo systemctl status $(CATALOGD_UNIT_NAME)" >&2; \
-	      exit 1; \
-	    fi; \
-	    ;; \
-	  *) \
-	    mkdir -p "$(HOME)/.local/share/systemd/user"; \
-	    sed 's|@PP_INSTALL_PATH@|$(PP_INSTALL_PATH)|g' primeparts-catalogd.service.in \
-	      > "$(HOME)/.local/share/systemd/user/$(CATALOGD_UNIT_NAME)"; \
-	    if systemctl --user daemon-reload && systemctl --user enable --now $(CATALOGD_UNIT_NAME); then \
-	      echo "installed $(HOME)/.local/share/systemd/user/$(CATALOGD_UNIT_NAME), running as $$(id -un)"; \
-	    else \
-	      echo "error: failed to enable $(CATALOGD_UNIT_NAME) — check: systemctl --user status $(CATALOGD_UNIT_NAME)" >&2; \
-	      exit 1; \
-	    fi; \
-	    ;; \
-	esac
+
+install-service: install
+	@mkdir -p "$(SYSTEMD_USER_DIR)"; \
+	sed 's|@PP_INSTALL_PATH@|$(PP_INSTALL_PATH)|g' primeparts-catalogd.service.in \
+	  > "$(SYSTEMD_USER_DIR)/$(CATALOGD_UNIT_NAME)"; \
+	echo "installed $(SYSTEMD_USER_DIR)/$(CATALOGD_UNIT_NAME)"; \
+	if ! systemctl --user daemon-reload 2>/dev/null; then \
+	  echo "no systemd user session; unit written but not enabled — run: systemctl --user enable --now $(CATALOGD_UNIT_NAME)"; \
+	elif systemctl --user enable --now $(CATALOGD_UNIT_NAME); then \
+	  echo "$(CATALOGD_UNIT_NAME) enabled, running as $$(id -un)"; \
+	else \
+	  echo "error: failed to enable $(CATALOGD_UNIT_NAME) — check: systemctl --user status $(CATALOGD_UNIT_NAME)" >&2; \
+	  exit 1; \
+	fi
 
 all: $(BUILD_DIR)/libprimeparts_core.so \
      $(BUILD_DIR)/primeparts-generate \
