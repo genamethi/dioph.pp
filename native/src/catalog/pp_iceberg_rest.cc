@@ -143,11 +143,24 @@ bool RestServerReachable(const std::string& rest_uri) {
   return res && res->status == 200;
 }
 
-bool FetchFieldUpperBound(const std::string& rest_uri,
-                          const iceberg::Namespace& ns,
-                          const std::string& table, const std::string& field,
-                          int64_t* out, bool* present, std::string* error) {
-  *present = false;
+std::string_view FieldBoundStateName(FieldBoundState state) {
+  switch (state) {
+    case FieldBoundState::kTableAbsent:
+      return "table-absent";
+    case FieldBoundState::kNoSnapshot:
+      return "no-snapshot";
+    case FieldBoundState::kSnapshotNoBound:
+      return "snapshot-no-bound";
+    case FieldBoundState::kPresent:
+      return "present";
+  }
+  return "no-snapshot";
+}
+
+bool FetchFieldBound(const std::string& rest_uri, const iceberg::Namespace& ns,
+                     const std::string& table, const std::string& field,
+                     int64_t* out, FieldBoundState* state, std::string* error) {
+  *state = FieldBoundState::kNoSnapshot;
   if (rest_uri.empty()) {
     if (error) *error = "empty rest_uri";
     return false;
@@ -163,21 +176,58 @@ bool FetchFieldUpperBound(const std::string& rest_uri,
     if (error) *error = "no response from " + rest_uri;
     return false;
   }
+  if (res->status == 404) {
+    *state = FieldBoundState::kTableAbsent;
+    return true;
+  }
   if (res->status != 200) {
     if (error) *error = "HTTP " + std::to_string(res->status) + ": " + res->body;
     return false;
   }
   try {
     auto body = nlohmann::json::parse(res->body);
+    auto sit = body.find("state");
+    if (sit != body.end() && sit->is_string()) {
+      const std::string name = sit->get<std::string>();
+      if (name == "table-absent") *state = FieldBoundState::kTableAbsent;
+      else if (name == "no-snapshot") *state = FieldBoundState::kNoSnapshot;
+      else if (name == "snapshot-no-bound") *state = FieldBoundState::kSnapshotNoBound;
+      else if (name == "present") *state = FieldBoundState::kPresent;
+      else {
+        if (error) *error = "unknown field-upper-bound state '" + name + "'";
+        return false;
+      }
+    }
     auto it = body.find("upper_bound");
-    if (it == body.end() || it->is_null()) return true;
+    if (it == body.end() || it->is_null()) {
+      if (*state == FieldBoundState::kPresent) {
+        if (error) *error = "field-upper-bound reported state=present with null upper_bound";
+        return false;
+      }
+      return true;
+    }
     *out = it->get<int64_t>();
-    *present = true;
+    *state = FieldBoundState::kPresent;
     return true;
   } catch (const std::exception& e) {
     if (error) *error = std::string("parse: ") + e.what();
     return false;
   }
+}
+
+bool FetchFieldUpperBound(const std::string& rest_uri,
+                          const iceberg::Namespace& ns,
+                          const std::string& table, const std::string& field,
+                          int64_t* out, bool* present, std::string* error) {
+  FieldBoundState state = FieldBoundState::kNoSnapshot;
+  *present = false;
+  if (!FetchFieldBound(rest_uri, ns, table, field, out, &state, error)) return false;
+  if (state == FieldBoundState::kTableAbsent) {
+    if (error) *error = "table does not exist: " + table;
+    return false;
+  }
+  *present = state == FieldBoundState::kPresent;
+  return true;
 }
 
 std::shared_ptr<iceberg::Catalog> OpenCatalog(const fs::path& warehouse,

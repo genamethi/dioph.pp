@@ -273,17 +273,23 @@ int32_t FieldIdByName(const iceberg::Schema& schema, std::string_view name) {
 
 bool FieldUpperBound(const std::shared_ptr<iceberg::Catalog>& catalog,
                      const iceberg::TableIdentifier& id, const std::string& field,
-                     int64_t* out, bool* present, std::string* error) {
+                     int64_t* out, bool* present, FieldBoundState* state,
+                     std::string* error) {
   *present = false;
+  *state = FieldBoundState::kNoSnapshot;
   auto tbl = catalog->LoadTable(id);
   if (!tbl.has_value()) {
     *error = tbl.error().message;
+    if (tbl.error().kind == iceberg::ErrorKind::kNoSuchTable) {
+      *state = FieldBoundState::kTableAbsent;
+    }
     return false;
   }
   auto table = tbl.value();
 
   auto snap = table->current_snapshot();
   if (!snap.has_value() || snap.value() == nullptr) return true;
+  *state = FieldBoundState::kSnapshotNoBound;
 
   auto schema = table->schema();
   if (!schema.has_value()) {
@@ -339,7 +345,10 @@ bool FieldUpperBound(const std::shared_ptr<iceberg::Catalog>& catalog,
       }
     }
   }
-  if (*present) *out = best;
+  if (*present) {
+    *out = best;
+    *state = FieldBoundState::kPresent;
+  }
   return true;
 }
 
@@ -548,10 +557,15 @@ int RunCatalogd(const CatalogdOptions& opts) {
                                         .name = req.matches[2]};
             int64_t ub = 0;
             bool present = false;
+            FieldBoundState state = FieldBoundState::kNoSnapshot;
             std::string err;
-            if (!FieldUpperBound(catalog, id, field, &ub, &present, &err))
+            if (!FieldUpperBound(catalog, id, field, &ub, &present, &state, &err)) {
+              if (state == FieldBoundState::kTableAbsent)
+                return SendError(res, 404, "NoSuchTableException", err);
               return SendError(res, 400, "BadRequest", err);
-            json body = {{"field", field}};
+            }
+            json body = {{"field", field},
+                         {"state", FieldBoundStateName(state)}};
             if (present) body["upper_bound"] = ub;
             else body["upper_bound"] = nullptr;
             SendJson(res, 200, body);

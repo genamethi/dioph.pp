@@ -80,6 +80,7 @@ struct Options {
   int64_t threads = 0;
   int64_t prime_rank_start = 0;
   bool temp = false;
+  bool init = false;
   fs::path warehouse;
   std::string rest_uri;
   iceberg::Namespace ns;
@@ -252,6 +253,9 @@ void usage(FILE* stream) {
       "                            Default: config.lua 'rest_uri' or 127.0.0.1:8181.\n"
       "  --namespace NS            Catalog namespace for both tables.\n"
       "                            Default: config.lua 'namespace' or primeparts.\n"
+      "  --init                    Create primes/partitions when absent and start\n"
+      "                            from prime_rank=2. Without it, a missing table\n"
+      "                            is a hard error rather than a silent restart.\n"
       "  --temp                    Write to $FUNBUNS_DATA_DIR/tmp/iceberg_temp_<ts>/\n"
       "                            warehouse and skip the commit (files-only).\n"
       "  --chunk-primes N          Materialization chunk size (default: 500000).\n"
@@ -474,6 +478,7 @@ bool parse_args(int argc, char** argv, Options* options) {
       {"threads", required_argument, nullptr, 1003},
       {"warehouse", required_argument, nullptr, 'w'},
       {"temp", no_argument, nullptr, 1004},
+      {"init", no_argument, nullptr, 1007},
       {"rest-uri", required_argument, nullptr, 1005},
       {"namespace", required_argument, nullptr, 1006},
       {"help", no_argument, nullptr, 'h'},
@@ -509,6 +514,7 @@ bool parse_args(int argc, char** argv, Options* options) {
         break;
       case 'w': options->warehouse = optarg; break;
       case 1004: options->temp = true; break;
+      case 1007: options->init = true; break;
       case 1005: options->rest_uri = optarg; break;
       case 1006: ns_name = optarg; break;
       case 'h': usage(stdout); std::exit(0);
@@ -598,11 +604,11 @@ bool resolve_start_idx(const Options& options, const pp_gen_callbacks* callbacks
     return true;
   }
   int64_t ub = 0;
-  bool present = false;
+  auto state = primeparts::catalog::FieldBoundState::kNoSnapshot;
   std::string err;
-  if (!primeparts::catalog::FetchFieldUpperBound(options.rest_uri, options.ns,
-                                                 "primes", "prime_rank", &ub,
-                                                 &present, &err)) {
+  if (!primeparts::catalog::FetchFieldBound(options.rest_uri, options.ns,
+                                            "primes", "prime_rank", &ub, &state,
+                                            &err)) {
     if (options.start_idx > 0) {
       *out_start = options.start_idx;
       log_line(callbacks,
@@ -615,23 +621,54 @@ bool resolve_start_idx(const Options& options, const pp_gen_callbacks* callbacks
     log_line(callbacks, "%s", g_last_error.c_str());
     return false;
   }
-  if (present) {
-    *out_start = ub + 1;
-    if (options.start_idx > 0 && options.start_idx != *out_start) {
+
+  switch (state) {
+    case primeparts::catalog::FieldBoundState::kPresent:
+      *out_start = ub + 1;
+      if (options.start_idx > 0 && options.start_idx != *out_start) {
+        log_line(callbacks,
+                 "note: ignoring --start-idx=%" PRId64 "; resuming from frontier "
+                 "prime_rank=%" PRId64 " (start_idx=%" PRId64 ")",
+                 options.start_idx, ub, *out_start);
+      } else {
+        log_line(callbacks,
+                 "resume: frontier prime_rank=%" PRId64 ", start_idx=%" PRId64,
+                 ub, *out_start);
+      }
+      return true;
+
+    case primeparts::catalog::FieldBoundState::kNoSnapshot:
+      *out_start = options.start_idx > 0 ? options.start_idx : kFreshStartIdx;
       log_line(callbacks,
-               "note: ignoring --start-idx=%" PRId64 "; resuming from frontier "
-               "prime_rank=%" PRId64 " (start_idx=%" PRId64 ")",
-               options.start_idx, ub, *out_start);
-    } else {
-      log_line(callbacks,
-               "resume: frontier prime_rank=%" PRId64 ", start_idx=%" PRId64, ub,
+               "primes exists with no snapshot (empty): start_idx=%" PRId64,
                *out_start);
-    }
-  } else {
-    *out_start = options.start_idx > 0 ? options.start_idx : kFreshStartIdx;
-    log_line(callbacks, "fresh warehouse: start_idx=%" PRId64, *out_start);
+      return true;
+
+    case primeparts::catalog::FieldBoundState::kTableAbsent:
+      if (!options.init) {
+        set_last_error(
+            "resume: table " + options.ns.levels.back() +
+            ".primes does not exist; this warehouse is not initialized. Pass "
+            "--init to create it and generate from prime_rank=" +
+            std::to_string(kFreshStartIdx) + ", or use --temp");
+        log_line(callbacks, "%s", g_last_error.c_str());
+        return false;
+      }
+      *out_start = options.start_idx > 0 ? options.start_idx : kFreshStartIdx;
+      log_line(callbacks, "--init: creating primes/partitions, start_idx=%" PRId64,
+               *out_start);
+      return true;
+
+    case primeparts::catalog::FieldBoundState::kSnapshotNoBound:
+      set_last_error(
+          "resume: primes has a snapshot but no upper bound for prime_rank; the "
+          "frontier cannot be located and generating would duplicate rows into "
+          "an append-only table. Repair the table's manifest bounds or start a "
+          "new warehouse (--temp / --init on an empty prefix)");
+      log_line(callbacks, "%s", g_last_error.c_str());
+      return false;
   }
-  return true;
+  return false;
 }
 
 }  // namespace
