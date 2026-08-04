@@ -84,6 +84,8 @@ Start here when deciding what is alive.
   `PlanScanOnServer`. Linked only into the e2e test; **no shipped binary calls
   it**.
 
+## ACTIVE WORK HERE ON ...
+
 ## Configuration loose ends
 
 - **Two disjoint config surfaces.** `config::Load` (`config.{h,cc}`) reads
@@ -118,6 +120,9 @@ Roughly in dependency order. Each is a starting point, not a spec.
    `TableReadTraits::FromMetadata` (`scan/table_traits.cc:13`) derives sort
    keys from the *committed* sort order. With none declared it returns success
    with empty `sort_keys`; the refusal happens in each `traits.sorted()` caller
+   2026.08.04 Note: Is this relevant if we're generating all data from scratch?
+   It should be assumed that we are at this point.
+   - Note we should 
    — `RequireSorted` under `ScanByK` (`query/query_service.cc:229`), windowed
    `GroupCount`, `QueryService::Extent` (`:510`, the table extent the TUI
    reads), `verify_main.cc:104`, `source_scan.cc:102`, `scan_planner.cc:492`
@@ -162,17 +167,60 @@ Roughly in dependency order. Each is a starting point, not a spec.
    (`:114`), both settable through `CreateTableRequest.properties` and
    therefore fixable at creation. `bucket_target_bytes` has no spec
    counterpart; bucketing here is an organizational axis, not a spec concept.
-3. **Decide whether consumers plan server-side.** `rest_scan_plan` exists and
+3. **Rewrite old pp_graph** The batch materialization pipeline
+  (pp_graph.cc, pp_graph_exp.cc, pp_graph_store.{cc,h}) is being replaced. The
+  sweep and disk spill used to persist the trie state into derived tables
+  (chain_words, node_words, skeletons) was misguided (and costs too much space).
+  The partitions table really contains most of what we need, but it might take
+  some time to settle on how to use the structure to quickly compute things.
+  The first step we've decided on is starting with the basis elements:
+
+  The keystone of our replacement model is seeded by an initial pass starting
+  from the $k=0$ primes will gather all Hermite polynomials, then determine the
+  basis. That will be saved as an Iceberg table (unpartitioned) within the
+  warehouse (fully leveraging the IRC interface). 
+
+  Then composing these bases from a given set, fully compatible with GiNaC
+  expression types (which decompose to subexpressions), will allow us to do
+  analysis on a given range of prime values.
+
+  One hope is that we will be able to use these as formal expressions for
+  evaluation over the dataset (a la expressions in Polars for example; i.e.,
+  these should give us constraints for satisfaction over subsets of primes.)
+
+  One consumer of this data I'm hoping to see immediately is a Hasse-diagram
+  corresponding to a queried set of primes, and a chain decomposition (what are the
+  antichains?). 
+4. **Settle consumer server-side planning.** `rest_scan_plan` exists and
    works; it is linked only into the e2e test. Either wire `source_scan` /
    `query_service` to it — which also decides where mode dispatch lives — or
    accept that in-process planning is the real path and the REST client is for
    foreign consumers. `generate` is already a REST client on both resume reads,
    so the producer's REST-ness is not the gap; what it does not use is the
    *spec* planning routes.
-4. **Settle configuration.** One surface, one warehouse default, and a decision
-   on whether tables are declarable outside C++.
+5. **Settle configuration.** One surface, one warehouse default.
+  However, a qualification and some clarifications: (a) Iceberg tables
+  being defined by schemas.cc is fine when they're tightly coupled to a binary.
+  What the final shape will likely be is that we'll have a client surface for
+  deriving tables from data and committing those. For the user directed approach
+  then, we can use a Lua interface.
+  (b) By "warehouse default" I'd prefer localhost, the current default port,
+  and ~/local/share/pp-data/ as the default. This is fixed via an example config.lua
+  which resides in the same directory as the other binaries. (default is ~/.local/bin)
+  (c) The Lua config table should have general reusable variables in a config.core table.
+  Then binary specific config variables (all flags checked against the config, and
+  overidden.). I.e., all default behavior is determined by the example.config.lua.
+  (d) The example config should trigger a message on init to switch away from the
+  defaults.
+  (e) For the time being, this config is separate from any table or schema definitions.
+  That can wait. 
+  (f) config.tui, config.graph, config.generate are some examples. config.test might be
+  appropriate, but consider that we're using gtest and whether we want to wrap around that
+  or keep separate.
+  (g) This should be enough groundwork to help tie up the loose ends in the previous section.
 
-## Lower priority directions to take: 
+
+## Lower priority leftovers: 
 
 1. **Lifecycle.** Snapshot expiry is unwired, orphaned files from failed
    transactions are unreachable, rollback has no surface. All three are small
@@ -180,11 +228,4 @@ Roughly in dependency order. Each is a starting point, not a spec.
 2. **Derived read indexes** for fast number-theoretic reads (approach open).
 3. **Views** — `https://raw.githubusercontent.com/apache/iceberg/refs/heads/main/format/view-spec.md`
 4. **Janitor** for killed-run `.pp-staging` debris.
-
-## Terminology
-
-- The objects are **integer partitions** — specifically length-two partitions of
-  an odd prime into prime-power summands. One sum is one partition; the whole
-  set for a given `p` is also called a partition, or a restricted partition. A
-  `(m_k, n_k, q_k)` tuple *characterizes* a partition.
-- **`prime_rank`** = the prime-counting function $\pi(p)$ (library-agnostic).
+6. **Compute `q_k` Dynamically:** The `q_k` column was removed from the `partitions` table. Update all consumers (`query_service.cc`, `verify.cc`, `lua_query_module.cc`) to solve for `q_k` algebraically from `(p, m_k, n_k)` on the fly.
