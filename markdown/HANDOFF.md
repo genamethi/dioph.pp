@@ -2,21 +2,13 @@
 
 ## Guidance for agents
 
-Please just excise things once they're done. No need to have running commentary
-about progress. No narrating.
+Please excise things once they're done. No need to have running commentary.
+No progress tracker. No narrating.
 
-Furthermore, don't add high level summaries or try to describe the task. Keep it
-grounded.
-Don't exposit or narrate. Leave that to the user. A lot of false assertions keep
-being added,
-in particular the objectives have been rewritten by agents ruining the original
-message.
-We are NOT primarily concerned with k = 0, nor are we solely concerned with
-covering systems.
-I don't want any comments in the code. You can't be trusted to know what's relevant.
-So zero comments. All the time.
-These are tools, and they will revolve in and out of the project without me necessarily
-stating as much. The point is: Leave the high level stuff to the user.
+Furthermore, don't add high level summaries. Keep it grounded, technical and
+actionable.
+
+I don't want any comments in the code. 
 
 ---
 
@@ -27,6 +19,9 @@ stating as much. The point is: Leave the high level stuff to the user.
 - `primeparts.partitions`: length-two integer partitions of odd `p` into prime
   power summands — by parity a power of two plus an odd prime power. Each row's
   `(m_k, n_k)` **characterizes** one such partition for that `p`. Most edges are `n=1`.
+
+- Any other tables referenced have been retired or are deprecated (and any dependent
+code should be fixed.)
 
 ## Catalog (operating notes)
 
@@ -87,25 +82,7 @@ Start here when deciding what is alive.
 
 - `catalog/rest_scan_plan.{h,cc}` — the four client planning calls and
   `PlanScanOnServer`. Linked only into the e2e test; **no shipped binary calls
-  it**. Either a consumer adopts it or it is speculative surface.
-- `common/thread_pool.h` — sized Arrow's pools for multithreaded scan tools.
-  Only `verify.cc` includes it. Its comment names `covering-sieve` and
-  `primitive-factors`, neither of which is a binary in this repo. Retire the
-  header or retire the comment.
-- `primeparts.primes_k0` — see Tables.
-- `include/primeparts/generate.h` — included only by `generate.cc`. A private
-  header for one TU; nothing calls into generate as a library. The TUI drives it
-  by fork/exec of the binary (`tui_generate.cc`), not by linking.
-
-Nothing else in `src/` or `include/` is unreferenced. The tree is smaller than
-it looks — most of what appears redundant is a real seam.
-
-Three doc pairs are byte-identical duplicates; which copy is canonical is
-undecided:
-
-- `arch/tui_app_design.md` = `tui/tui_app_design.md`
-- `arch/tui_query_design.md` = `tui/tui_query_design.md`
-- `arch/lua_query_api.md` = `api/lua_query_api.md`
+  it**.
 
 ## Configuration loose ends
 
@@ -133,7 +110,7 @@ undecided:
   behaviour follows what was committed, which is why the declaration gap below
   bites.
 
-## Directions
+## Immediate Directions
 
 Roughly in dependency order. Each is a starting point, not a spec.
 
@@ -194,20 +171,20 @@ Roughly in dependency order. Each is a starting point, not a spec.
    *spec* planning routes.
 4. **Settle configuration.** One surface, one warehouse default, and a decision
    on whether tables are declarable outside C++.
-5. **Lifecycle.** Snapshot expiry is unwired, orphaned files from failed
+
+## Lower priority directions to take: 
+
+1. **Lifecycle.** Snapshot expiry is unwired, orphaned files from failed
    transactions are unreachable, rollback has no surface. All three are small
    against APIs that already exist.
-6. **Derived read indexes** for fast number-theoretic reads (approach open).
-7. **Views** — `https://raw.githubusercontent.com/apache/iceberg/refs/heads/main/format/view-spec.md`
-8. Optional: a janitor for killed-run `.pp-staging` debris.
+2. **Derived read indexes** for fast number-theoretic reads (approach open).
+3. **Views** — `https://raw.githubusercontent.com/apache/iceberg/refs/heads/main/format/view-spec.md`
+4. **Janitor** for killed-run `.pp-staging` debris.
 
 ## Terminology
 
 - The objects are **integer partitions** — specifically length-two partitions of
   an odd prime into prime-power summands. One sum is one partition; the whole
   set for a given `p` is also called a partition, or a restricted partition. A
-  `(m_k, n_k, q_k)` tuple *characterizes* a partition; do not write that it *is*
-  one. Never "decomposition".
+  `(m_k, n_k, q_k)` tuple *characterizes* a partition.
 - **`prime_rank`** = the prime-counting function $\pi(p)$ (library-agnostic).
-- **"Snap"** = physically re-sort on-disk data to match a declared `sort_order`;
-  sort violations get fixed by re-snapping, not by relaxing the check.

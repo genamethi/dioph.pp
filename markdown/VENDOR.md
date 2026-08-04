@@ -49,3 +49,6 @@ Sparse config lives in `.git` and does not survive a fresh clone, so
 also builds arrow (`ARROW_USE_ASAN/UBSAN`) and iceberg-cpp
 (`ICEBERG_ENABLE_ASAN/UBSAN`) instrumented, and refuses to run against the
 default `/usr/local` — instrumented libs need their own prefix.
+## UPDATE 8/4/26
+
+ Added ginac submodule as well.
