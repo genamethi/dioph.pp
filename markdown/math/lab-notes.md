@@ -495,3 +495,78 @@ is itself the covering-pattern census.
   is_primitive, is_primitive = ord2==d). Replace is catalog-pure: a drop-purge
   through the catalog seam (no warehouse fs writes from the analysis tools).
 
+
+
+2026-08-05  The k distribution: scale, shape, and a per-prime reading of Lambda_p
+---------------------------------------------------------------------------------
+
+Measured on a 1e9-prime warehouse (max p = 22,801,763,513; 1.884e9 partition
+rows). The mechanism below is the Lambda_p lattice of research_programme.md
+section 2 -- this entry is the empirical confirmation and the constants, not a
+new mechanism.
+
+1. WHY THE SCALE IS CONSTANT
+
+   k(p) = #{m : p - 2^m prime}. Candidates grow like log_2(p); each is prime
+   with probability ~ 2*C_2/ln(p) (singular series has no odd-prime correction
+   because the gap 2^m is a pure power of two). The two cancel:
+
+       lambda = log_2(p) * 2*C_2/ln(p) = 2*C_2/ln 2 = 1.90482
+       observed mean k                                = 1.88402
+
+   Confirmed independent of p: mean k is flat across 13 doublings,
+   1.8713 at lg2(p)=21 to 1.8792 at lg2(p)=33 (0.4% drift).
+
+2. IT IS NOT POISSON -- IT IS A MIXTURE
+
+   variance 2.19294 vs mean 1.88402 (index of dispersion 1.164).
+   obs/Poisson(mean) is U-shaped: 1.144 at k=0, 0.918 at k=3, then rising
+   monotonically to 3.22 at k=11. Both tails fat.
+
+3. WHAT IT MIXES OVER
+
+   p - 2^m == 0 mod l has a solution in m iff p mod l lies in <2> mod l. When
+   <2> is a proper subgroup, primes split into two classes with different
+   lambda. At l=7, ord_7(2)=3 and <2>={1,2,4} has index 2:
+
+       p mod 7 in {1,2,4}   mean k = 1.50720
+       p mod 7 in {3,5,6}   mean k = 2.26083
+       ratio 0.666658       predicted 1 - 1/ord_7(2) = 0.666667
+       weighted mean 1.88401 (observed 1.88402)
+
+   The three non-residue classes agree to four decimals. The ratio is the
+   predicted 2/3 to five decimals.
+
+4. THE SAME THING AT A SINGLE PRIME
+
+   Every obstruction at l removes an arithmetic progression in m of common
+   difference ord_l(2). p = 12699571 (k=11) and p = 12699097 (k=2) are both
+   1 mod 3, so l=3 (ord 2) removes all 11 even m from both -- half the pool
+   before anything else. The difference is entirely in the odd m:
+
+       12699571  k=11  surviving m = 1,3,5,7,11,13,15,17,19,21,23
+                       only further loss: m=9 (smallest factor 23)
+       12699097  k=2   l=13 removes m=3,15;  l=29 removes m=19
+       12699139  k=2   l=11 (ord 10) removes m=1,11,21;  l=13 removes m=7,19
+
+   So k is not a property of p in isolation: it is what survives the union of
+   APs, and the cost of each obstruction is ceil(range/ord_l(2)). Coarse
+   obstructions (small ord) are expensive; l=3 alone halves every prime.
+
+5. THE k-MANY HERMITE REPRESENTATIONS OF ONE p
+
+   For n=1 every generator is g_m = 1*He1 + 2^m*He0. The He1 coefficient is
+   invariably 1, so a prime's whole representation lives in He0:
+
+       p = 12699571, k=11: He0 coefficients {2^m : m in 1,3,5,...,23}
+       p = 12699097, k=2 : {2^7, 2^11}
+       p = 12699139, k=2 : {2^5, 2^15}
+
+   High-k signatures are near-complete arithmetic progressions in the exponent;
+   low-k signatures are the sparse residue left after several APs are removed.
+   The comparison between k values is therefore a statement about AP coverage,
+   not about magnitude.
+
+OPEN: the residual spread among the low classes at l=7 (1.5256 / 1.4854 /
+1.5106) exceeds sampling error at 1e9 and is presumably second-order structure
+from the other moduli. Recheck at 11e9.
