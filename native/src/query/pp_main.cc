@@ -11,7 +11,7 @@
 
 namespace {
 
-const char* kDefaultWarehouse = "/media/extssd/research/dioph.pp/data/ib-staging";
+const char* kDefaultWarehouse = "./data/ib-staging";
 
 void Usage(const char* argv0) {
   std::fprintf(stderr,

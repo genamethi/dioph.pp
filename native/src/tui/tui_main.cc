@@ -19,7 +19,7 @@ namespace primeparts::tui {
 namespace {
 
 constexpr char kDefaultWarehouse[] =
-    "/media/extssd/research/dioph.pp/data/ib-staging";
+    "./data/ib-staging";
 
 fs::path config_presets_path() {
   const char* xdg = std::getenv("XDG_CONFIG_HOME");
