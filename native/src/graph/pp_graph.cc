@@ -987,11 +987,18 @@ int RunCompose(const Options& opt) {
   int64_t dn = 0;
   for (int32_t id : bydeg) {
     if (dn++ >= std::min<int64_t>(opt.top, 10)) break;
-    std::ostringstream ss;
-    ss << comp[id].poly;
-    std::string t = ss.str();
-    if (t.size() > 150) t = t.substr(0, 147) + "...";
-    std::printf("  nl=%d deg %-5" PRId64 " root %-8" PRId64 " -> %-12" PRId64 " %s\n",
+    auto hx = primeparts::graph::ToHermite(comp[id].poly, x);
+    std::string t;
+    bool first = true;
+    for (auto it = hx.rbegin(); it != hx.rend(); ++it) {
+      std::ostringstream cs;
+      cs << it->second;
+      if (cs.str() == "0") continue;
+      t += (first ? "" : " + ") + cs.str() + "*He" + std::to_string(it->first);
+      first = false;
+    }
+    if (t.size() > 130) t = t.substr(0, 127) + "...";
+    std::printf("  nl=%d deg %-4" PRId64 " root %-7" PRId64 " -> %-11" PRId64 " %s\n",
                 comp[id].nonlinear, comp[id].degree, comp[id].root,
                 comp[id].value, t.c_str());
   }
