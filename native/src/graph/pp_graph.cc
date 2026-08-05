@@ -826,6 +826,8 @@ struct Composite {
   int64_t root = 0;
   int64_t value = 0;
   int32_t depth = 0;
+  int64_t degree = 1;
+  int32_t nonlinear = 0;
   GiNaC::ex poly;
 };
 
@@ -885,6 +887,8 @@ int RunCompose(const Options& opt) {
         c.root = comp[id].root;
         c.value = e.p;
         c.depth = comp[id].depth + 1;
+        c.degree = comp[id].degree * e.n;
+        c.nonlinear = comp[id].nonlinear + (e.n > 1 ? 1 : 0);
         bool ov = false;
         const int64_t k = IPow(2, e.m, &ov);
         c.poly = GiNaC::expand(GiNaC::pow(comp[id].poly, e.n) +
@@ -958,6 +962,39 @@ int RunCompose(const Options& opt) {
   std::printf("  P_w(root) != terminal   : %" PRId64 "%s\n", mismatches,
               mismatches == 0 ? "  (all composites verified)" : "  (BUG)");
   std::printf("  plan %.3fs  read %.3fs\n", t_plan, t_read);
+
+  std::vector<int32_t> bydeg(comp.size());
+  for (size_t i = 0; i < comp.size(); ++i) bydeg[i] = static_cast<int32_t>(i);
+  std::sort(bydeg.begin(), bydeg.end(), [&](int32_t a, int32_t b) {
+    if (comp[a].nonlinear != comp[b].nonlinear)
+      return comp[a].nonlinear > comp[b].nonlinear;
+    if (comp[a].degree != comp[b].degree) return comp[a].degree > comp[b].degree;
+    return comp[a].depth > comp[b].depth;
+  });
+  std::map<int32_t, int64_t> nl_hist;
+  for (const auto& c : comp) ++nl_hist[c.nonlinear];
+  std::printf("\nNonlinear steps per composite (n>1 edges: count):\n ");
+  for (const auto& [k, v] : nl_hist) std::printf("  %d:%" PRId64, k, v);
+  std::printf("\n");
+  std::map<int64_t, int64_t> deg_hist;
+  for (const auto& c : comp) ++deg_hist[c.degree];
+  std::printf("\nComposite degree spectrum (degree: count):\n ");
+  for (const auto& [d, k] : deg_hist) std::printf("  %" PRId64 ":%" PRId64, d, k);
+  std::printf("\n");
+
+  std::printf("\nMost-nested composites (first %" PRId64 "):\n",
+              std::min<int64_t>(opt.top, 10));
+  int64_t dn = 0;
+  for (int32_t id : bydeg) {
+    if (dn++ >= std::min<int64_t>(opt.top, 10)) break;
+    std::ostringstream ss;
+    ss << comp[id].poly;
+    std::string t = ss.str();
+    if (t.size() > 150) t = t.substr(0, 147) + "...";
+    std::printf("  nl=%d deg %-5" PRId64 " root %-8" PRId64 " -> %-12" PRId64 " %s\n",
+                comp[id].nonlinear, comp[id].degree, comp[id].root,
+                comp[id].value, t.c_str());
+  }
 
   std::vector<int32_t> deep;
   for (size_t i = 0; i < comp.size(); ++i)

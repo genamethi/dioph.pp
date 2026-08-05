@@ -99,7 +99,8 @@ INSTALL_BINS := \
      $(BUILD_DIR)/pp \
      $(BUILD_DIR)/primeparts-catalogd \
      $(BUILD_DIR)/primeparts-tui \
-     $(BUILD_DIR)/primeparts-verify
+     $(BUILD_DIR)/primeparts-verify \
+     $(BUILD_DIR)/pp-graph
 
 build-deps:
 	./configure $(CONFIGURE_FLAGS)
@@ -128,7 +129,8 @@ all: $(BUILD_DIR)/libprimeparts_core.so \
      $(BUILD_DIR)/pp \
      $(BUILD_DIR)/primeparts-catalogd \
      $(BUILD_DIR)/primeparts-tui \
-     $(BUILD_DIR)/primeparts-verify
+     $(BUILD_DIR)/primeparts-verify \
+     $(BUILD_DIR)/pp-graph
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
