@@ -1,8 +1,8 @@
 # Chain-reduction: what the exploration established
 
 Reference implementation: `scripts/chain_dag.py` (colab branch), a Sage
-prototype validated to B=10^6. Recorded here so the findings survive compaction;
-the native port is planned in `../plans/pp_graph/05_collapse_consumer.md`.
+prototype validated to B=10^6. Recorded here so the findings survive
+compaction.
 
 ## The object
 
