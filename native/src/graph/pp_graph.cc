@@ -142,7 +142,7 @@ void Usage(FILE* out) {
       "  --warehouse DIR  warehouse root\n"
       "  --namespace NS   catalog namespace (default %s)\n"
       "  --threads N      scan/engine threads (default 8)\n"
-      "  --mode M         basis | hasse | edges (default basis)\n"
+      "  --mode M         basis | hasse | compose | edges (default basis)\n"
       "  --format F       text | dot | json (default text)\n"
       "  --top N          rows to show in text listings (default 20)\n"
       "  --help\n",
@@ -726,26 +726,30 @@ int RunHasse(const Options& opt) {
     }
   }
 
-  std::printf("pp-graph hasse (congruence refinement over hermite_basis)\n");
-  std::printf("  generator exponents n : %zu distinct, range [%" PRId64
+  const bool text = opt.format == "text";
+  if (text)
+    std::printf("pp-graph hasse (congruence refinement over hermite_basis)\n");
+  if (text)
+    std::printf("  generator exponents n : %zu distinct, range [%" PRId64
               ", %" PRId64 "]\n",
               ns.size(), ns.front(), ns.back());
-  std::printf("  moduli considered     : l-1 for l in {3..31}\n");
-  std::printf("  excluded as degenerate: ");
+  if (text)
+    std::printf("  moduli considered     : l-1 for l in {3..31}\n");
+  if (text) std::printf("  excluded as degenerate: ");
   bool any = false;
   for (size_t i = 0; i < ls.size(); ++i) {
     if (!degenerate[i]) continue;
-    std::printf("%s%" PRId64, any ? ", " : "", ls[i]);
+    if (text) std::printf("%s%" PRId64, any ? ", " : "", ls[i]);
     any = true;
   }
-  std::printf("%s\n", any ? "  (l-1 exceeds the n-range; blocks are singletons "
+  if (text) std::printf("%s\n", any ? "  (l-1 exceeds the n-range; blocks are singletons "
                             "and refine everything trivially)"
                           : "(none)");
 
-  std::printf("\n  %-4s %-5s %-8s %s\n", "l", "l-1", "blocks", "ord_l(2)");
+  if (text) std::printf("\n  %-4s %-5s %-8s %s\n", "l", "l-1", "blocks", "ord_l(2)");
   for (size_t i = 0; i < ls.size(); ++i) {
     if (degenerate[i]) continue;
-    std::printf("  %-4" PRId64 " %-5" PRId64 " %-8zu %" PRId64 "\n", ls[i],
+    if (text) std::printf("  %-4" PRId64 " %-5" PRId64 " %-8zu %" PRId64 "\n", ls[i],
                 ls[i] - 1, parts[i].size(), MultOrder(2, ls[i]));
   }
 
@@ -766,6 +770,29 @@ int RunHasse(const Options& opt) {
   int32_t matched = 0;
   const auto chains = ChainDecomposition(g, closure, &matched);
   const size_t width = g.node.size() - static_cast<size_t>(matched);
+
+  if (opt.format == "json") {
+    std::printf("{\"moduli\":[");
+    bool f = true;
+    for (size_t i = 0; i < ls.size(); ++i) {
+      if (degenerate[i]) continue;
+      std::printf("%s{\"l\":%" PRId64 ",\"blocks\":%zu}", f ? "" : ",", ls[i],
+                  parts[i].size());
+      f = false;
+    }
+    std::printf("],\"cover_edges\":%zu,\"width\":%zu,\"chains\":%zu}\n",
+                cover.size(), width, chains.size());
+    return 0;
+  }
+  if (opt.format == "dot") {
+    std::printf("digraph refinement {\n  rankdir=BT;\n  node [shape=plaintext];\n");
+    for (int32_t v = 0; v < static_cast<int32_t>(g.node.size()); ++v)
+      std::printf("  l%" PRId64 " [label=\"l=%" PRId64 "\"];\n", g.node[v], g.node[v]);
+    for (const auto& [a, b] : cover)
+      std::printf("  l%" PRId64 " -> l%" PRId64 ";\n", g.node[a], g.node[b]);
+    std::printf("}\n");
+    return 0;
+  }
 
   std::printf("\n  refinement cover edges (coarser <- finer):\n");
   for (const auto& [a, b] : cover)
@@ -788,6 +815,170 @@ int RunHasse(const Options& opt) {
       std::printf("l=%" PRId64, g.node[c[i]]);
     }
     std::printf("\n");
+  }
+  return 0;
+}
+
+struct Composite {
+  int32_t parent = -1;
+  int32_t m = 0;
+  int32_t n = 0;
+  int64_t root = 0;
+  int64_t value = 0;
+  int32_t depth = 0;
+  GiNaC::ex poly;
+};
+
+int RunCompose(const Options& opt) {
+  std::vector<Edge> edges;
+  int64_t rows = 0;
+  double t_plan = 0.0;
+  double t_read = 0.0;
+  std::string error;
+  if (!ReadEdges(opt, &edges, &rows, &t_plan, &t_read, &error)) {
+    std::fprintf(stderr, "pp-graph: %s\n", error.c_str());
+    return 1;
+  }
+  if (edges.empty()) {
+    std::fprintf(stderr, "pp-graph: no edges in window\n");
+    return 0;
+  }
+
+  std::map<int64_t, std::vector<Edge>> out;
+  std::set<int64_t> has_in;
+  std::set<int64_t> nodes;
+  for (const auto& e : edges) {
+    out[e.q].push_back(e);
+    has_in.insert(e.p);
+    nodes.insert(e.q);
+    nodes.insert(e.p);
+  }
+  std::vector<int64_t> roots;
+  for (int64_t v : nodes)
+    if (!has_in.count(v)) roots.push_back(v);
+
+  GiNaC::symbol x("x");
+  std::vector<Composite> comp;
+  std::vector<int32_t> frontier;
+  for (int64_t r : roots) {
+    Composite c;
+    c.root = r;
+    c.value = r;
+    c.poly = x;
+    comp.push_back(c);
+    frontier.push_back(static_cast<int32_t>(comp.size() - 1));
+  }
+
+  int64_t mismatches = 0;
+  const size_t kCap = 400000;
+  while (!frontier.empty() && comp.size() < kCap) {
+    std::vector<int32_t> next;
+    for (int32_t id : frontier) {
+      auto it = out.find(comp[id].value);
+      if (it == out.end()) continue;
+      for (const auto& e : it->second) {
+        if (comp.size() >= kCap) break;
+        Composite c;
+        c.parent = id;
+        c.m = e.m;
+        c.n = e.n;
+        c.root = comp[id].root;
+        c.value = e.p;
+        c.depth = comp[id].depth + 1;
+        bool ov = false;
+        const int64_t k = IPow(2, e.m, &ov);
+        c.poly = GiNaC::expand(GiNaC::pow(comp[id].poly, e.n) +
+                               GiNaC::numeric(static_cast<long>(k)));
+        const GiNaC::ex at_root =
+            c.poly.subs(x == GiNaC::numeric(static_cast<long>(c.root)));
+        if (!GiNaC::is_a<GiNaC::numeric>(at_root) ||
+            GiNaC::ex_to<GiNaC::numeric>(at_root).to_long() != c.value) {
+          ++mismatches;
+        }
+        comp.push_back(std::move(c));
+        next.push_back(static_cast<int32_t>(comp.size() - 1));
+      }
+    }
+    frontier.swap(next);
+  }
+
+  int32_t max_depth = 0;
+  std::map<int32_t, int64_t> by_depth;
+  for (const auto& c : comp) {
+    max_depth = std::max(max_depth, c.depth);
+    ++by_depth[c.depth];
+  }
+  int64_t width = 0;
+  int32_t widest = 0;
+  for (const auto& [d, k] : by_depth) {
+    if (k > width) {
+      width = k;
+      widest = d;
+    }
+  }
+  int64_t leaves = 0;
+  std::vector<char> has_child(comp.size(), 0);
+  for (const auto& c : comp)
+    if (c.parent >= 0) has_child[c.parent] = 1;
+  for (size_t i = 0; i < comp.size(); ++i)
+    if (!has_child[i]) ++leaves;
+
+  if (opt.format == "json") {
+    std::printf(
+        "{\"window\":[%" PRId64 ",%" PRId64 "],\"roots\":%zu,\"composites\":%zu,"
+        "\"cover_edges\":%zu,\"height\":%d,\"width\":%" PRId64
+        ",\"chains\":%" PRId64 ",\"subs_mismatches\":%" PRId64 "}\n",
+        opt.min_p, opt.max_p, roots.size(), comp.size(), comp.size() - roots.size(),
+        max_depth + 1, width, leaves, mismatches);
+    return 0;
+  }
+
+  if (opt.format == "dot") {
+    std::printf("digraph compose {\n  rankdir=BT;\n  node [shape=plaintext];\n");
+    for (size_t i = 0; i < comp.size() && i < 400; ++i)
+      std::printf("  c%zu [label=\"%" PRId64 "\"];\n", i, comp[i].value);
+    for (size_t i = 0; i < comp.size() && i < 400; ++i)
+      if (comp[i].parent >= 0)
+        std::printf("  c%d -> c%zu [label=\"(%d,%d)\"];\n", comp[i].parent, i,
+                    comp[i].m, comp[i].n);
+    std::printf("}\n");
+    return 0;
+  }
+
+  std::printf("pp-graph compose  window [%" PRId64 ", %" PRId64 "]\n", opt.min_p,
+              opt.max_p);
+  std::printf("  roots (no in-edge)      : %zu\n", roots.size());
+  std::printf("  composite subexpressions: %zu%s\n", comp.size(),
+              comp.size() >= kCap ? "  (capped)" : "");
+  std::printf("  cover edges (prefix)    : %zu\n", comp.size() - roots.size());
+  std::printf("  height (longest chain)  : %d\n", max_depth + 1);
+  std::printf("  width (widest level)    : %" PRId64 " at depth %d\n", width,
+              widest);
+  std::printf("  chains (root->leaf)     : %" PRId64 "\n", leaves);
+  std::printf("  P_w(root) != terminal   : %" PRId64 "%s\n", mismatches,
+              mismatches == 0 ? "  (all composites verified)" : "  (BUG)");
+  std::printf("  plan %.3fs  read %.3fs\n", t_plan, t_read);
+
+  std::vector<int32_t> deep;
+  for (size_t i = 0; i < comp.size(); ++i)
+    if (comp[i].depth == max_depth) deep.push_back(static_cast<int32_t>(i));
+  std::printf("\nDeepest composites (%zu at depth %d), shown as subexpression towers:\n",
+              deep.size(), max_depth);
+  int64_t shown = 0;
+  for (int32_t id : deep) {
+    if (shown++ >= std::min<int64_t>(opt.top, 3)) break;
+    std::vector<int32_t> path;
+    for (int32_t u = id; u >= 0; u = comp[u].parent) path.push_back(u);
+    std::reverse(path.begin(), path.end());
+    std::printf("  root %" PRId64 ":\n", comp[id].root);
+    for (int32_t u : path) {
+      std::ostringstream ss;
+      ss << comp[u].poly;
+      std::string s = ss.str();
+      if (s.size() > 78) s = s.substr(0, 75) + "...";
+      std::printf("    d=%-2d  %-14" PRId64 "  %s\n", comp[u].depth,
+                  comp[u].value, s.c_str());
+    }
   }
   return 0;
 }
@@ -823,8 +1014,9 @@ int main(int argc, char** argv) {
 
   if (opt.mode == "basis") return RunBasis(opt);
   if (opt.mode == "hasse") return RunHasse(opt);
+  if (opt.mode == "compose") return RunCompose(opt);
   if (opt.mode != "edges") {
-    std::fprintf(stderr, "unknown --mode %s (basis | hasse | edges)\n", opt.mode.c_str());
+    std::fprintf(stderr, "unknown --mode %s (basis | hasse | compose | edges)\n", opt.mode.c_str());
     return 2;
   }
 
