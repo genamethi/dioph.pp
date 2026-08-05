@@ -142,7 +142,7 @@ void Usage(FILE* out) {
       "  --warehouse DIR  warehouse root\n"
       "  --namespace NS   catalog namespace (default %s)\n"
       "  --threads N      scan/engine threads (default 8)\n"
-      "  --mode M         basis | hasse (default basis)\n"
+      "  --mode M         basis | hasse | edges (default basis)\n"
       "  --format F       text | dot | json (default text)\n"
       "  --top N          rows to show in text listings (default 20)\n"
       "  --help\n",
@@ -641,6 +641,157 @@ int RunBasis(const Options& opt) {
   return 0;
 }
 
+int64_t MultOrder(int64_t a, int64_t l) {
+  int64_t k = 1;
+  int64_t v = a % l;
+  while (v != 1) {
+    v = v * a % l;
+    ++k;
+  }
+  return k;
+}
+
+using Partition = std::set<std::set<int64_t>>;
+
+Partition CongruencePartition(const std::vector<int64_t>& ns, int64_t modulus) {
+  std::map<int64_t, std::set<int64_t>> blocks;
+  for (int64_t n : ns) blocks[n % modulus].insert(n);
+  Partition p;
+  for (auto& [r, b] : blocks) p.insert(b);
+  return p;
+}
+
+bool Refines(const Partition& a, const Partition& b) {
+  for (const auto& x : a) {
+    bool inside = false;
+    for (const auto& y : b) {
+      if (std::includes(y.begin(), y.end(), x.begin(), x.end())) {
+        inside = true;
+        break;
+      }
+    }
+    if (!inside) return false;
+  }
+  return true;
+}
+
+int RunHasse(const Options& opt) {
+  scan::ScanPlanRequest request;
+  request.select = {"m", "n"};
+  std::vector<std::string> paths;
+  double t_plan = 0.0;
+  std::string error;
+  if (!PlanPaths(opt, "hermite_basis", request, &paths, &t_plan, &error)) {
+    std::fprintf(stderr,
+                 "pp-graph: %s\n(run --mode basis first to build "
+                 "hermite_basis)\n",
+                 error.c_str());
+    return 1;
+  }
+
+  duckdb::DBConfig cfg;
+  cfg.SetOptionByName("threads", duckdb::Value::BIGINT(opt.threads));
+  duckdb::DuckDB db(nullptr, &cfg);
+  duckdb::Connection con(db);
+  auto res = con.Query("SELECT DISTINCT n FROM read_parquet(" +
+                       QuoteList(paths) + ") ORDER BY n");
+  if (res->HasError()) {
+    std::fprintf(stderr, "pp-graph: %s\n", res->GetError().c_str());
+    return 1;
+  }
+  std::vector<int64_t> ns;
+  for (auto& row : *res) ns.push_back(row.GetValue<int64_t>(0));
+  if (ns.empty()) {
+    std::fprintf(stderr, "pp-graph: hermite_basis has no rows\n");
+    return 1;
+  }
+  const int64_t n_span = ns.back() - ns.front() + 1;
+
+  static const int64_t kPrimes[] = {3, 5, 7, 11, 13, 17, 19, 23, 29, 31};
+  std::vector<int64_t> ls;
+  std::vector<Partition> parts;
+  std::vector<bool> degenerate;
+  for (int64_t l : kPrimes) {
+    ls.push_back(l);
+    parts.push_back(CongruencePartition(ns, l - 1));
+    degenerate.push_back(l - 1 > n_span);
+  }
+
+  std::vector<Edge> edges;
+  for (size_t i = 0; i < ls.size(); ++i) {
+    for (size_t j = 0; j < ls.size(); ++j) {
+      if (i == j) continue;
+      if (degenerate[i] || degenerate[j]) continue;
+      if (Refines(parts[i], parts[j])) edges.push_back(Edge{ls[j], ls[i], 0, 0});
+    }
+  }
+
+  std::printf("pp-graph hasse (congruence refinement over hermite_basis)\n");
+  std::printf("  generator exponents n : %zu distinct, range [%" PRId64
+              ", %" PRId64 "]\n",
+              ns.size(), ns.front(), ns.back());
+  std::printf("  moduli considered     : l-1 for l in {3..31}\n");
+  std::printf("  excluded as degenerate: ");
+  bool any = false;
+  for (size_t i = 0; i < ls.size(); ++i) {
+    if (!degenerate[i]) continue;
+    std::printf("%s%" PRId64, any ? ", " : "", ls[i]);
+    any = true;
+  }
+  std::printf("%s\n", any ? "  (l-1 exceeds the n-range; blocks are singletons "
+                            "and refine everything trivially)"
+                          : "(none)");
+
+  std::printf("\n  %-4s %-5s %-8s %s\n", "l", "l-1", "blocks", "ord_l(2)");
+  for (size_t i = 0; i < ls.size(); ++i) {
+    if (degenerate[i]) continue;
+    std::printf("  %-4" PRId64 " %-5" PRId64 " %-8zu %" PRId64 "\n", ls[i],
+                ls[i] - 1, parts[i].size(), MultOrder(2, ls[i]));
+  }
+
+  if (edges.empty()) {
+    std::printf("\n  no refinement relations: the moduli form an antichain\n");
+    return 0;
+  }
+
+  const Poset g = BuildPoset(edges);
+  const auto order = TopoOrder(g);
+  if (order.size() != g.node.size()) {
+    std::fprintf(stderr, "pp-graph: refinement relation is cyclic\n");
+    return 1;
+  }
+  const auto level = MirskyLevels(g, order);
+  const Closure closure = StrictReachability(g, order);
+  const auto cover = CoverRelation(g, closure);
+  int32_t matched = 0;
+  const auto chains = ChainDecomposition(g, closure, &matched);
+  const size_t width = g.node.size() - static_cast<size_t>(matched);
+
+  std::printf("\n  refinement cover edges (coarser <- finer):\n");
+  for (const auto& [a, b] : cover)
+    std::printf("    l=%-3" PRId64 "  <-  l=%" PRId64 "\n", g.node[a],
+                g.node[b]);
+
+  std::printf("\n  height %zu   width (independent moduli) %zu   chains %zu%s\n",
+              level.empty() ? 0 : *std::max_element(level.begin(), level.end()) + 1,
+              width, chains.size(),
+              chains.size() == width ? "  (= width, minimum)" : "  (NOT minimum)");
+
+  std::vector<std::vector<int32_t>> sorted = chains;
+  std::sort(sorted.begin(), sorted.end(),
+            [](const auto& a, const auto& b) { return a.size() > b.size(); });
+  std::printf("\n  chains:\n");
+  for (const auto& c : sorted) {
+    std::printf("    ");
+    for (size_t i = 0; i < c.size(); ++i) {
+      if (i) std::printf(" < ");
+      std::printf("l=%" PRId64, g.node[c[i]]);
+    }
+    std::printf("\n");
+  }
+  return 0;
+}
+
 void EmitDot(const Poset& g,
              const std::vector<std::pair<int32_t, int32_t>>& cover,
              const std::vector<int32_t>& level) {
@@ -671,8 +822,9 @@ int main(int argc, char** argv) {
   }
 
   if (opt.mode == "basis") return RunBasis(opt);
-  if (opt.mode != "hasse") {
-    std::fprintf(stderr, "unknown --mode %s (basis | hasse)\n", opt.mode.c_str());
+  if (opt.mode == "hasse") return RunHasse(opt);
+  if (opt.mode != "edges") {
+    std::fprintf(stderr, "unknown --mode %s (basis | hasse | edges)\n", opt.mode.c_str());
     return 2;
   }
 
