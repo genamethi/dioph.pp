@@ -77,8 +77,8 @@ VERIFY_MAIN_OBJ := $(BUILD_DIR)/verify_main.o
 TEST_SUITE_BIN := $(BUILD_DIR)/primeparts-tests
 TEST_SUITE_OBJS := $(BUILD_DIR)/core_test.o $(BUILD_DIR)/writer_test.o \
                    $(BUILD_DIR)/scan_planner_test.o $(BUILD_DIR)/partition_stats_test.o \
-                   $(BUILD_DIR)/plan_store_test.o $(BUILD_DIR)/pp_graph_store_test.o
-TEST_SUITE_LIBOBJS := $(WRITER_OBJ) $(SCHEMAS_OBJ) $(SCAN_OBJS) $(PARTITION_STATS_OBJ) $(PLAN_STORE_OBJ) $(PLAN_STATUS_OBJ) $(CORE_OBJ) $(BUILD_DIR)/pp_graph_store.o
+                   $(BUILD_DIR)/plan_store_test.o
+TEST_SUITE_LIBOBJS := $(WRITER_OBJ) $(SCHEMAS_OBJ) $(SCAN_OBJS) $(PARTITION_STATS_OBJ) $(PLAN_STORE_OBJ) $(PLAN_STATUS_OBJ) $(CORE_OBJ)
 
 E2E_BIN := $(BUILD_DIR)/primeparts-e2e
 E2E_OBJ := $(BUILD_DIR)/e2e_test.o
@@ -269,9 +269,6 @@ $(BUILD_DIR)/primeparts-tui: $(BUILD_DIR)/tui_main.o $(BUILD_DIR)/tui_runquery.o
 $(BUILD_DIR)/pp: $(BUILD_DIR)/pp_main.o $(BUILD_DIR)/lua_query_module.o $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(CORE_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(LUA_LDLIBS) -lsqlite3 -pthread -o $@
 
-$(BUILD_DIR)/pp_graph_store_test.o: tests/pp_graph_store_test.cc include/primeparts/graph/pp_graph_store.h | $(BUILD_DIR)
-	$(CXX) $(GTEST_CPPFLAGS) $(CPPFLAGS) $(GINAC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
-
 $(BUILD_DIR)/%_test.o: tests/%_test.cc | $(BUILD_DIR)
 	$(CXX) $(GTEST_CPPFLAGS) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
@@ -300,16 +297,6 @@ $(SESSION_OBJ): src/client/session.cc include/primeparts/client/session.h includ
 
 GINAC_CPPFLAGS := $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --cflags ginac)
 GINAC_LDLIBS := $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --libs ginac)
-GRAPH_EXP_OBJ := $(BUILD_DIR)/pp_graph_exp.o
-
-$(GRAPH_EXP_OBJ): src/graph/pp_graph_exp.cc include/primeparts/catalog/rest_scan_plan.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/scan/scan_plan.h include/primeparts/scan/scan_planner.h include/primeparts/source_scan.h | $(BUILD_DIR)
-	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(GINAC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
-
-$(BUILD_DIR)/pp-graph-exp: $(GRAPH_EXP_OBJ) $(SESSION_OBJ) $(REST_SCAN_PLAN_OBJ) $(PLAN_STATUS_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
-	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(GINAC_LDLIBS) -lsqlite3 -pthread -o $@
-
-pp-graph-exp: $(BUILD_DIR)/pp-graph-exp
-.PHONY: pp-graph-exp
 
 PP_FIXTURE_OBJ := $(BUILD_DIR)/pp_fixture_warehouse.o
 
@@ -322,17 +309,3 @@ $(BUILD_DIR)/pp-fixture-warehouse: $(PP_FIXTURE_OBJ) $(WRITER_OBJ) $(SCHEMAS_OBJ
 pp-fixture-warehouse: $(BUILD_DIR)/pp-fixture-warehouse
 .PHONY: pp-fixture-warehouse
 
-PP_GRAPH_OBJ := $(BUILD_DIR)/pp_graph.o
-PP_GRAPH_STORE_OBJ := $(BUILD_DIR)/pp_graph_store.o
-
-$(PP_GRAPH_STORE_OBJ): src/graph/pp_graph_store.cc include/primeparts/graph/pp_graph_store.h | $(BUILD_DIR)
-	$(CXX) $(CPPFLAGS) $(GINAC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
-
-$(PP_GRAPH_OBJ): src/graph/pp_graph.cc include/primeparts/graph/pp_graph_store.h include/primeparts/catalog/rest_scan_plan.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/scan/scan_plan.h include/primeparts/scan/scan_planner.h include/primeparts/client/session.h include/primeparts/query/materialize.h | $(BUILD_DIR)
-	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(DUCKDB_CPPFLAGS) $(GINAC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
-
-$(BUILD_DIR)/pp-graph: $(PP_GRAPH_OBJ) $(PP_GRAPH_STORE_OBJ) $(SESSION_OBJ) $(REST_SCAN_PLAN_OBJ) $(PLAN_STATUS_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(PP_ICEBERG_REST_OBJ) $(PP_COMMIT_OBJ) $(PARTITION_STATS_OBJ) $(PP_LMDB_STORE_OBJ) $(BUILD_DIR)/materialize.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(LMDB_LIB)
-	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $(DUCKDB_RPATH) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(DUCKDB_LDLIBS) $(GINAC_LDLIBS) -lsqlite3 -pthread -o $@
-
-pp-graph: $(BUILD_DIR)/pp-graph
-.PHONY: pp-graph
