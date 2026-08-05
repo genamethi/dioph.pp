@@ -13,6 +13,8 @@ SUDO=
 SANITIZE=
 SANITIZE_VENDOR=
 VENDOR_FLINT=
+FORCE=
+DISTCLEAN=
 for arg in "$@"; do
   case "$arg" in
     --sanitize) SANITIZE=1 ;;
@@ -21,12 +23,25 @@ for arg in "$@"; do
       SANITIZE_VENDOR=1
       ;;
     --vendor-flint) VENDOR_FLINT=1 ;;
+    --force) FORCE=1 ;;
+    --distclean) DISTCLEAN=1 ;;
     *)
-      echo "unknown option: $arg (supported: --sanitize, --sanitize-vendor, --vendor-flint)"
+      echo "unknown option: $arg (supported: --sanitize, --sanitize-vendor, --vendor-flint, --force, --distclean)"
       exit 1
       ;;
   esac
 done
+
+if [ -n "$DISTCLEAN" ]; then
+  rm -rf "$VENDOR/arrow/cpp/build" "$VENDOR/iceberg-cpp/build" "$ROOT/build" "$ROOT/config.mk"
+  if [ -f "$VENDOR/flint/Makefile" ]; then
+    make -C "$VENDOR/flint" distclean >/dev/null 2>&1 || true
+  fi
+  find "$VENDOR/lmdb" -name '*.o' -delete 2>/dev/null || true
+  echo "distclean: removed vendor build trees, $ROOT/build and config.mk"
+  echo "prefix artifacts under $PREFIX are untouched; rerun with --force to overwrite them"
+  exit 0
+fi
 
 have_pc() {
   command -v pkg-config >/dev/null 2>&1 || return 1
@@ -122,6 +137,28 @@ vendor_sync() {
     git -C "$REPO" submodule update --init -- "native/vendor/$1"
 }
 
+prefix_stamp() { echo "$PREFIX/lib/.pp-$1.sha"; }
+
+prefix_matches_vendor() {
+  [ -e "$VENDOR/$1/.git" ] || return 0
+  [ "$(cat "$(prefix_stamp "$1")" 2>/dev/null || true)" = \
+    "$(git -C "$VENDOR/$1" rev-parse HEAD)" ]
+}
+
+needs_install() {
+  [ -z "$FORCE" ] || return 0
+  [ -f "$2" ] || return 0
+  if prefix_matches_vendor "$1"; then return 1; fi
+  echo "$1 in $PREFIX does not match the vendored pin; rebuilding"
+  return 0
+}
+
+stamp_prefix() {
+  [ -e "$VENDOR/$1/.git" ] || return 0
+  git -C "$VENDOR/$1" rev-parse HEAD |
+    $SUDO tee "$(prefix_stamp "$1")" >/dev/null
+}
+
 vendor_sync lmdb
 
 SPEC_SM="$REPO/docs/vendor/iceberg"
@@ -139,7 +176,7 @@ else
   exit 1
 fi
 
-if [ -n "$VENDOR_FLINT" ] && [ ! -f "$PREFIX/lib/pkgconfig/flint.pc" ]; then
+if [ -n "$VENDOR_FLINT" ] && needs_install flint "$PREFIX/lib/pkgconfig/flint.pc"; then
   vendor_sync flint
   cd "$VENDOR/flint"
   [ -x configure ] || ./bootstrap.sh
@@ -147,6 +184,7 @@ if [ -n "$VENDOR_FLINT" ] && [ ! -f "$PREFIX/lib/pkgconfig/flint.pc" ]; then
   make -j "$JOBS"
   $SUDO make install
   cd "$ROOT"
+  stamp_prefix flint
 elif have_pc flint; then
   echo "flint present"
 else
@@ -202,7 +240,7 @@ else
   echo "cpp-httplib header-only present"
 fi
 
-if [ ! -f "$PREFIX/lib/libarrow.a" ]; then
+if needs_install arrow "$PREFIX/lib/libarrow.a"; then
   vendor_sync arrow
   cd "$VENDOR/arrow/cpp"
   mkdir -p build
@@ -214,6 +252,7 @@ if [ ! -f "$PREFIX/lib/libarrow.a" ]; then
   ninja -j "$JOBS"
   $SUDO cmake --install .
   cd "$ROOT"
+  stamp_prefix arrow
 else
   echo "arrow static present"
 fi
@@ -224,7 +263,7 @@ if [ ! -f "$PREFIX/include/arrow-gtest/gtest/gtest.h" ]; then
 fi
 echo "arrow-gtest bundle present"
 
-if [ ! -f "$PREFIX/lib/libiceberg_sql_catalog.a" ]; then
+if needs_install iceberg-cpp "$PREFIX/lib/libiceberg_sql_catalog.a"; then
   vendor_sync iceberg-cpp
   cd "$VENDOR/iceberg-cpp"
   cmake -S . -B build -G Ninja \
@@ -236,6 +275,7 @@ if [ ! -f "$PREFIX/lib/libiceberg_sql_catalog.a" ]; then
   cmake --build build -j "$JOBS"
   $SUDO cmake --install build
   cd "$ROOT"
+  stamp_prefix iceberg-cpp
 else
   echo "iceberg present"
 fi
