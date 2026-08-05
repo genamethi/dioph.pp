@@ -91,7 +91,7 @@ elif command -v apt-get >/dev/null 2>&1; then
 
   PKGS="build-essential pkgconf cmake ninja-build git curl tar unzip \
 libboost-dev libgmp-dev libmpfr-dev libprimesieve-dev libprimecount-dev \
-libsqlite3-dev libssl-dev libreadline-dev libginac-dev \
+libsqlite3-dev libssl-dev libreadline-dev libginac-dev nlohmann-json3.12-dev \
 zlib1g-dev libzstd-dev libbz2-dev libbrotli-dev"
 
   deb_have libcurl4-openssl-dev || deb_have libcurl4-gnutls-dev || PKGS="$PKGS libcurl4-openssl-dev"
@@ -275,20 +275,27 @@ if [ ! -f "$PREFIX/include/arrow-gtest/gtest/gtest.h" ]; then
 fi
 echo "arrow-gtest bundle present"
 
-PREFIX_NLOHMANN=$(nlohmann_version "$PREFIX/include/nlohmann/detail/abi_macros.hpp")
-if [ -n "$PREFIX_NLOHMANN" ]; then
-  ICEBERG_NLOHMANN_JSON_URL="https://github.com/nlohmann/json/releases/download/v$PREFIX_NLOHMANN/json.tar.xz"
-  export ICEBERG_NLOHMANN_JSON_URL
-  FETCHED_NLOHMANN=$(nlohmann_version \
-    "$VENDOR/iceberg-cpp/build/_deps/nlohmann_json-src/include/nlohmann/detail/abi_macros.hpp")
-  if [ -n "$FETCHED_NLOHMANN" ] && [ "$FETCHED_NLOHMANN" != "$PREFIX_NLOHMANN" ]; then
-    echo "iceberg build tree fetched nlohmann-json $FETCHED_NLOHMANN, prefix has $PREFIX_NLOHMANN; discarding it"
-    rm -rf "$VENDOR/iceberg-cpp/build"
-  fi
+NLOHMANN_VERSION=$(nlohmann_version "$PREFIX/include/nlohmann/detail/abi_macros.hpp")
+[ -n "$NLOHMANN_VERSION" ] ||
+  NLOHMANN_VERSION=$(nlohmann_version /usr/include/nlohmann/detail/abi_macros.hpp)
+[ -n "$NLOHMANN_VERSION" ] || {
+  echo "nlohmann-json headers not found in $PREFIX/include or /usr/include"
+  exit 1
+}
+echo "nlohmann-json $NLOHMANN_VERSION present"
+
+PREFIX_NLOHMANN="$NLOHMANN_VERSION"
+ICEBERG_NLOHMANN_JSON_URL="https://github.com/nlohmann/json/releases/download/v$NLOHMANN_VERSION/json.tar.xz"
+export ICEBERG_NLOHMANN_JSON_URL
+FETCHED_NLOHMANN=$(nlohmann_version \
+  "$VENDOR/iceberg-cpp/build/_deps/nlohmann_json-src/include/nlohmann/detail/abi_macros.hpp")
+if [ -n "$FETCHED_NLOHMANN" ] && [ "$FETCHED_NLOHMANN" != "$NLOHMANN_VERSION" ]; then
+  echo "iceberg build tree fetched nlohmann-json $FETCHED_NLOHMANN, want $NLOHMANN_VERSION; discarding it"
+  rm -rf "$VENDOR/iceberg-cpp/build"
 fi
 
 if needs_install iceberg-cpp "$PREFIX/lib/libiceberg_sql_catalog.a"; then
-  [ -z "$PREFIX_NLOHMANN" ] || echo "building iceberg against nlohmann-json $PREFIX_NLOHMANN"
+  echo "building iceberg against nlohmann-json $NLOHMANN_VERSION"
   vendor_sync iceberg-cpp
   cd "$VENDOR/iceberg-cpp"
   cmake -S . -B build -G Ninja \
