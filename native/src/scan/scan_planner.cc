@@ -196,24 +196,72 @@ bool BuildAndPlan(const std::shared_ptr<iceberg::TableMetadata>& metadata,
                   std::shared_ptr<iceberg::Schema>* projected,
                   std::vector<std::shared_ptr<iceberg::FileScanTask>>* tasks,
                   std::string* error) {
-  auto builder_r = iceberg::TableScanBuilder<ScanType>::Make(metadata, io);
-  if (!builder_r.has_value()) {
-    if (error) *error = "TableScanBuilder::Make: " + builder_r.error().message;
+  iceberg::internal::TableScanContext context;
+  context.selected_columns = request.select;
+  context.case_sensitive = request.case_sensitive;
+  if (request.filter) context.filter = request.filter;
+  if constexpr (std::is_same_v<ScanType, iceberg::IncrementalAppendScan>) {
+    auto to_r = metadata->SnapshotById(*request.end_snapshot_id);
+    if (!to_r.has_value()) {
+      if (error) *error = "SnapshotById: " + to_r.error().message;
+      return false;
+    }
+    context.from_snapshot_id = *request.start_snapshot_id;
+    context.from_snapshot_id_inclusive = false;
+    context.to_snapshot_id = *request.end_snapshot_id;
+  } else if (request.snapshot_id) {
+    auto snapshot_r = metadata->SnapshotById(*request.snapshot_id);
+    if (!snapshot_r.has_value()) {
+      if (error) *error = "SnapshotById: " + snapshot_r.error().message;
+      return false;
+    }
+    context.snapshot_id = *request.snapshot_id;
+  }
+
+  std::shared_ptr<iceberg::Schema> scan_schema;
+  if (context.snapshot_id.has_value()) {
+    auto snapshot_r = metadata->SnapshotById(*context.snapshot_id);
+    if (!snapshot_r.has_value()) {
+      if (error) *error = "SnapshotById: " + snapshot_r.error().message;
+      return false;
+    }
+    const int32_t schema_id = snapshot_r.value()->schema_id.value_or(
+        iceberg::Schema::kInitialSchemaId);
+    auto schema_r = metadata->SchemaById(schema_id);
+    if (!schema_r.has_value()) {
+      if (error) *error = "TableMetadata::SchemaById: " + schema_r.error().message;
+      return false;
+    }
+    scan_schema = schema_r.value();
+  } else {
+    auto schema_r = metadata->Schema();
+    if (!schema_r.has_value()) {
+      if (error) *error = "TableMetadata::Schema: " + schema_r.error().message;
+      return false;
+    }
+    scan_schema = schema_r.value();
+  }
+
+  if (!stats_names.empty()) {
+    context.return_column_stats = true;
+    for (const auto& name : stats_names) {
+      auto field_r = scan_schema->FindFieldByName(name);
+      if (!field_r.has_value() || !field_r.value().has_value()) {
+        if (error) *error = "cannot find stats column: " + name;
+        return false;
+      }
+      context.columns_to_keep_stats.insert(field_r.value().value().get().field_id());
+    }
+  }
+
+  if (auto status = context.Validate(); !status.has_value()) {
+    if (error) *error = "TableScanContext::Validate: " + status.error().message;
     return false;
   }
-  auto builder = std::move(builder_r.value());
-  builder->Select(request.select).CaseSensitive(request.case_sensitive);
-  if (!stats_names.empty()) builder->IncludeColumnStats(stats_names);
-  if (request.filter) builder->Filter(request.filter);
-  if constexpr (std::is_same_v<ScanType, iceberg::IncrementalAppendScan>) {
-    builder->FromSnapshot(*request.start_snapshot_id, false)
-        .ToSnapshot(*request.end_snapshot_id);
-  } else {
-    if (request.snapshot_id) builder->UseSnapshot(*request.snapshot_id);
-  }
-  auto scan_r = builder->Build();
+
+  auto scan_r = ScanType::Make(metadata, scan_schema, io, std::move(context));
   if (!scan_r.has_value()) {
-    if (error) *error = "TableScanBuilder::Build: " + scan_r.error().message;
+    if (error) *error = "TableScan::Make: " + scan_r.error().message;
     return false;
   }
   auto scan = std::move(scan_r.value());
