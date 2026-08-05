@@ -567,6 +567,14 @@ new mechanism.
    The comparison between k values is therefore a statement about AP coverage,
    not about magnitude.
 
+   [RETRACTED 2026-08-05, see the signature-structure entry below. The second
+   sentence above was written from three hand-picked primes and never tested.
+   Measured: the AP is a property of the ELIGIBLE set, which is forced by l=3
+   and is the same for every prime in a residue class; the surviving signature
+   inside it is statistically indistinguishable from a random subset. "High-k
+   is a near-complete AP" is true only in the trivial sense that high-k fills
+   its eligible set. Provenance note: this claim was mine, not an input.]
+
 RESOLVED at 11e9 (below). The residual spread is not "other moduli": it is the
 truncation of the removed arithmetic progression against the finite m-range.
 
@@ -645,3 +653,114 @@ partition rows). Single pass over primes.p,k grouped by (p mod 7, floor(log2 p))
    variance 2.19294 -> 2.23409, dispersion 1.164 -> 1.188. The variance grows
    because the sample spans more octaves and each octave contributes its own
    class-conditional means; the mixture widens even though lambda is flat.
+
+
+2026-08-05  Signature structure: the He0 coefficient set of a prime
+--------------------------------------------------------------------
+
+Measured on the 11e9-prime warehouse (p <= 278,401,257,863). For n=1 the
+generator is g_m = 1*He1 + 2^m*He0 with the He1 coefficient invariably 1, so the
+signature of p is the set S(p) = {2^m : p - 2^m prime}. This entry tests what
+shape S(p) actually has. It corrects the untested claim in section 5 of the
+k-distribution entry above.
+
+1. S(p) LIES IN A GEOMETRIC PROGRESSION OF RATIO 4 -- EXACTLY
+
+   All 20,693,695,583 partition rows, by (p mod 3, m parity):
+
+       p=1 mod 3   m odd    10,535,942,413   50.914%
+       p=1 mod 3   m even               91
+       p=2 mod 3   m even   10,157,753,007   49.086%
+       p=2 mod 3   m odd                72
+
+   163 exceptions in 20.7e9 rows, all of them q=3: 3 | p - 2^m forces q^n = 3^n,
+   so p = 3^n + 2^m is the only escape. Otherwise
+
+       p = 1 mod 3   He0 in {2, 8, 32, 128, ...}
+       p = 2 mod 3   He0 in {4, 16, 64, 256, ...}
+
+   The ratio 4 = 2^ord_3(2). Each further obstruction l removes a coset of a GP
+   of ratio 2^ord_l(2). This is the multiplicative reading of the Lambda_p AP.
+
+2. OCCUPANCY INSIDE THE GP IS FLAT, WITH A TOP-INDEX PREMIUM
+
+   Octave M=37, p=1 mod 3, 2.64e9 primes, P(m in S) per index:
+
+       m <= 31    0.101448  (flat to 5 decimals)
+       m = 33     0.101611   +0.2%
+       m = 35     0.102198   +0.7%
+       m = 37     0.107363   +5.8%
+
+   Against 2*C_2/ln(p - 2^m) the ratio is 2.0008 at every m. That 2 is the
+   (l-1)/(l-2) singular-series factor at l=3 induced by conditioning on the
+   residue class -- a direct measurement of it. The m=37 premium is the same
+   effect that drives the residual monotonicity in the l=7 entry above, here
+   measured rather than inferred.
+
+3. THE SURVIVING SET IS NOT AN AP (RETRACTION)
+
+   Fraction of signatures forming an exact AP, versus a uniform random k-subset
+   of the eligible set. 2.26e6 primes in a window at 2^37:
+
+       k=3   0.08829  null 0.085843   ratio 1.03
+       k=5   0.00397  null 0.003380   ratio 1.17
+       k=7   0.00073  null 0.000477   ratio 1.53
+       k>=8  0        null ~2e-4      ratio 0
+
+   Null. The AP structure is entirely in the eligible set; what survives inside
+   it behaves like a random subset. So "high-k = near-complete AP" says only
+   "high-k fills its eligible set", which is a restatement of k.
+
+4. THE TAIL IS THE REAL STRUCTURE
+
+   Observed / Binomial(19, 0.1015) at M=37:
+
+       k=0    1.31       k=10      33.2
+       k=2    0.85       k=13     424
+       k=7    3.94       k=16   17252
+
+   Only 7 primes reach k=16 in 11e9; independence predicts 2e-4 of them.
+
+5. MECHANISM: EVEN-ORDER OBSTRUCTIONS ARE FREE HALF THE TIME
+
+   Obstruction load from 5 <= l <= 43, by k:
+
+       k     count   eligible   killed   survivors
+       1    761712    18.483    12.944      5.539
+       4    228987    18.535     8.448     10.087
+       8      5297    18.618     4.022     14.596
+      12         7    18.714     1.429     17.286
+
+   The seven k=16 primes:
+
+       128583586759  elig 19  killed 0        184518828679  elig 19  killed 0
+       150645643069  elig 19  killed 0        217034567671  elig 19  killed 2
+       171915905929  elig 19  killed 0        275472876047  elig 18  killed 1
+       175843304423  elig 18  killed 0
+
+   Five have zero obstructions from every odd l up to 43. The reason is a parity
+   coupling: l=5 has ord_5(2)=4 and <2> = all of (Z/5)*, so l=5 obstructs EVERY
+   p -- but it kills m = j mod 4, and when j has the parity l=3 already killed,
+   it costs nothing. Same free branch at l=17 (ord 8), 13 (ord 12), 43 (ord 14),
+   41 (ord 20).
+
+       l=3 picks the parity. Every later l with even ord_l(2) is free with
+       probability ~1/2. A k=16 prime took the free branch at all of them.
+
+   Concrete signatures:
+
+       p=128583586759  k=16  holes {19,27}
+         S = 1,3,5,7,9,11,13,15,17,21,23,25,29,31,33,35
+       p=175843304423  k=16  holes {4,18}          (p=2 mod 3, even GP)
+         S = 2,6,8,10,12,14,16,20,22,24,26,28,30,32,34,36
+
+       50 apart in value:
+       p=128583586903  k=0   S = {}
+       p=128583586877  k=1   S = {30}
+       p=128583586853  k=2   S = {4,32}
+       p=128583586907  k=4   S = {2,10,18,26}
+
+6. n >= 2 IS NEGLIGIBLE
+
+   73,964 rows of 20.69e9 = 0.00036%, max n = 23. The one-parameter family
+   g_m = He1 + 2^m*He0 is essentially the whole object at this scale.
