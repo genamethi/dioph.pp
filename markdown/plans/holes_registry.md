@@ -32,11 +32,10 @@ competing constraints to be met together, not traded off.
 - `vendor/` untouched — no patches to vendored sources. Build flags and CMake
   options the vendored trees expose are NOT patches and are in scope.
 - Deleted capability is deleted. Every phase boundary compiles.
-- pp-graph does not mutate the source tables (`primes`, `partitions`); it
-  creates/replaces its own derived tables (`primes_k0`, `chain_words`,
-  `node_classes`) via the standard IRC write path (`createTable`/`updateTable`),
-  as `generate` and `MaterializeIntColumns` already do. Merge-to-`tui-query` calls
-  stay user-only.
+- Consumers do not mutate the source tables (`primes`, `partitions`); they
+  create/replace their own derived tables via the standard IRC write path
+  (`createTable`/`updateTable`), as `generate` and `MaterializeIntColumns`
+  already do. Merge-to-`tui-query` calls stay user-only.
 - Hole entries document what is missing only. Resolutions live in the separate
   section at the end. Unowned → `owner: unassigned`.
 
@@ -49,29 +48,6 @@ callers is itself a hole.
 
 Before closing any hole, check whether a passing test asserts it. Spec-correct
 assertions stay; capability assertions retire with their holes.
-
-## decisions of record
-
-| date | decision |
-|---|---|
-| 2026-07-18 | `use-snapshot-schema`: honor `true`; refuse `false` loudly rather than silently resolving the wrong schema |
-| 2026-07-18 | `/v1/config` `endpoints` derived from the router, never hand-maintained |
-| 2026-07-18 | plan routes: 406 on `planTableScan` only; typed 404s elsewhere |
-| 2026-07-18 | `min-rows-requested` is a planning early-stop counted against *proven* row counts only |
-| 2026-07-18 | plan-level residual stays **complete**; the key window is a hint a consumer may decline |
-| 2026-07-18 | `ScanPlan.key_lo/key_hi` retained, carried as `iceberg::Literal` |
-| 2026-07-22 | producer stat-bounds generalized to `iceberg::Literal` (int/long/string): `BatchColumnBounds` returns typed literals and handles utf8, the running accumulator is `optional<pair<Literal,Literal>>`, `TypedLiteral` removed. Unlocks string-column derived tables (e.g. `chain_words`) that record bounds, so the expressions interface can plan-scan them |
-| 2026-07-22 | catalogd binds `:port` with `SO_REUSEADDR` only, not `SO_REUSEPORT` (`svr.set_socket_options`, overriding cpp-httplib's default). `SO_REUSEPORT` let a second instance silently co-bind the same port; the kernel round-robined connections between two processes with **separate in-memory plan stores**, so a plan submitted to one 404'd (`NoSuchPlanIdException`) when polled on the other. A second instance now fails to bind (`EADDRINUSE`) loudly instead |
-| 2026-07-18 | **server-side planning: implement in full** — all four routes plus plan-id lifecycle, flipping `scan-planning-mode` to `server`. Next branch. |
-| 2026-07-18 | `createTable`: the server ensures the table location exists, expressed so it is a no-op where directories are not a concept |
-| 2026-07-18 | existing-table declaration: **REST-only**, no local tool |
-| 2026-07-18 | the server owns catalog and metadata; the **data layer is not its purview**, so server-side planning never opens a parquet file |
-| 2026-07-18 | planning wire shape is **spec-only** — no namespaced extension; splits are re-derivable from `split-offsets` plus the complete residual |
-| 2026-07-18 | `plan-tasks` are emitted above a configurable batch size, so `fetchScanTasks` is a live route rather than a permanent 404 |
-| 2026-07-18 | planning is **genuinely async**; `planTableScan` always answers `submitted`, never racing to `completed` |
-| 2026-07-18 | cancellation has teeth only against planning still in flight; against a finished plan it is advisory |
-| 2026-07-18 | a cancelled plan-id stays answerable, because the spec's `cancelled` status requires it |
-| 2026-07-18 | `scan-planning-mode` is configurable and **read by the client**, not a constant |
 
 ## open holes
 
@@ -181,20 +157,19 @@ One site remains, behind the interface.
 - parquet **footer** statistics are not explicitly controlled. `ParquetWriterProperties`
   (`writer.cc:59-73`) sets compression/pagesize/row-group/delta only and leaves
   statistics to arrow's default, which emits min/max for int columns but not for
-  utf8 (verified: `parquet_metadata()` on `chain_words` shows stats on
-  `word_id`/`degree`, null on `skeleton`/`translations`). This is the *row-group*
+  utf8 (verified with `parquet_metadata()` on a derived table: stats present on
+  its int columns, null on its string columns). This is the *row-group*
   pruning layer, distinct from the Iceberg *manifest* bounds that `stat_columns`
   drives (those ARE written for strings via `BatchColumnBounds`). No consumer is
   affected today because `SelectSplits` row-group pruning is int/long-only
   (`scan_planner.cc:383-411`); it becomes reachable if string row-group pruning is
   wanted — filed-by pp_graph 05 (2026-07-24) — owner: unassigned
 - manifest string bounds are **lexicographic**, so bounds on a JSON-encoded column
-  are semantically inert. `chain_words.skeleton` bounds come out `lower='[10]'`,
-  `upper='[]'` (because `']' > digits`), which prune on nothing meaningful (not
-  degree, not length). A range predicate on such a column cannot use its bounds.
-  This is intrinsic to storing structured values as strings — the fix is typing
-  the column (`skeleton_id int32` + dictionary; flat `A0,C1..C4` for translations),
-  not a stats change — filed-by pp_graph 05 (2026-07-24) — owner: pp-graph
+  are semantically inert. A JSON-encoded integer list comes out `lower='[10]'`,
+  `upper='[]'` (because `']' > digits`), which prunes on nothing meaningful. A
+  range predicate on such a column cannot use its bounds. This is intrinsic to
+  storing structured values as strings — the fix is typing the column, not a
+  stats change — (2026-07-24) — owner: unassigned
 
 **read-path capability**
 
