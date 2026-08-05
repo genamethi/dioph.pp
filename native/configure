@@ -126,7 +126,7 @@ vendor_sync lmdb
 
 SPEC_SM="$REPO/docs/vendor/iceberg"
 if [ ! -e "$SPEC_SM/.git" ]; then
-  git -C "$REPO" submodule update --init --depth 1 -- docs/vendor/iceberg
+  git -C "$REPO" submodule update --init -- docs/vendor/iceberg
 fi
 if [ -e "$SPEC_SM/.git" ] && [ "$(git -C "$SPEC_SM" config core.sparseCheckout)" != "true" ]; then
   git -C "$SPEC_SM" sparse-checkout init --cone

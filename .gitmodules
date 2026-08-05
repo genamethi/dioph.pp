@@ -8,25 +8,21 @@
 	path = native/vendor/lmdb
 	url = https://github.com/LMDB/lmdb
 	branch = mdb.master3
-	shallow = true
 
 [submodule "native/vendor/iceberg-cpp"]
 	path = native/vendor/iceberg-cpp
 	url = https://github.com/apache/iceberg-cpp
 	branch = main
-	shallow = true
 
 [submodule "native/vendor/arrow"]
 	path = native/vendor/arrow
 	url = https://github.com/apache/arrow
 	branch = main
-	shallow = true
 
 [submodule "native/vendor/flint"]
 	path = native/vendor/flint
 	url = https://github.com/flintlib/flint
 	branch = main
-	shallow = true
 
 [submodule "iceberg-spec"]
 	path = docs/vendor/iceberg
