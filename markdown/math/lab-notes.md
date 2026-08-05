@@ -567,6 +567,81 @@ new mechanism.
    The comparison between k values is therefore a statement about AP coverage,
    not about magnitude.
 
-OPEN: the residual spread among the low classes at l=7 (1.5256 / 1.4854 /
-1.5106) exceeds sampling error at 1e9 and is presumably second-order structure
-from the other moduli. Recheck at 11e9.
+RESOLVED at 11e9 (below). The residual spread is not "other moduli": it is the
+truncation of the removed arithmetic progression against the finite m-range.
+
+
+2026-08-05  The l=7 low-class residual is an m-range truncation effect
+------------------------------------------------------------------------
+
+Measured on the 11e9-prime warehouse (max p = 278,401,257,863; 20.69e9
+partition rows). Single pass over primes.p,k grouped by (p mod 7, floor(log2 p)).
+
+    N = 11e9    mean k = 1.881245    var = 2.234091    dispersion = 1.1876
+
+    r7   n              mean k     sd        SE
+     1   1,833,329,013  1.523355   1.26761   3.0e-05   in <2>
+     2   1,833,337,211  1.478129   1.24246   2.9e-05   in <2>
+     4   1,833,327,070  1.513487   1.26314   3.0e-05   in <2>
+     3   1,833,339,917  2.257478   1.61328   3.8e-05
+     5   1,833,333,859  2.257510   1.61326   3.8e-05
+     6   1,833,332,929  2.257509   1.61327   3.8e-05
+
+    low/high ratio 0.666663 vs 2/3 = 0.666667  (diff -4.0e-06)
+
+1. THE HIGH CLASSES HAVE NO RESIDUAL
+
+   {3,5,6} agree to 2.2575 across all three, within +-0.6 SE of their common
+   mean. They are outside <2> mod 7, so no AP is removed and there is nothing
+   to truncate. The residual lives only where an obstruction exists. This alone
+   rules out an explanation from the other moduli, which act on both halves.
+
+2. FIRST ORDER: HOW MANY m THE AP TAKES OUT OF [1,M]
+
+   p == 2^j mod 7 kills exactly m == j mod 3. With M = floor(log2 p) the
+   candidate range is m in [1,M], so the kill count is
+
+       r7=1 (j=0):  |{m<=M : m=0 mod 3}| = floor(M/3)
+       r7=2 (j=1):  ceil(M/3)
+       r7=4 (j=2):  ceil((M-1)/3)
+
+   These differ by at most 1 and the pattern has period 3 in M. Equal-value
+   model E[k|low] = E[k|high] * (M - count)/M, checked per octave M=28..37:
+
+       max |obs - pred| = 0.00468,  typical 0.002    (means are ~1.5)
+
+   The per-octave ordering of the three low classes matches the predicted kill
+   counts in every octave from M=17 to M=37, no exceptions:
+
+       M = 0 mod 3   counts tie 12,12,12    means tie to ~0.003
+       M = 1 mod 3   counts 12,13,12        r7=2 alone low
+       M = 2 mod 3   counts 11,12,12        r7=1 alone high
+
+   The aggregate spread 1.5234 / 1.4781 / 1.5135 is just the octave mixture of
+   these three regimes, weighted by the prime counts (M=37 alone is 880e6 per
+   class, half the data).
+
+3. SECOND ORDER: WHICH m, NOT HOW MANY
+
+   The ~0.002 residual left by the equal-value model is monotone decreasing in
+   the LARGEST killed index, in all ten octaves M=28..37 with no exceptions:
+
+       M=30: top killed 28 -> +0.00230,  29 -> +0.00177,  30 -> -0.00285
+       M=37: top killed 35 -> +0.00126,  36 -> +0.00058,  37 -> -0.00190
+
+   Index m is not worth 1/M of the total. p - 2^m has ln(p - 2^m) < ln p, and
+   for m = M the cofactor p - 2^M is uniform-ish in (0, 2^M), so the top index
+   carries measurably more prime density than a generic one. The class whose AP
+   reaches m = M always pays the extra, and it is always the one with the
+   negative residual.
+
+   So the low-class ordering is fully accounted for: a period-3 count effect
+   from truncating the AP, plus a rank effect from the top index being worth
+   more. Nothing here needs a second modulus.
+
+4. NOTE ON THE MOMENTS
+
+   mean k drifts 1.88402 (1e9, max p 2.28e10) -> 1.881245 (11e9, max p 2.78e11),
+   variance 2.19294 -> 2.23409, dispersion 1.164 -> 1.188. The variance grows
+   because the sample spans more octaves and each octave contributes its own
+   class-conditional means; the mixture widens even though lambda is flat.
