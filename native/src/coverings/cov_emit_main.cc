@@ -48,7 +48,7 @@ namespace ppc = primeparts::catalog;
 namespace {
 
 const fs::path kDefaultWarehouse =
-    "/media/extssd/research/dioph.pp/data/ib-staging";
+    "./data/ib-staging";
 
 struct Options {
   fs::path warehouse = kDefaultWarehouse;

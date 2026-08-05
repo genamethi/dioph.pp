@@ -9,7 +9,7 @@
 namespace {
 
 constexpr char kDefaultWarehouse[] =
-    "./data/iceberg-staging";
+    "./data/ib-staging";
 
 void Usage() {
   std::fprintf(stderr,

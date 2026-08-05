@@ -27,7 +27,7 @@ namespace ppv = primeparts::verify;
 namespace {
 
 constexpr char kDefaultWarehouse[] =
-    "/media/extssd/research/dioph.pp/data/ib-staging";
+    "./data/ib-staging";
 
 struct Options {
   std::string warehouse = kDefaultWarehouse;
