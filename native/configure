@@ -119,7 +119,7 @@ done
 REPO=$(cd "$ROOT/.." && pwd -P)
 vendor_sync() {
   [ -e "$VENDOR/$1/.git" ] ||
-    git -C "$REPO" submodule update --init --remote -- "native/vendor/$1"
+    git -C "$REPO" submodule update --init -- "native/vendor/$1"
 }
 
 vendor_sync lmdb

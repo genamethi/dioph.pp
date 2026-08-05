@@ -1,9 +1,9 @@
 # Vendored native dependencies.
 #
-# Policy: no pins — every submodule tracks its upstream branch head
-# (`git submodule update --remote`). native/configure populates any empty
-# submodule at the branch head and builds/installs it into the prefix when
-# the prefix doesn't already provide it.
+# Policy: pinned — every submodule is recorded at an exact commit and
+# native/configure populates it at that commit. `branch` is the upstream
+# tracking branch for a deliberate bump (`git submodule update --remote
+# <path>` followed by `git add <path>`), never what a checkout resolves to.
 [submodule "native/vendor/lmdb"]
 	path = native/vendor/lmdb
 	url = https://github.com/LMDB/lmdb
@@ -15,7 +15,6 @@
 	url = https://github.com/apache/iceberg-cpp
 	branch = main
 	shallow = true
-	ignore = all
 
 [submodule "native/vendor/arrow"]
 	path = native/vendor/arrow
