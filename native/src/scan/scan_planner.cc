@@ -254,11 +254,6 @@ bool BuildAndPlan(const std::shared_ptr<iceberg::TableMetadata>& metadata,
     }
   }
 
-  if (auto status = context.Validate(); !status.has_value()) {
-    if (error) *error = "TableScanContext::Validate: " + status.error().message;
-    return false;
-  }
-
   auto scan_r = ScanType::Make(metadata, scan_schema, io, std::move(context));
   if (!scan_r.has_value()) {
     if (error) *error = "TableScan::Make: " + scan_r.error().message;
