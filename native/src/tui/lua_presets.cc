@@ -1,12 +1,10 @@
-// primeparts/tui/lua_presets.cc — see header.
-
 #include "primeparts/tui/lua_presets.h"
 
 #include <fstream>
 #include <system_error>
 #include <utility>
 
-#include <lua.hpp>  // liblua 5.5 (extern "C" wrapper)
+#include <lua.hpp>
 
 namespace primeparts::tui {
 
@@ -14,13 +12,11 @@ using primeparts::query::QueryField;
 
 struct LuaState {
   lua_State* L = nullptr;
-  std::vector<QueryPreset>* sink = nullptr;             // set per Load()
-  std::map<std::string, std::string>* config_sink = nullptr;  // set per LoadConfig()
+  std::vector<QueryPreset>* sink = nullptr;
 };
 
 namespace {
 
-// Lua: query("id", { desc=, kind=, fields={k=0,...}, accepts={"k",...}, target= })
 int query_cfn(lua_State* L) {
   auto* st = static_cast<LuaState*>(lua_touserdata(L, lua_upvalueindex(1)));
   const char* id = luaL_checkstring(L, 1);
@@ -38,23 +34,18 @@ int query_cfn(lua_State* L) {
   get_str("kind", p.kind);
   get_str("target", p.target);
 
-  // fields = { name = value, ... } (a map; values are integers)
   lua_getfield(L, 2, "fields");
   if (lua_istable(L, -1)) {
     lua_pushnil(L);
-    while (lua_next(L, -2) != 0) {  // key at -2, value at -1
-      if (lua_type(L, -2) == LUA_TSTRING) {
+    while (lua_next(L, -2) != 0) {      if (lua_type(L, -2) == LUA_TSTRING) {
         QueryField f;
         f.name = lua_tostring(L, -2);
         f.value = static_cast<int64_t>(lua_tointeger(L, -1));
         p.fields.push_back(std::move(f));
       }
-      lua_pop(L, 1);  // pop value; keep key for next
-    }
+      lua_pop(L, 1);    }
   }
-  lua_pop(L, 1);  // pop fields
-
-  // accepts = { "k", ... } (an array of strings)
+  lua_pop(L, 1);
   lua_getfield(L, 2, "accepts");
   if (lua_istable(L, -1)) {
     const lua_Integer n = luaL_len(L, -1);
@@ -64,43 +55,9 @@ int query_cfn(lua_State* L) {
       lua_pop(L, 1);
     }
   }
-  lua_pop(L, 1);  // pop accepts
-
+  lua_pop(L, 1);
   if (st != nullptr && st->sink != nullptr) st->sink->push_back(std::move(p));
   return 0;
-}
-
-// Lua: config({ k = v, ... }) -> collect into the kv sink (last config() wins).
-int config_cfn(lua_State* L) {
-  auto* st = static_cast<LuaState*>(lua_touserdata(L, lua_upvalueindex(1)));
-  luaL_checktype(L, 1, LUA_TTABLE);
-  if (st == nullptr || st->config_sink == nullptr) return 0;
-  lua_pushnil(L);
-  while (lua_next(L, 1) != 0) {  // table at index 1; key -2, value -1
-    if (lua_type(L, -2) == LUA_TSTRING) {
-      std::string key = lua_tostring(L, -2);
-      std::string val;
-      switch (lua_type(L, -1)) {
-        case LUA_TBOOLEAN: val = lua_toboolean(L, -1) ? "true" : "false"; break;
-        case LUA_TNUMBER:  val = std::to_string((long long)lua_tointeger(L, -1)); break;
-        case LUA_TSTRING:  val = lua_tostring(L, -1); break;
-        default: break;
-      }
-      (*st->config_sink)[key] = val;
-    }
-    lua_pop(L, 1);
-  }
-  return 0;
-}
-
-bool is_bare(const std::string& v) {  // emit numbers / booleans unquoted
-  if (v == "true" || v == "false") return true;
-  if (v.empty()) return false;
-  size_t i = (v[0] == '-') ? 1 : 0;
-  if (i >= v.size()) return false;
-  for (; i < v.size(); ++i)
-    if (v[i] < '0' || v[i] > '9') return false;
-  return true;
 }
 
 std::string lua_escape(const std::string& s) {
@@ -113,17 +70,13 @@ std::string lua_escape(const std::string& s) {
   return o;
 }
 
-}  // namespace
-
+}
 LuaPresets::LuaPresets() : st_(std::make_unique<LuaState>()) {
   st_->L = luaL_newstate();
   luaL_openlibs(st_->L);
   lua_pushlightuserdata(st_->L, st_.get());
-  lua_pushcclosure(st_->L, query_cfn, 1);  // query() carries our State* upvalue
+  lua_pushcclosure(st_->L, query_cfn, 1);
   lua_setglobal(st_->L, "query");
-  lua_pushlightuserdata(st_->L, st_.get());
-  lua_pushcclosure(st_->L, config_cfn, 1);
-  lua_setglobal(st_->L, "config");
 }
 
 LuaPresets::~LuaPresets() {
@@ -192,7 +145,6 @@ bool LuaPresets::SaveAll(const std::vector<QueryPreset>& ps, const fs::path& fil
     if (error) *error = "cannot open " + file.string();
     return false;
   }
-  f << "-- primeparts query presets (managed by the TUI; safe to hand-edit)\n\n";
   for (const auto& p : ps) f << Serialize(p);
   if (!f) {
     if (error) *error = "write failed: " + file.string();
@@ -201,39 +153,4 @@ bool LuaPresets::SaveAll(const std::vector<QueryPreset>& ps, const fs::path& fil
   return true;
 }
 
-std::map<std::string, std::string> LuaPresets::LoadConfig(
-    const fs::path& file, std::vector<std::string>* errors) {
-  std::map<std::string, std::string> kv;
-  st_->config_sink = &kv;
-  if (luaL_dofile(st_->L, file.string().c_str()) != LUA_OK) {
-    if (errors != nullptr) {
-      const char* m = lua_tostring(st_->L, -1);
-      errors->emplace_back(m != nullptr ? m : "lua error");
-    }
-    lua_pop(st_->L, 1);
-  }
-  st_->config_sink = nullptr;
-  return kv;
 }
-
-bool LuaPresets::SaveConfig(const std::map<std::string, std::string>& kv,
-                            const fs::path& file, std::string* error) {
-  std::error_code ec;
-  if (file.has_parent_path()) fs::create_directories(file.parent_path(), ec);
-  std::ofstream f(file, std::ios::trunc);
-  if (!f) {
-    if (error) *error = "cannot open " + file.string();
-    return false;
-  }
-  f << "-- primeparts config (managed by the TUI; safe to hand-edit)\n\nconfig({\n";
-  for (const auto& [k, v] : kv)
-    f << "  " << k << " = " << (is_bare(v) ? v : ("\"" + v + "\"")) << ",\n";
-  f << "})\n";
-  if (!f) {
-    if (error) *error = "write failed: " + file.string();
-    return false;
-  }
-  return true;
-}
-
-}  // namespace primeparts::tui

@@ -1,14 +1,6 @@
-// primeparts/tui/lua_presets.h
-//
-// The TUI's embedded-Lua facility for query presets: parse scripts/lua/*.lua
-// (which call query("id", {spec})), serialize a preset back to Lua text, and
-// append-save it. Owns a lua_State (liblua 5.5). The reader/query layer
-// (QueryService::ValidatePreset) is the validator; this is just (de)serialize.
-
 #pragma once
 
 #include <filesystem>
-#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -20,7 +12,7 @@ namespace primeparts::tui {
 namespace fs = std::filesystem;
 using primeparts::query::QueryPreset;
 
-struct LuaState;  // opaque (holds lua_State*), defined in the .cc
+struct LuaState;
 
 class LuaPresets {
  public:
@@ -29,32 +21,15 @@ class LuaPresets {
   LuaPresets(const LuaPresets&) = delete;
   LuaPresets& operator=(const LuaPresets&) = delete;
 
-  // Run a Lua file that calls query("id", {spec}) N times; return the collected
-  // presets. Lua / parse errors are appended to `*errors` (the file may still
-  // yield the presets defined before the error).
   std::vector<QueryPreset> Load(const fs::path& file,
                                 std::vector<std::string>* errors);
 
-  // Lua-syntax text for a preset, round-trippable with Load.
   static std::string Serialize(const QueryPreset& p);
 
-  // Append Serialize(p) to `file` (creating parent dirs / the file). The caller
-  // is responsible for validating first. false + *error on an IO failure.
   static bool Save(const QueryPreset& p, const fs::path& file, std::string* error);
 
-  // Rewrite `file` with all presets (truncates). Use for deduped saves: pass a
-  // vector with unique ids. false + *error on an IO failure.
   static bool SaveAll(const std::vector<QueryPreset>& ps, const fs::path& file,
                       std::string* error);
-
-  // App config (a Lua `config({ k = v, ... })` table). LoadConfig returns the
-  // last config()'s key->value as text (numbers stringified, bools "true"/
-  // "false"). SaveConfig writes one config({...}); a value that is "true"/
-  // "false" or all-numeric is emitted bare, otherwise quoted.
-  std::map<std::string, std::string> LoadConfig(const fs::path& file,
-                                                std::vector<std::string>* errors);
-  static bool SaveConfig(const std::map<std::string, std::string>& kv,
-                         const fs::path& file, std::string* error);
 
  private:
   std::unique_ptr<LuaState> st_;

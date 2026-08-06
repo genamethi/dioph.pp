@@ -36,14 +36,6 @@ namespace primeparts::client {
 
 namespace {
 
-constexpr const char* kDefaultRestUri = "http://127.0.0.1:8181";
-
-std::string ResolveRestUri(const std::string& given) {
-  if (!given.empty()) return given;
-  const char* env = std::getenv("PRIMEPARTS_REST_URI");
-  return env ? env : kDefaultRestUri;
-}
-
 const iceberg::SchemaField* FieldByName(const iceberg::Schema& schema,
                                         const std::string& name) {
   for (const auto& field : schema.fields()) {
@@ -444,9 +436,16 @@ std::unique_ptr<Session> Session::Open(const SessionOptions& options,
     if (error) *error = "SessionOptions.warehouse is required";
     return nullptr;
   }
+  if (options.rest_uri.empty()) {
+    if (error) *error = "SessionOptions.rest_uri is required";
+    return nullptr;
+  }
+  if (options.ns.empty()) {
+    if (error) *error = "SessionOptions.ns is required";
+    return nullptr;
+  }
   auto impl = std::make_unique<Impl>();
   impl->options = options;
-  impl->options.rest_uri = ResolveRestUri(options.rest_uri);
   if (impl->options.scan_threads < 1) impl->options.scan_threads = 1;
   impl->ns = catalog::ResolveNamespace(options.ns);
   std::string mode;

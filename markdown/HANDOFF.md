@@ -48,15 +48,6 @@ Start here when deciding what is alive.
 
 ## ACTIVE WORK HERE ON ...
 
-## Configuration loose end
-
-- Disjoint config surfaces.`config::Load` (`config.{h,cc}`) reads `config.lua`'s
-  `config({...})` into a flat `map<string,string>`; `generate` consumes exactly
-  three keys — `rest_uri`, `namespace`, `warehouse`. The TUI keeps its own
-  six-field `App::cfg` (log limit, gen threads, default limit, log format,
-  autosave, warehouse). Only `warehouse` overlaps. Neither surface knows about
-  the other's keys.
-
 ## Immediate Directions
 
 Roughly in dependency order. Each is a starting point, not a spec.
@@ -125,26 +116,7 @@ Roughly in dependency order. Each is a starting point, not a spec.
    foreign consumers. `generate` is already a REST client on both resume reads,
    so the producer's REST-ness is not the gap; what it does not use is the
    *spec* planning routes.
-5. **Settle configuration.** One surface, one warehouse default. However, a
-  qualification and some clarifications: (a) Iceberg tables being defined by
-  schemas.cc is fine when they're tightly coupled to a binary. What the final
-  shape will likely be is that we'll have a client surface for deriving tables
-  from data and committing those. For the user directed approach then, we can
-  use a Lua interface. (b) By "warehouse default" I'd prefer localhost, the
-  current default port, and ~/local/share/pp-data/ as the default. This is fixed
-  via an example config.lua which resides in the same directory as the other
-  binaries. (default is ~/.local/bin) (c) The Lua config table should have
-  general reusable variables in a config.core table. Then binary specific config
-  variables (all flags checked against the config, and overidden.). I.e., all
-  default behavior is determined by the example.config.lua. (d) The example
-  config should trigger a message on init to switch away from the defaults. (e)
-  For the time being, this config is separate from any table or schema
-  definitions. That can wait. (f) config.tui, config.graph, config.generate are
-  some examples. config.test might be appropriate, but consider that we're using
-  gtest and whether we want to wrap around that or keep separate. (g) This
-  should be enough groundwork to help tie up the loose ends in the previous
-  section.
-
+5. ~~**Settle configuration.**~~ done
 
 ## Lower priority leftovers: 
 

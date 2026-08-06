@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=@PP_INSTALL_PATH@/primeparts-catalogd
+ExecStart=@PP_INSTALL_PATH@/primeparts-catalogd --config @PP_INSTALL_PATH@/config.lua
 Restart=on-failure
 RestartSec=2
 

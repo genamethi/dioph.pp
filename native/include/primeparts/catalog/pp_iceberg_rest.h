@@ -22,8 +22,6 @@ namespace primeparts::catalog {
 
 namespace fs = std::filesystem;
 
-inline constexpr char kDefaultRestUri[] = "http://127.0.0.1:8181";
-inline constexpr char kDefaultNamespace[] = "primeparts";
 inline constexpr char kCatalogName[] = "primeparts";
 
 iceberg::Namespace ResolveNamespace(const std::string& name);

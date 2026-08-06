@@ -86,7 +86,7 @@ int main(int argc, char** argv) {
   fs::path warehouse = argv[1];
   std::error_code ec;
   fs::create_directories(warehouse, ec);
-  const auto ns = ppc::ResolveNamespace("");
+  const auto ns = ppc::ResolveNamespace("primeparts");
 
   std::string error;
   auto local = ppc::MakeLocalCatalogWithStore(warehouse, &error);

@@ -87,6 +87,7 @@ struct ScanControl {
 class QueryService {
  public:
   static std::unique_ptr<QueryService> Open(const fs::path& warehouse,
+                                            const std::string& rest_uri,
                                             const iceberg::Namespace& ns,
                                             std::string* error);
   ~QueryService();

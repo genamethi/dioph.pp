@@ -28,6 +28,7 @@
 #include "primeparts/catalog/pp_iceberg_rest.h"
 #include "primeparts/catalog/rest_scan_plan.h"
 #include "primeparts/client/session.h"
+#include "primeparts/config.h"
 #include "primeparts/graph/pp_graph_store.h"
 #include "primeparts/query/materialize.h"
 #include "primeparts/scan/scan_plan.h"
@@ -38,18 +39,17 @@ namespace scan = primeparts::scan;
 
 namespace {
 
-constexpr int64_t kDefaultMax = 100000;
-
 struct Options {
+  std::string config_path;
   std::string rest_uri;
   std::string warehouse;
-  std::string ns_name = ppc::kDefaultNamespace;
+  std::string ns_name;
   int64_t min_p = 0;
-  int64_t max_p = kDefaultMax;
-  int64_t threads = 8;
-  std::string format = "text";
-  std::string mode = "basis";
-  int64_t top = 20;
+  int64_t max_p = -1;
+  int64_t threads = -1;
+  std::string format;
+  std::string mode;
+  int64_t top = -1;
 };
 
 struct Edge {
@@ -136,17 +136,19 @@ void Usage(FILE* out) {
       "chain decomposition, and the antichains witnessing its width.\n"
       "\n"
       "Options:\n"
+      "  --config PATH    config file (default: ./config.lua, then XDG, then\n"
+      "                   ~/.config/primeparts/config.lua, else seeded next to\n"
+      "                   this binary)\n"
       "  --min P          low end of the prime window (default 0)\n"
-      "  --max P          high end of the prime window (default %" PRId64 ")\n"
-      "  --rest-uri URL   pp-catalogd base (default %s)\n"
-      "  --warehouse DIR  warehouse root\n"
-      "  --namespace NS   catalog namespace (default %s)\n"
-      "  --threads N      scan/engine threads (default 8)\n"
-      "  --mode M         basis | hasse | compose | edges (default basis)\n"
-      "  --format F       text | dot | json (default text)\n"
-      "  --top N          rows to show in text listings (default 20)\n"
-      "  --help\n",
-      kDefaultMax, ppc::kDefaultRestUri, ppc::kDefaultNamespace);
+      "  --max P          high end of the prime window (conf.graph.max_p)\n"
+      "  --rest-uri URL   pp-catalogd base (conf.core.rest_uri)\n"
+      "  --warehouse DIR  warehouse root (conf.core.warehouse)\n"
+      "  --namespace NS   catalog namespace (conf.core.namespace)\n"
+      "  --threads N      scan/engine threads (conf.graph.threads)\n"
+      "  --mode M         basis | hasse | compose | edges (conf.graph.mode)\n"
+      "  --format F       text | dot | json (conf.graph.format)\n"
+      "  --top N          rows to show in text listings (conf.graph.top)\n"
+      "  --help\n");
 }
 
 bool ParseI64(const char* s, int64_t* out) {
@@ -169,6 +171,7 @@ bool ParseArgs(int argc, char** argv, Options* opt) {
       {"format", required_argument, nullptr, 1006},
       {"top", required_argument, nullptr, 1007},
       {"mode", required_argument, nullptr, 1008},
+      {"config", required_argument, nullptr, 1009},
       {"help", no_argument, nullptr, 'h'},
       {nullptr, 0, nullptr, 0},
   };
@@ -192,11 +195,26 @@ bool ParseArgs(int argc, char** argv, Options* opt) {
         if (!ParseI64(optarg, &opt->top)) return false;
         break;
       case 1008: opt->mode = optarg; break;
+      case 1009: opt->config_path = optarg; break;
       case 'h': Usage(stdout); std::exit(0);
       default: return false;
     }
   }
-  if (opt->rest_uri.empty()) opt->rest_uri = ppc::kDefaultRestUri;
+  std::string cfg_err;
+  primeparts::config::Conf conf;
+  if (!primeparts::config::Load(opt->config_path, &conf, &cfg_err)) {
+    std::fprintf(stderr, "%s\n", cfg_err.c_str());
+    return false;
+  }
+  primeparts::config::Announce(conf);
+  if (opt->rest_uri.empty()) opt->rest_uri = conf.core.rest_uri;
+  if (opt->warehouse.empty()) opt->warehouse = conf.core.warehouse;
+  if (opt->ns_name.empty()) opt->ns_name = conf.core.ns_name;
+  if (opt->max_p < 0) opt->max_p = conf.graph.max_p;
+  if (opt->threads < 0) opt->threads = conf.graph.threads;
+  if (opt->top < 0) opt->top = conf.graph.top;
+  if (opt->mode.empty()) opt->mode = conf.graph.mode;
+  if (opt->format.empty()) opt->format = conf.graph.format;
   if (opt->max_p <= opt->min_p) {
     std::fprintf(stderr, "--max must exceed --min\n");
     return false;

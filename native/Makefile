@@ -52,6 +52,10 @@ BUILD_DIR := build
 CORE_OBJ := $(BUILD_DIR)/core.o
 GENERATE_OBJ := $(BUILD_DIR)/generate.o
 CONFIG_OBJ := $(BUILD_DIR)/config.o
+EXAMPLE_CONFIG_LUA := ../scripts/lua/example.config.lua
+EXAMPLE_CONFIG_SRC := $(BUILD_DIR)/example_config.cc
+EXAMPLE_CONFIG_OBJ := $(BUILD_DIR)/example_config.o
+CONFIG_OBJS := $(CONFIG_OBJ) $(EXAMPLE_CONFIG_OBJ)
 WRITER_OBJ := $(BUILD_DIR)/writer.o
 ALIGNED_WRITER_OBJ := $(BUILD_DIR)/aligned_writer.o
 SCHEMAS_OBJ := $(BUILD_DIR)/schemas.o
@@ -108,6 +112,10 @@ build-deps:
 install: all
 	mkdir -p "$(PP_INSTALL_PATH)"
 	cp $(INSTALL_BINS) "$(PP_INSTALL_PATH)/"
+	@if [ ! -f "$(PP_INSTALL_PATH)/config.lua" ]; then \
+	  cp $(EXAMPLE_CONFIG_LUA) "$(PP_INSTALL_PATH)/config.lua"; \
+	  echo "seeded $(PP_INSTALL_PATH)/config.lua"; \
+	fi
 	@echo "installed $(words $(INSTALL_BINS)) binaries to $(PP_INSTALL_PATH)"
 
 install-service: install
@@ -144,6 +152,14 @@ $(GENERATE_OBJ): src/generate.cc include/primeparts/core.h include/primeparts/wr
 $(CONFIG_OBJ): src/config.cc include/primeparts/config.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(LUA_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
+$(EXAMPLE_CONFIG_SRC): $(EXAMPLE_CONFIG_LUA) | $(BUILD_DIR)
+	@{ printf '#include "primeparts/config.h"\n\nnamespace primeparts::config {\nconst char kExampleConfig[] = R"PPCFG('; \
+	   cat $(EXAMPLE_CONFIG_LUA); \
+	   printf ')PPCFG";\n}\n'; } > $@
+
+$(EXAMPLE_CONFIG_OBJ): $(EXAMPLE_CONFIG_SRC) include/primeparts/config.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
 $(WRITER_OBJ): src/writer.cc include/primeparts/writer.h include/primeparts/schemas.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
@@ -159,7 +175,7 @@ $(SOURCE_SCAN_OBJ): src/source_scan.cc include/primeparts/source_scan.h include/
 $(BUILD_DIR)/query_service.o: src/query/query_service.cc include/primeparts/query/query_service.h include/primeparts/source_scan.h include/primeparts/catalog/pp_iceberg_rest.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-TUI_APP_HDR := include/primeparts/tui/tui_app.h include/primeparts/query/query_service.h include/primeparts/tui/lua_presets.h
+TUI_APP_HDR := include/primeparts/tui/tui_app.h include/primeparts/query/query_service.h include/primeparts/tui/lua_presets.h include/primeparts/config.h
 
 $(BUILD_DIR)/tui_main.o: src/tui/tui_main.cc $(TUI_APP_HDR) | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(NOTCURSES_CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
@@ -179,7 +195,7 @@ $(BUILD_DIR)/lua_presets.o: src/tui/lua_presets.cc include/primeparts/tui/lua_pr
 $(BUILD_DIR)/lua_query_module.o: src/query/lua_query_module.cc include/primeparts/query/lua_query_module.h include/primeparts/query/query_service.h include/primeparts/core.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(LUA_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/pp_main.o: src/query/pp_main.cc include/primeparts/query/lua_query_module.h include/primeparts/query/query_service.h include/primeparts/catalog/pp_iceberg_rest.h | $(BUILD_DIR)
+$(BUILD_DIR)/pp_main.o: src/query/pp_main.cc include/primeparts/query/lua_query_module.h include/primeparts/query/query_service.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/config.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(LUA_CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/materialize.o: src/query/materialize.cc include/primeparts/query/materialize.h include/primeparts/writer.h include/primeparts/catalog/pp_iceberg_rest.h | $(BUILD_DIR)
@@ -250,25 +266,25 @@ $(SCAN_PLANNER_OBJ): src/scan/scan_planner.cc include/primeparts/scan/scan_plann
 $(BUILD_DIR)/libprimeparts_core.so: $(CORE_OBJ)
 	$(CC) -shared $(LDFLAGS) $^ $(LDLIBS) -o $@
 
-$(BUILD_DIR)/primeparts-generate: $(CORE_OBJ) $(GENERATE_OBJ) $(CONFIG_OBJ) $(WRITER_OBJ) $(ALIGNED_WRITER_OBJ) $(SCHEMAS_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_COMMIT_OBJ) $(PARTITION_STATS_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
+$(BUILD_DIR)/primeparts-generate: $(CORE_OBJ) $(GENERATE_OBJ) $(CONFIG_OBJS) $(WRITER_OBJ) $(ALIGNED_WRITER_OBJ) $(SCHEMAS_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_COMMIT_OBJ) $(PARTITION_STATS_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(LUA_LDLIBS) -lsqlite3 -pthread -o $@
 
-$(BUILD_DIR)/primeparts-catalogd: $(PP_CATALOGD_MAIN_OBJ) $(PP_CATALOGD_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(CONFIG_OBJ) $(PLAN_STORE_OBJ) $(PLAN_STATUS_OBJ) $(SCAN_OBJS) $(LMDB_LIB)
+$(BUILD_DIR)/primeparts-catalogd: $(PP_CATALOGD_MAIN_OBJ) $(PP_CATALOGD_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(CONFIG_OBJS) $(PLAN_STORE_OBJ) $(PLAN_STATUS_OBJ) $(SCAN_OBJS) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(LUA_LDLIBS) -lsqlite3 -pthread -o $@
 
 $(VERIFY_OBJ): src/verify/verify.cc include/primeparts/verify/verify.h include/primeparts/source_scan.h include/primeparts/core.h include/primeparts/common/thread_pool.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(VERIFY_MAIN_OBJ): src/verify/verify_main.cc include/primeparts/verify/verify.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/common/uri.h | $(BUILD_DIR)
+$(VERIFY_MAIN_OBJ): src/verify/verify_main.cc include/primeparts/verify/verify.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/common/uri.h include/primeparts/config.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/primeparts-verify: $(VERIFY_MAIN_OBJ) $(VERIFY_OBJ) $(CORE_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
-	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) -lsqlite3 -pthread -o $@
+$(BUILD_DIR)/primeparts-verify: $(VERIFY_MAIN_OBJ) $(VERIFY_OBJ) $(CORE_OBJ) $(CONFIG_OBJS) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
+	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(LUA_LDLIBS) -lsqlite3 -pthread -o $@
 
-$(BUILD_DIR)/primeparts-tui: $(BUILD_DIR)/tui_main.o $(BUILD_DIR)/tui_runquery.o $(BUILD_DIR)/tui_generate.o $(BUILD_DIR)/tui_config.o $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(BUILD_DIR)/lua_presets.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(LMDB_LIB)
+$(BUILD_DIR)/primeparts-tui: $(BUILD_DIR)/tui_main.o $(BUILD_DIR)/tui_runquery.o $(BUILD_DIR)/tui_generate.o $(BUILD_DIR)/tui_config.o $(CONFIG_OBJS) $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(BUILD_DIR)/lua_presets.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $(NOTCURSES_RPATH) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(NOTCURSES_LDLIBS) $(LUA_LDLIBS) -lsqlite3 -pthread -o $@
 
-$(BUILD_DIR)/pp: $(BUILD_DIR)/pp_main.o $(BUILD_DIR)/lua_query_module.o $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(CORE_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(LMDB_LIB)
+$(BUILD_DIR)/pp: $(BUILD_DIR)/pp_main.o $(CONFIG_OBJS) $(BUILD_DIR)/lua_query_module.o $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(CORE_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(LUA_LDLIBS) -lsqlite3 -pthread -o $@
 
 $(BUILD_DIR)/pp_graph_store_test.o: tests/pp_graph_store_test.cc include/primeparts/graph/pp_graph_store.h | $(BUILD_DIR)
@@ -330,11 +346,11 @@ PP_GRAPH_STORE_OBJ := $(BUILD_DIR)/pp_graph_store.o
 $(PP_GRAPH_STORE_OBJ): src/graph/pp_graph_store.cc include/primeparts/graph/pp_graph_store.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(GINAC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(PP_GRAPH_OBJ): src/graph/pp_graph.cc include/primeparts/graph/pp_graph_store.h include/primeparts/catalog/rest_scan_plan.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/scan/scan_plan.h include/primeparts/scan/scan_planner.h include/primeparts/client/session.h include/primeparts/query/materialize.h | $(BUILD_DIR)
+$(PP_GRAPH_OBJ): src/graph/pp_graph.cc include/primeparts/config.h include/primeparts/graph/pp_graph_store.h include/primeparts/catalog/rest_scan_plan.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/scan/scan_plan.h include/primeparts/scan/scan_planner.h include/primeparts/client/session.h include/primeparts/query/materialize.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(DUCKDB_CPPFLAGS) $(GINAC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/pp-graph: $(PP_GRAPH_OBJ) $(PP_GRAPH_STORE_OBJ) $(SESSION_OBJ) $(REST_SCAN_PLAN_OBJ) $(PLAN_STATUS_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(PP_ICEBERG_REST_OBJ) $(PP_COMMIT_OBJ) $(PARTITION_STATS_OBJ) $(PP_LMDB_STORE_OBJ) $(BUILD_DIR)/materialize.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(LMDB_LIB)
-	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $(DUCKDB_RPATH) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(DUCKDB_LDLIBS) $(GINAC_LDLIBS) -lsqlite3 -pthread -o $@
+$(BUILD_DIR)/pp-graph: $(PP_GRAPH_OBJ) $(PP_GRAPH_STORE_OBJ) $(CONFIG_OBJS) $(SESSION_OBJ) $(REST_SCAN_PLAN_OBJ) $(PLAN_STATUS_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(PP_ICEBERG_REST_OBJ) $(PP_COMMIT_OBJ) $(PARTITION_STATS_OBJ) $(PP_LMDB_STORE_OBJ) $(BUILD_DIR)/materialize.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(LMDB_LIB)
+	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $(DUCKDB_RPATH) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(DUCKDB_LDLIBS) $(GINAC_LDLIBS) $(LUA_LDLIBS) -lsqlite3 -pthread -o $@
 
 pp-graph: $(BUILD_DIR)/pp-graph
 .PHONY: pp-graph

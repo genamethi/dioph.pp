@@ -7,7 +7,6 @@
 #include <cstdint>
 #include <deque>
 #include <filesystem>
-#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -16,6 +15,7 @@
 
 #include "iceberg/table_identifier.h"
 
+#include "primeparts/config.h"
 #include "primeparts/query/query_service.h"
 #include "primeparts/tui/lua_presets.h"
 
@@ -29,17 +29,8 @@ using Preset = ::primeparts::query::QueryPreset;
 using ::primeparts::tui::LuaPresets;
 
 constexpr size_t kGenMaxLines = 10000;
-constexpr size_t kCfgWarehouse = 5;
 
 enum class Screen { RunQuery, MakeQuery, Status, Generate, Config };
-
-struct Config {
-  int64_t log_limit = 200;
-  int64_t gen_threads = 0;
-  int64_t default_limit = 10;
-  std::string log_format = "flat";
-  bool autosave = false;
-};
 
 struct ResultRow {
   std::string text;
@@ -58,7 +49,7 @@ struct QueryView {
 
 enum class Focus { Query, Results };
 
-enum class ModalKind { PresetFields, GenFields, Warehouse };
+enum class ModalKind { PresetFields, GenFields };
 
 struct App {
   struct notcurses* nc = nullptr;
@@ -71,18 +62,17 @@ struct App {
   QueryService* qs = nullptr;
   LuaPresets lua;
   std::string warehouse;
+  std::string rest_uri;
   iceberg::Namespace ns;
-  bool warehouse_dirty = false;
   std::string presets_path = "scripts/lua/queries.lua";
   std::string config_path;
+  config::Conf conf;
   std::vector<Preset> presets;
   size_t preset_idx = 0;
   size_t cursor = 0;
   Focus focus = Focus::Query;
 
   Screen screen = Screen::RunQuery;
-  Config cfg;
-  size_t cfg_cursor = 0;
 
   std::vector<ResultRow> result_rows;
   size_t res_top = 0, res_sel = 0;
@@ -108,7 +98,7 @@ struct App {
 
   int64_t gen_start = 1;
   int64_t gen_count = 100'000'000;
-  int64_t gen_chunk = 500'000;
+  int64_t gen_chunk = 0;
   int64_t gen_threads = 0;
   size_t gen_cursor = 0;
   std::thread gen_worker;
@@ -148,7 +138,6 @@ void redraw(App* a);
 size_t modal_field_count(App* a);
 void confirm_modal(App* a);
 void draw_modal(App* a);
-void draw_path_modal(App* a);
 void draw_dispatch(App* a);
 std::vector<Preset> built_in_presets();
 void load_presets(App* a);
@@ -185,17 +174,9 @@ void draw_generate(App* a);
 void draw_gen_output(App* a);
 void open_gen_modal(App* a);
 
-size_t cfg_count();
-std::string cfg_name(size_t i);
-std::string cfg_value(const App& a, size_t i);
-void cfg_adjust(App* a, size_t i, int d);
 void draw_config(App* a);
-void open_warehouse_modal(App* a);
 bool reopen_warehouse(App* a, const std::string& path);
-void apply_config_kv(App* a, const std::map<std::string, std::string>& kv);
-std::map<std::string, std::string> config_to_kv(const Config& c);
 void run_janitor(App* a);
-void load_config(App* a);
-void save_config(App* a);
+void edit_config(App* a);
 
 }  // namespace primeparts::tui

@@ -47,6 +47,9 @@ namespace fs = std::filesystem;
 
 namespace {
 
+constexpr char kRestUri[] = "http://127.0.0.1:18181";
+constexpr char kNamespace[] = "primeparts";
+
 std::shared_ptr<arrow::RecordBatch> MakePrimesBatch(
     const std::shared_ptr<arrow::Schema>& schema) {
   arrow::Int64Builder p;
@@ -177,7 +180,7 @@ class E2ETest : public ::testing::Test {
     std::error_code ec;
     fs::remove_all(warehouse_, ec);
     fs::create_directories(warehouse_, ec);
-    ns_ = ppc::ResolveNamespace("");
+    ns_ = ppc::ResolveNamespace(kNamespace);
 
     BuildPrimesWarehouse(warehouse_, ns_, &stats_);
     if (::testing::Test::HasFatalFailure()) return;
@@ -204,11 +207,9 @@ class E2ETest : public ::testing::Test {
     }
     ASSERT_TRUE(ready_) << "catalogd did not become ready on :18181 (bin=" << bin
                         << ")";
-    setenv("PRIMEPARTS_REST_URI", "http://127.0.0.1:18181", 1);
   }
 
   static void TearDownTestSuite() {
-    unsetenv("PRIMEPARTS_REST_URI");
     if (pid_ > 0) {
       kill(pid_, SIGTERM);
       int status = 0;
@@ -235,7 +236,7 @@ ppc::PartitionStatsSet E2ETest::stats_;
 
 TEST_F(E2ETest, ScanByKErrorsWithoutSortOrder) {
   std::string error;
-  auto qs = ppq::QueryService::Open(warehouse_, ns_, &error);
+  auto qs = ppq::QueryService::Open(warehouse_, kRestUri, ns_, &error);
   ASSERT_NE(qs, nullptr) << error;
   error.clear();
   auto hits = qs->ScanByK(0, 0, 0, 10, &error);
@@ -245,7 +246,7 @@ TEST_F(E2ETest, ScanByKErrorsWithoutSortOrder) {
 
 TEST_F(E2ETest, WindowedGroupCountErrorsWithoutSortOrder) {
   std::string error;
-  auto qs = ppq::QueryService::Open(warehouse_, ns_, &error);
+  auto qs = ppq::QueryService::Open(warehouse_, kRestUri, ns_, &error);
   ASSERT_NE(qs, nullptr) << error;
   error.clear();
   auto rows = qs->GroupCount("primes", ppq::GroupKey::Column("k"), 3, 7, 1,
@@ -255,7 +256,7 @@ TEST_F(E2ETest, WindowedGroupCountErrorsWithoutSortOrder) {
 
 TEST_F(E2ETest, FullTableReadSynthesizesIdentityColumns) {
   std::string error;
-  auto qs = ppq::QueryService::Open(warehouse_, ns_, &error);
+  auto qs = ppq::QueryService::Open(warehouse_, kRestUri, ns_, &error);
   ASSERT_NE(qs, nullptr) << error;
   error.clear();
   auto rows = qs->ReadTable("primes", {}, 100, &error);
@@ -265,7 +266,7 @@ TEST_F(E2ETest, FullTableReadSynthesizesIdentityColumns) {
 
 TEST_F(E2ETest, ColumnSubsetReadWorks) {
   std::string error;
-  auto qs = ppq::QueryService::Open(warehouse_, ns_, &error);
+  auto qs = ppq::QueryService::Open(warehouse_, kRestUri, ns_, &error);
   ASSERT_NE(qs, nullptr) << error;
   error.clear();
   auto rows = qs->ReadTable("primes", {"p", "k"}, 100, &error);
@@ -628,7 +629,7 @@ TEST(E2EFreshCommit, PartitionStatsPresentOnFirstCommit) {
   std::error_code ec;
   fs::remove_all(wh, ec);
   fs::create_directories(wh, ec);
-  const auto ns = ppc::ResolveNamespace("");
+  const auto ns = ppc::ResolveNamespace(kNamespace);
 
   std::string error;
   auto local = ppc::MakeLocalCatalogWithStore(wh, &error);
@@ -666,7 +667,8 @@ TEST(E2EFreshCommit, PartitionStatsPresentOnFirstCommit) {
 TEST_F(E2ETest, SessionLoadsTableMetadataOverRest) {
   namespace client = primeparts::client;
   client::SessionOptions options;
-  options.rest_uri = "http://127.0.0.1:18181";
+  options.rest_uri = kRestUri;
+  options.ns = kNamespace;
   options.warehouse = warehouse_.string();
   std::string error;
   auto session = client::Session::Open(options, &error);
@@ -686,7 +688,8 @@ TEST_F(E2ETest, SessionLoadsTableMetadataOverRest) {
 TEST_F(E2ETest, SessionScanDispatchesOnTheAdvertisedMode) {
   namespace client = primeparts::client;
   client::SessionOptions options;
-  options.rest_uri = "http://127.0.0.1:18181";
+  options.rest_uri = kRestUri;
+  options.ns = kNamespace;
   options.warehouse = warehouse_.string();
   std::string error;
   auto session = client::Session::Open(options, &error);
@@ -707,7 +710,8 @@ TEST_F(E2ETest, SessionScanDispatchesOnTheAdvertisedMode) {
 TEST_F(E2ETest, SessionScanYieldsOnlyRowsSatisfyingTheFilter) {
   namespace client = primeparts::client;
   client::SessionOptions options;
-  options.rest_uri = "http://127.0.0.1:18181";
+  options.rest_uri = kRestUri;
+  options.ns = kNamespace;
   options.warehouse = warehouse_.string();
   std::string error;
   auto session = client::Session::Open(options, &error);
@@ -760,7 +764,8 @@ TEST_F(E2ETest, ShardedScanSeesEveryRowExactlyOnce) {
   std::string error;
   auto rows_for = [&](int threads, int* shards) {
     client::SessionOptions options;
-    options.rest_uri = "http://127.0.0.1:18181";
+    options.rest_uri = kRestUri;
+    options.ns = kNamespace;
     options.warehouse = warehouse_.string();
     options.scan_threads = threads;
     auto session = client::Session::Open(options, &error);

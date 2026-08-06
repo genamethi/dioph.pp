@@ -6,16 +6,16 @@
 #include <string>
 
 #include "primeparts/catalog/pp_iceberg_rest.h"
+#include "primeparts/config.h"
 #include "primeparts/query/lua_query_module.h"
 #include "primeparts/query/query_service.h"
 
 namespace {
 
-const char* kDefaultWarehouse = "./data/ib-staging";
-
 void Usage(const char* argv0) {
   std::fprintf(stderr,
-               "usage: %s [--warehouse DIR] [--namespace NS] [run FILE.lua | -e CODE]\n"
+               "usage: %s [--config PATH] [--warehouse DIR] [--rest-uri URI]\n"
+               "          [--namespace NS] [run FILE.lua | -e CODE]\n"
                "  no script/-e: interactive REPL.\n"
                "  the `query` module is bound to the warehouse, e.g.\n"
                "    for _,r in ipairs(query.hist{col=\"k\"}) do "
@@ -46,7 +46,9 @@ int RunRepl(lua_State* L) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  std::string config_path;
   std::string warehouse;
+  std::string rest_uri;
   std::string ns_name;
   std::string run_file;
   std::string eval_code;
@@ -54,7 +56,13 @@ int main(int argc, char** argv) {
 
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
-    if (arg == "--warehouse") {
+    if (arg == "--config") {
+      if (i + 1 >= argc) { std::fprintf(stderr, "--config requires a value\n"); return 2; }
+      config_path = argv[++i];
+    } else if (arg == "--rest-uri") {
+      if (i + 1 >= argc) { std::fprintf(stderr, "--rest-uri requires a value\n"); return 2; }
+      rest_uri = argv[++i];
+    } else if (arg == "--warehouse") {
       if (i + 1 >= argc) { std::fprintf(stderr, "--warehouse requires a value\n"); return 2; }
       warehouse = argv[++i];
     } else if (arg == "--namespace") {
@@ -80,20 +88,23 @@ int main(int argc, char** argv) {
     }
   }
 
-  if (warehouse.empty()) {
-    if (const char* env = std::getenv("PRIMEPARTS_WAREHOUSE_ROOT"); env && *env) {
-      warehouse = env;
-    } else {
-      warehouse = kDefaultWarehouse;
-    }
+  std::string cfg_err;
+  primeparts::config::Conf conf;
+  if (!primeparts::config::Load(config_path, &conf, &cfg_err)) {
+    std::fprintf(stderr, "error: %s\n", cfg_err.c_str());
+    return 2;
   }
+  primeparts::config::Announce(conf);
+  if (warehouse.empty()) warehouse = conf.core.warehouse;
+  if (rest_uri.empty()) rest_uri = conf.core.rest_uri;
+  if (ns_name.empty()) ns_name = conf.core.ns_name;
 
   lua_State* L = luaL_newstate();
   luaL_openlibs(L);
 
   std::string e;
   auto qs = primeparts::query::QueryService::Open(
-      warehouse, primeparts::catalog::ResolveNamespace(ns_name), &e);
+      warehouse, rest_uri, primeparts::catalog::ResolveNamespace(ns_name), &e);
   if (!qs) {
     std::fprintf(stderr,
                  "[i] no catalog at %s (%s) — number-theory functions only\n",

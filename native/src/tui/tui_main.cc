@@ -18,19 +18,12 @@ namespace primeparts::tui {
 
 namespace {
 
-constexpr char kDefaultWarehouse[] =
-    "./data/ib-staging";
-
 fs::path config_presets_path() {
   const char* xdg = std::getenv("XDG_CONFIG_HOME");
   if (xdg && *xdg) return fs::path(xdg) / "primeparts" / "queries.lua";
   const char* home = std::getenv("HOME");
   if (home && *home) return fs::path(home) / ".config" / "primeparts" / "queries.lua";
   return fs::path(".primeparts-queries.lua");
-}
-
-fs::path config_file_path() {
-  return config_presets_path().parent_path() / "config.lua";
 }
 
 }  // namespace
@@ -185,20 +178,12 @@ void draw_status(App* a) {
 }
 
 size_t modal_field_count(App* a) {
-  if (a->modal_kind == ModalKind::Warehouse) return 1;
   return a->modal_kind == ModalKind::GenFields
              ? gen_opt_count()
              : a->presets[a->preset_idx].fields.size();
 }
 
 void confirm_modal(App* a) {
-  if (a->modal_kind == ModalKind::Warehouse) {
-    std::string path = a->modal_buf.empty() ? "" : a->modal_buf[0];
-    a->modal_on = false;
-    a->modal_kind = ModalKind::PresetFields;
-    if (!path.empty() && path != a->warehouse) reopen_warehouse(a, path);
-    return;
-  }
   if (a->modal_kind == ModalKind::GenFields) {
     auto box = [&](size_t i, int64_t lo) -> int64_t {
       const std::string& b = i < a->modal_buf.size() ? a->modal_buf[i] : "";
@@ -222,41 +207,7 @@ void confirm_modal(App* a) {
   start_query(a);
 }
 
-void draw_path_modal(App* a) {
-  unsigned trows, tcols;
-  notcurses_term_dim_yx(a->nc, &trows, &tcols);
-  unsigned w = tcols < 72 ? (tcols > 8 ? tcols - 4 : 8) : 68;
-  unsigned h = 6;
-  unsigned y0 = trows > h ? (trows - h) / 2 : 1;
-  unsigned x0 = tcols > w ? (tcols - w) / 2 : 1;
-  ncplane_resize_simple(a->modal, h, w);
-  ncplane_move_yx(a->modal, (int)y0, (int)x0);
-  ncplane_erase(a->modal);
-  ncplane_set_bg_rgb8(a->modal, 0x20, 0x24, 0x30);
-  for (unsigned r = 0; r < h; ++r)
-    ncplane_printf_yx(a->modal, (int)r, 0, "%*s", (int)w, "");
-  ncplane_perimeter_rounded(a->modal, NCSTYLE_BOLD, 0, 0);
-  ncplane_set_styles(a->modal, NCSTYLE_BOLD);
-  ncplane_printf_yx(a->modal, 0, 2, "┤ warehouse path ├");
-  ncplane_set_styles(a->modal, NCSTYLE_NONE);
-  static const std::string kEmpty;
-  const std::string& buf = a->modal_buf.empty() ? kEmpty : a->modal_buf[0];
-  int boxw = (int)w - 6;
-  std::string shown = buf;
-  if ((int)shown.size() > boxw) shown = "…" + shown.substr(shown.size() - (boxw - 1));
-  ncplane_set_bg_rgb8(a->modal, 0x2c, 0x44, 0x66);
-  ncplane_set_fg_rgb8(a->modal, 0xff, 0xff, 0xff);
-  ncplane_printf_yx(a->modal, 2, 2, " %-*s", boxw, shown.c_str());
-  ncplane_set_bg_rgb8(a->modal, 0x20, 0x24, 0x30);
-  ncplane_set_fg_rgb8(a->modal, 0x99, 0x99, 0xaa);
-  ncplane_printf_yx(a->modal, (int)(h - 2), 2,
-                    "Enter:apply (reopens queries)  Esc:cancel  Backspace:edit");
-  ncplane_set_fg_default(a->modal);
-  ncplane_set_bg_default(a->modal);
-}
-
 void draw_modal(App* a) {
-  if (a->modal_kind == ModalKind::Warehouse) { draw_path_modal(a); return; }
   const bool gen = a->modal_kind == ModalKind::GenFields;
   const Preset* p = gen ? nullptr : &a->presets[a->preset_idx];
   unsigned trows, tcols;
@@ -430,16 +381,51 @@ void save_current(App* a) {
 int main(int argc, char** argv) {
   using namespace primeparts::tui;
   App app;
-  app.presets_path = config_presets_path().string();
-  app.config_path = config_file_path().string();
-  app.ns = primeparts::catalog::ResolveNamespace("");
-  load_config(&app);
+  std::string config_path, warehouse, rest_uri, ns_name;
+  for (int i = 1; i < argc; ++i) {
+    const std::string arg = argv[i];
+    auto next = [&](const char* name) -> std::string {
+      if (i + 1 >= argc) {
+        std::fprintf(stderr, "%s requires a value\n", name);
+        std::exit(2);
+      }
+      return argv[++i];
+    };
+    if (arg == "--config") config_path = next("--config");
+    else if (arg == "--warehouse") warehouse = next("--warehouse");
+    else if (arg == "--rest-uri") rest_uri = next("--rest-uri");
+    else if (arg == "--namespace") ns_name = next("--namespace");
+    else if (arg == "-h" || arg == "--help") {
+      std::fprintf(stderr,
+                   "usage: primeparts-tui [--config PATH] [--warehouse DIR]\n"
+                   "                      [--rest-uri URI] [--namespace NS]\n"
+                   "                      [WAREHOUSE]\n");
+      return 0;
+    }
+    else if (warehouse.empty()) warehouse = arg;
+    else {
+      std::fprintf(stderr, "unknown argument: %s\n", arg.c_str());
+      return 2;
+    }
+  }
 
-  std::string warehouse = argc >= 2          ? argv[1]
-                          : !app.warehouse.empty() ? app.warehouse
-                                                   : kDefaultWarehouse;
+  std::string cfg_err;
+  if (!primeparts::config::Load(config_path, &app.conf, &cfg_err)) {
+    std::fprintf(stderr, "error: %s\n", cfg_err.c_str());
+    return 2;
+  }
+  primeparts::config::Announce(app.conf);
+  app.config_path = app.conf.path.string();
+  app.presets_path = config_presets_path().string();
+  if (warehouse.empty()) warehouse = app.conf.core.warehouse;
+  app.rest_uri = rest_uri.empty() ? app.conf.core.rest_uri : rest_uri;
+  app.ns = primeparts::catalog::ResolveNamespace(
+      ns_name.empty() ? app.conf.core.ns_name : ns_name);
+  app.gen_chunk = app.conf.generate.chunk_primes;
+  app.gen_threads = app.conf.generate.threads;
+
   std::string err;
-  auto qs = QueryService::Open(warehouse, app.ns, &err);
+  auto qs = QueryService::Open(warehouse, app.rest_uri, app.ns, &err);
   if (!qs) {
     std::fprintf(stderr, "QueryService::Open(%s): %s\n", warehouse.c_str(), err.c_str());
     return 1;
@@ -546,18 +532,6 @@ int main(int argc, char** argv) {
       else app.confirm_quit = false;
       redraw(&app); continue;
     }
-    if (app.modal_on && app.modal_kind == ModalKind::Warehouse) {
-      if (key == NCKEY_ESC) app.modal_on = false;
-      else if (key == NCKEY_ENTER || key == '\n' || key == '\r') confirm_modal(&app);
-      else if (key == NCKEY_BACKSPACE || key == NCKEY_DEL || key == 127 || key == 8) {
-        if (!app.modal_buf.empty() && !app.modal_buf[0].empty())
-          app.modal_buf[0].pop_back();
-      } else if (key >= 0x20 && key <= 0x7e) {
-        if (!app.modal_buf.empty() && app.modal_buf[0].size() < 1024)
-          app.modal_buf[0].push_back((char)key);
-      }
-      redraw(&app); continue;
-    }
     if (app.modal_on) {
       const size_t nf = modal_field_count(&app);
       if (key == NCKEY_ESC || key == 'b') app.modal_on = false;
@@ -592,21 +566,12 @@ int main(int argc, char** argv) {
                    : key == NCKEY_F03 ? Screen::Status
                    : key == NCKEY_F04 ? Screen::Generate
                                       : Screen::Config;
-      app.cfg_cursor = 0;
       layout(&app); redraw(&app); continue;
     }
     if (key == 'q') { app.confirm_quit = true; redraw(&app); continue; }
     if (key == NCKEY_RESIZE) { layout(&app); redraw(&app); continue; }
     if (app.screen == Screen::Config) {
-      const size_t n = cfg_count();
-      if ((key == 'j' || key == NCKEY_DOWN) && app.cfg_cursor + 1 < n) ++app.cfg_cursor;
-      else if ((key == 'k' || key == NCKEY_UP) && app.cfg_cursor > 0) --app.cfg_cursor;
-      else if (key == '+' || key == '=') cfg_adjust(&app, app.cfg_cursor, +1);
-      else if (key == '-') cfg_adjust(&app, app.cfg_cursor, -1);
-      else if ((key == NCKEY_ENTER || key == '\n' || key == '\r') &&
-               app.cfg_cursor == kCfgWarehouse)
-        open_warehouse_modal(&app);
-      else if (key == 's') save_config(&app);
+      if (key == 'e') edit_config(&app);
       redraw(&app); continue;
     }
     if (app.screen == Screen::Generate) {

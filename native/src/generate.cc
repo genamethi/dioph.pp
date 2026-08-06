@@ -53,8 +53,6 @@ using primeparts::WrittenFile;
 
 namespace {
 
-constexpr int64_t kDefaultChunkPrimes = 500000;
-
 constexpr int64_t kMinCount = 1'000'000'000;
 
 constexpr int64_t kFreshStartIdx = 2;
@@ -76,12 +74,13 @@ void log_line(const pp_gen_callbacks* callbacks, const char* fmt, ...) {
 struct Options {
   int64_t start_idx = 0;
   int64_t count = -1;
-  int64_t chunk_primes = kDefaultChunkPrimes;
-  int64_t threads = 0;
+  int64_t chunk_primes = 0;
+  int64_t threads = -1;
   int64_t prime_rank_start = 0;
   bool temp = false;
   bool init = false;
   fs::path warehouse;
+  fs::path config_path;
   std::string rest_uri;
   iceberg::Namespace ns;
 };
@@ -248,25 +247,27 @@ void usage(FILE* stream) {
       "                            prime_rank + 1). Applies only to a fresh\n"
       "                            warehouse or --temp, where it defaults to 2\n"
       "                            (index 1 is p=2, omitted by convention).\n"
-      "  --warehouse PATH          Warehouse root. Default: config.lua 'warehouse'.\n"
-      "  --rest-uri URL            pp-catalogd base (e.g. http://127.0.0.1:8181).\n"
-      "                            Default: config.lua 'rest_uri' or 127.0.0.1:8181.\n"
-      "  --namespace NS            Catalog namespace for both tables.\n"
-      "                            Default: config.lua 'namespace' or primeparts.\n"
+      "  --config PATH             Config file. Default: ./config.lua, then\n"
+      "                            $XDG_CONFIG_HOME/primeparts/config.lua, then\n"
+      "                            ~/.config/primeparts/config.lua, else seeded\n"
+      "                            next to this binary.\n"
+      "  --warehouse PATH          Warehouse root. Default: conf.core.warehouse.\n"
+      "  --rest-uri URL            pp-catalogd base. Default: conf.core.rest_uri.\n"
+      "  --namespace NS            Catalog namespace. Default: conf.core.namespace.\n"
       "  --init                    Create primes/partitions when absent and start\n"
       "                            from prime_rank=2. Without it, a missing table\n"
       "                            is a hard error rather than a silent restart.\n"
       "  --temp                    Write to $FUNBUNS_DATA_DIR/tmp/iceberg_temp_<ts>/\n"
       "                            warehouse and skip the commit (files-only).\n"
-      "  --chunk-primes N          Materialization chunk size (default: 500000).\n"
-      "  --threads N               Materialization threads (default: hw).\n"
+      "  --chunk-primes N          Materialization chunk size.\n"
+      "                            Default: conf.generate.chunk_primes.\n"
+      "  --threads N               Materialization threads (0 = hw).\n"
+      "                            Default: conf.generate.threads.\n"
       "  --help\n"
       "\n"
       "Environment:\n"
       "  PRIMEPARTS_PRIME_RANK_START prime_rank to stamp on the first prime row.\n"
-      "                              Default: the resolved start index.\n"
-      "  PRIMEPARTS_REST_URI         Overrides --rest-uri / config.lua.\n"
-      "  PRIMEPARTS_NAMESPACE        Namespace when --namespace is absent.\n");
+      "                              Default: the resolved start index.\n");
 }
 
 bool parse_i64(const char* text, int64_t* out) {
@@ -481,6 +482,7 @@ bool parse_args(int argc, char** argv, Options* options) {
       {"init", no_argument, nullptr, 1007},
       {"rest-uri", required_argument, nullptr, 1005},
       {"namespace", required_argument, nullptr, 1006},
+      {"config", required_argument, nullptr, 1008},
       {"help", no_argument, nullptr, 'h'},
       {nullptr, 0, nullptr, 0},
   };
@@ -517,13 +519,10 @@ bool parse_args(int argc, char** argv, Options* options) {
       case 1007: options->init = true; break;
       case 1005: options->rest_uri = optarg; break;
       case 1006: ns_name = optarg; break;
+      case 1008: options->config_path = optarg; break;
       case 'h': usage(stdout); std::exit(0);
       default: return false;
     }
-  }
-  if (options->chunk_primes <= 0 || options->threads < 0) {
-    usage(stderr);
-    return false;
   }
   if (options->count < kMinCount) {
     std::fprintf(stderr, "--count must be >= %lld\n", (long long)kMinCount);
@@ -531,33 +530,25 @@ bool parse_args(int argc, char** argv, Options* options) {
   }
 
   std::string cfg_err;
-  auto cfg = primeparts::config::Load(&cfg_err);
-  if (options->rest_uri.empty()) {
-    if (const char* env = std::getenv("PRIMEPARTS_REST_URI"); env && env[0])
-      options->rest_uri = env;
-    else if (auto it = cfg.find("rest_uri"); it != cfg.end() && !it->second.empty())
-      options->rest_uri = it->second;
-    else
-      options->rest_uri = primeparts::catalog::kDefaultRestUri;
+  primeparts::config::Conf conf;
+  if (!primeparts::config::Load(options->config_path, &conf, &cfg_err)) {
+    std::fprintf(stderr, "%s\n", cfg_err.c_str());
+    return false;
   }
-  if (ns_name.empty()) {
-    if (const char* env = std::getenv("PRIMEPARTS_NAMESPACE"); env && env[0])
-      ns_name = env;
-    else if (auto it = cfg.find("namespace"); it != cfg.end() && !it->second.empty())
-      ns_name = it->second;
-  }
+  primeparts::config::Announce(conf);
+
+  if (options->rest_uri.empty()) options->rest_uri = conf.core.rest_uri;
+  if (ns_name.empty()) ns_name = conf.core.ns_name;
   options->ns = primeparts::catalog::ResolveNamespace(ns_name);
   if (options->warehouse.empty()) {
-    if (options->temp) {
-      options->warehouse = default_temp_root() / "warehouse";
-    } else if (auto it = cfg.find("warehouse"); it != cfg.end() && !it->second.empty()) {
-      options->warehouse = it->second;
-    } else {
-      std::fprintf(stderr,
-                   "no warehouse: pass --warehouse, set warehouse in %s, or use --temp\n",
-                   primeparts::config::ConfigFilePath().string().c_str());
-      return false;
-    }
+    options->warehouse = options->temp ? default_temp_root() / "warehouse"
+                                       : fs::path(conf.core.warehouse);
+  }
+  if (options->chunk_primes <= 0) options->chunk_primes = conf.generate.chunk_primes;
+  if (options->threads < 0) options->threads = conf.generate.threads;
+  if (options->chunk_primes <= 0 || options->threads < 0) {
+    usage(stderr);
+    return false;
   }
   if (options->threads == 0) {
     unsigned hw = std::thread::hardware_concurrency();
@@ -964,23 +955,32 @@ int pp_gen_run(const pp_gen_options* options,
     set_last_error("null options");
     return 1;
   }
+  std::string cfg_err;
+  primeparts::config::Conf conf;
+  if (!primeparts::config::Load({}, &conf, &cfg_err)) {
+    set_last_error(cfg_err);
+    return 1;
+  }
   Options internal;
   internal.start_idx = options->start_idx;
   internal.count = options->count;
-  internal.chunk_primes = options->chunk_primes > 0 ? options->chunk_primes : kDefaultChunkPrimes;
+  internal.chunk_primes = options->chunk_primes > 0 ? options->chunk_primes
+                                                    : conf.generate.chunk_primes;
   internal.threads = options->threads;
   internal.prime_rank_start = options->prime_rank_start;
   internal.temp = options->temp != 0;
   if (options->warehouse) internal.warehouse = options->warehouse;
   if (options->rest_uri) internal.rest_uri = options->rest_uri;
   internal.ns = primeparts::catalog::ResolveNamespace(
-      options->ns ? options->ns : "");
+      options->ns && options->ns[0] ? options->ns : conf.core.ns_name);
   if (internal.count < kMinCount || internal.chunk_primes <= 0 || internal.threads < 0) {
     set_last_error("invalid pp_gen_options values (count must be >= 1000000000)");
     return 1;
   }
-  if (internal.rest_uri.empty())
-    internal.rest_uri = primeparts::catalog::kDefaultRestUri;
+  if (internal.rest_uri.empty()) internal.rest_uri = conf.core.rest_uri;
+  if (internal.warehouse.empty() && !internal.temp) {
+    internal.warehouse = conf.core.warehouse;
+  }
   if (internal.warehouse.empty()) {
     if (!internal.temp) {
       set_last_error("either warehouse or temp mode is required");

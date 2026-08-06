@@ -105,11 +105,12 @@ QueryService::QueryService(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) 
 QueryService::~QueryService() = default;
 
 std::unique_ptr<QueryService> QueryService::Open(const fs::path& warehouse,
+                                                 const std::string& rest_uri,
                                                  const iceberg::Namespace& ns,
                                                  std::string* error) {
   auto impl = std::make_unique<Impl>();
   std::string mode;
-  impl->catalog = catalog::OpenCatalog(warehouse, "", &mode, error);
+  impl->catalog = catalog::OpenCatalog(warehouse, rest_uri, &mode, error);
   if (!impl->catalog) return nullptr;
   impl->warehouse = warehouse;
   impl->ns = ns;

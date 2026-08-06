@@ -59,13 +59,7 @@ std::string NamespaceUrlPath(const iceberg::Namespace& ns) {
 }
 
 iceberg::Namespace ResolveNamespace(const std::string& name) {
-  std::string n = name;
-  if (n.empty()) {
-    if (const char* env = std::getenv("PRIMEPARTS_NAMESPACE"); env && *env)
-      n = env;
-  }
-  if (n.empty()) n = kDefaultNamespace;
-  return iceberg::Namespace{{std::move(n)}};
+  return iceberg::Namespace{{name}};
 }
 
 std::shared_ptr<iceberg::FileIO> LocalIO() {
@@ -234,11 +228,11 @@ std::shared_ptr<iceberg::Catalog> OpenCatalog(const fs::path& warehouse,
                                               const std::string& rest_uri,
                                               std::string* mode,
                                               std::string* error) {
-  std::string uri = rest_uri;
+  const std::string& uri = rest_uri;
   if (uri.empty()) {
-    if (const char* env = std::getenv("PRIMEPARTS_REST_URI")) uri = env;
+    if (error) *error = "no rest_uri given";
+    return nullptr;
   }
-  if (uri.empty()) uri = kDefaultRestUri;
   if (!RestServerReachable(uri)) {
     if (error) *error = "catalogd unreachable at " + uri + " (start pp-catalogd)";
     return nullptr;

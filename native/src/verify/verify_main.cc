@@ -1,6 +1,7 @@
 #include "primeparts/verify/verify.h"
 
 #include "primeparts/catalog/pp_iceberg_rest.h"
+#include "primeparts/config.h"
 #include "primeparts/common/uri.h"
 #include "primeparts/scan/table_traits.h"
 
@@ -26,17 +27,15 @@ namespace ppv = primeparts::verify;
 
 namespace {
 
-constexpr char kDefaultWarehouse[] =
-    "./data/ib-staging";
-
 struct Options {
-  std::string warehouse = kDefaultWarehouse;
+  std::string config_path;
+  std::string warehouse;
   std::string rest_uri;
   std::string ns_name;
   std::string table = "both";
   ppv::Window window;
-  int threads = 0;
-  int max_examples = 20;
+  int threads = -1;
+  int max_examples = -1;
   int tail = 0;
   std::string log_path;
 };
@@ -52,13 +51,17 @@ void Usage(const char* argv0) {
     "  --p-hi N           only rows with p <= N (iceberg pushdown)\n"
     "  --limit N          stop after ~N rows total\n"
     "  --tail N           only rows added in the last N snapshots (incremental scan)\n"
-    "  --threads N        shard threads (default: hw concurrency)\n"
-    "  --max-examples N   violating rows to record (default 20)\n"
-    "  --warehouse DIR    warehouse root (default %s)\n"
-    "  --rest-uri URI     IRC endpoint override (default %s)\n"
-    "  --namespace NS     catalog namespace (default %s; env PRIMEPARTS_NAMESPACE)\n"
+    "  --threads N        shard threads (default: conf.verify.threads, 0 = hw)\n"
+    "  --max-examples N   violating rows to record\n"
+    "                     (default: conf.verify.max_examples)\n"
+    "  --config PATH      config file (default: ./config.lua, then XDG, then\n"
+    "                     ~/.config/primeparts/config.lua, else seeded next to\n"
+    "                     this binary)\n"
+    "  --warehouse DIR    warehouse root (default: conf.core.warehouse)\n"
+    "  --rest-uri URI     IRC endpoint (default: conf.core.rest_uri)\n"
+    "  --namespace NS     catalog namespace (default: conf.core.namespace)\n"
     "  --log PATH         run-log path (default verify-<time>.log)\n",
-    argv0, kDefaultWarehouse, ppc::kDefaultRestUri, ppc::kDefaultNamespace);
+    argv0);
 }
 
 struct Logger {
@@ -165,6 +168,7 @@ int main(int argc, char** argv) {
       {"rest-uri", required_argument, nullptr, 'r'},
       {"namespace", required_argument, nullptr, 'N'},
       {"log", required_argument, nullptr, 'o'},
+      {"config", required_argument, nullptr, 1000},
       {"help", no_argument, nullptr, 'h'},
       {nullptr, 0, nullptr, 0}};
   int o;
@@ -182,6 +186,7 @@ int main(int argc, char** argv) {
       case 'r': opts.rest_uri = optarg; break;
       case 'N': opts.ns_name = optarg; break;
       case 'o': opts.log_path = optarg; break;
+      case 1000: opts.config_path = optarg; break;
       case 'h': Usage(argv[0]); return 0;
       default: Usage(argv[0]); return 2;
     }
@@ -202,6 +207,20 @@ int main(int argc, char** argv) {
       return 2;
     }
   }
+
+  std::string cfg_err;
+  primeparts::config::Conf conf;
+  if (!primeparts::config::Load(opts.config_path, &conf, &cfg_err)) {
+    std::fprintf(stderr, "error: %s\n", cfg_err.c_str());
+    return 2;
+  }
+  primeparts::config::Announce(conf);
+  if (opts.warehouse.empty()) opts.warehouse = conf.core.warehouse;
+  if (opts.rest_uri.empty()) opts.rest_uri = conf.core.rest_uri;
+  if (opts.ns_name.empty()) opts.ns_name = conf.core.ns_name;
+  if (opts.threads < 0) opts.threads = static_cast<int>(conf.verify.threads);
+  if (opts.max_examples < 0)
+    opts.max_examples = static_cast<int>(conf.verify.max_examples);
 
   if (opts.log_path.empty())
     opts.log_path = "verify-" + std::to_string(std::time(nullptr)) + ".log";
