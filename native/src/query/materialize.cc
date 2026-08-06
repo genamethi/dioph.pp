@@ -14,6 +14,7 @@
 #include "iceberg/row/partition_values.h"
 #include "iceberg/schema.h"
 #include "iceberg/schema_field.h"
+#include "iceberg/sort_order.h"
 #include "iceberg/table_identifier.h"
 #include "iceberg/type.h"
 
@@ -135,6 +136,8 @@ bool MaterializeColumns(const std::shared_ptr<iceberg::Catalog>& catalog,
     declare.sort_order =
         primeparts::AscendingSortOrder(*schema, options.sort_keys, error);
     if (!declare.sort_order) return false;
+  } else {
+    declare.sort_order = iceberg::SortOrder::Unsorted();
   }
 
   if (!primeparts::catalog::DropTable(catalog, ns, warehouse, name, true, error))

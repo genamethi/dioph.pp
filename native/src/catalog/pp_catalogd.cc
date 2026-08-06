@@ -21,6 +21,7 @@
 #include "primeparts/catalog/pp_iceberg_rest.h"
 #include "primeparts/catalog/plan_store.h"
 #include "primeparts/scan/scan_planner.h"
+#include "primeparts/scan/table_traits.h"
 
 #include "iceberg/catalog.h"
 #include "iceberg/catalog/sql/catalog_store.h"
@@ -146,6 +147,109 @@ bool ParseReqsUpdates(
       auto u = iceberg::TableUpdateFromJson(ju);
       if (!u.has_value()) { *error = u.error().message; return false; }
       updates->push_back(std::move(u.value()));
+    }
+  }
+  return true;
+}
+
+int StatusForSortOrder(primeparts::scan::SortOrderSupport support) {
+  return support == primeparts::scan::SortOrderSupport::kUnsupported ? 501 : 400;
+}
+
+const char* TypeForStatus(int status) {
+  return status == 501 ? "NotImplemented" : "BadRequest";
+}
+
+bool SortOrdersInUpdatesResolvable(
+    const iceberg::TableMetadata* metadata,
+    const std::vector<std::unique_ptr<iceberg::TableUpdate>>& updates,
+    int* status, std::string* error) {
+  std::vector<std::shared_ptr<iceberg::Schema>> schemas;
+  std::vector<std::shared_ptr<iceberg::SortOrder>> orders;
+  if (metadata) {
+    schemas = metadata->schemas;
+    orders = metadata->sort_orders;
+  }
+
+  bool touches_sort_order = false;
+  std::shared_ptr<iceberg::Schema> last_added_schema;
+  int32_t current_schema_id = metadata ? metadata->current_schema_id : -1;
+  for (const auto& u : updates) {
+    switch (u->kind()) {
+      case iceberg::TableUpdate::Kind::kAddSchema: {
+        const auto& add = static_cast<const iceberg::table::AddSchema&>(*u);
+        if (add.schema()) {
+          last_added_schema = add.schema();
+          schemas.push_back(add.schema());
+        }
+        break;
+      }
+      case iceberg::TableUpdate::Kind::kSetCurrentSchema: {
+        const auto& set =
+            static_cast<const iceberg::table::SetCurrentSchema&>(*u);
+        current_schema_id = set.schema_id() == -1 && last_added_schema
+                                ? last_added_schema->schema_id()
+                                : set.schema_id();
+        break;
+      }
+      case iceberg::TableUpdate::Kind::kAddSortOrder:
+      case iceberg::TableUpdate::Kind::kSetDefaultSortOrder:
+        touches_sort_order = true;
+        break;
+      default:
+        break;
+    }
+  }
+  if (!touches_sort_order) return true;
+
+  std::shared_ptr<iceberg::Schema> schema;
+  for (const auto& s : schemas) {
+    if (s && s->schema_id() == current_schema_id) schema = s;
+  }
+  if (!schema) return true;
+
+  std::shared_ptr<iceberg::SortOrder> last_added_order;
+  for (const auto& u : updates) {
+    if (u->kind() == iceberg::TableUpdate::Kind::kAddSortOrder) {
+      const auto& add = static_cast<const iceberg::table::AddSortOrder&>(*u);
+      if (!add.sort_order()) continue;
+      const auto support =
+          primeparts::scan::CheckSortOrder(*schema, *add.sort_order(), error);
+      if (support != primeparts::scan::SortOrderSupport::kOk) {
+        *status = StatusForSortOrder(support);
+        return false;
+      }
+      last_added_order = add.sort_order();
+      orders.push_back(add.sort_order());
+      continue;
+    }
+    if (u->kind() != iceberg::TableUpdate::Kind::kSetDefaultSortOrder) continue;
+
+    const auto& set =
+        static_cast<const iceberg::table::SetDefaultSortOrder&>(*u);
+    std::shared_ptr<iceberg::SortOrder> target;
+    if (set.sort_order_id() == -1) {
+      target = last_added_order;
+    } else {
+      for (const auto& o : orders) {
+        if (o && o->order_id() == set.sort_order_id()) target = o;
+      }
+    }
+    if (!target) {
+      if (set.sort_order_id() == iceberg::SortOrder::kUnsortedOrderId) continue;
+      if (error) {
+        *error = "set-default-sort-order references sort order id " +
+                 std::to_string(set.sort_order_id()) +
+                 " which this update does not add and the table does not have";
+      }
+      *status = 400;
+      return false;
+    }
+    const auto support =
+        primeparts::scan::CheckSortOrder(*schema, *target, error);
+    if (support != primeparts::scan::SortOrderSupport::kOk) {
+      *status = StatusForSortOrder(support);
+      return false;
     }
   }
   return true;
@@ -507,9 +611,22 @@ int RunCatalogd(const CatalogdOptions& opts) {
                                          .name = cr.name};
              auto spec = cr.partition_spec ? cr.partition_spec
                                            : iceberg::PartitionSpec::Unpartitioned();
-             auto order = cr.write_order ? cr.write_order : iceberg::SortOrder::Unsorted();
-             auto r = catalog->CreateTable(id, cr.schema, spec, order, cr.location,
-                                           cr.properties);
+             if (!cr.write_order)
+               return SendError(res, 400, "BadRequest",
+                                "create-table requires write-order; send an "
+                                "unsorted order to create an unordered table");
+             if (!cr.schema)
+               return SendError(res, 400, "BadRequest",
+                                "create-table requires schema");
+             std::string oerr;
+             const auto support = primeparts::scan::CheckSortOrder(
+                 *cr.schema, *cr.write_order, &oerr);
+             if (support != primeparts::scan::SortOrderSupport::kOk) {
+               const int status = StatusForSortOrder(support);
+               return SendError(res, status, TypeForStatus(status), oerr);
+             }
+             auto r = catalog->CreateTable(id, cr.schema, spec, cr.write_order,
+                                           cr.location, cr.properties);
              if (!r.has_value()) return SendIcebergError(res, r.error());
              SendTableResult(res, 200, r.value(), planning_mode);
            });
@@ -713,6 +830,13 @@ int RunCatalogd(const CatalogdOptions& opts) {
              std::string perr;
              if (!ParseReqsUpdates(body, &requirements, &updates, &perr))
                return SendError(res, 400, "BadRequest", perr);
+             int ostatus = 400;
+             const iceberg::TableMetadata* meta = nullptr;
+             auto existing = catalog->LoadTable(id);
+             if (existing.has_value() && existing.value())
+               meta = existing.value()->metadata().get();
+             if (!SortOrdersInUpdatesResolvable(meta, updates, &ostatus, &perr))
+               return SendError(res, ostatus, TypeForStatus(ostatus), perr);
              auto r = catalog->UpdateTable(id, requirements, updates);
              if (!r.has_value()) return SendIcebergError(res, r.error());
              SendTableResult(res, 200, r.value(), std::string());
@@ -771,6 +895,14 @@ int RunCatalogd(const CatalogdOptions& opts) {
                std::string perr;
                if (!ParseReqsUpdates(ch, &c.reqs, &c.updates, &perr))
                  return SendError(res, 400, "BadRequest", perr);
+               int ostatus = 400;
+               const iceberg::TableMetadata* meta = nullptr;
+               auto existing = catalog->LoadTable(c.id);
+               if (existing.has_value() && existing.value())
+                 meta = existing.value()->metadata().get();
+               if (!SortOrdersInUpdatesResolvable(meta, c.updates, &ostatus,
+                                                  &perr))
+                 return SendError(res, ostatus, TypeForStatus(ostatus), perr);
                changes.push_back(std::move(c));
              }
              auto st = store->RunInTransaction([&]() -> iceberg::Status {

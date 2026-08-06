@@ -61,21 +61,7 @@ Start here when deciding what is alive.
 
 Roughly in dependency order. Each is a starting point, not a spec.
 
-1. Declare sort order. To fit the spec design shape we need to change it so that
-   tables declare their sort order at creation.
-   We can leverage the IRC spec.
-
-   Make the table creation process enforce, and give a clear
-   return signal when unimplemented, such as NotImplemented.
-
-2. Bringing generate back to a workable state:
-
-   Decided to make initialization deliberate. That is to say,
-   if a table doesn't exist, then it's only created when specified with --init.
-   Set ShapePolicy.file_target_bytes, rgs_per_file shadow
-   write.target-file-size-bytes, etc. at table creation, read from metadata.
-
-3. Implement pp-graph for graph analysis of structure leveraging Hermite
+1. Implement pp-graph for graph analysis of structure leveraging Hermite
    polynomials.
 
    I want to explore the structure of these solutions based on properties like
@@ -118,14 +104,14 @@ Roughly in dependency order. Each is a starting point, not a spec.
    covering all primes under 64 bits (and hopefully beyond, really).
    Point is we don't want toy examples that are only workable on a bounded prefix.
 
-4. **Settle consumer server-side planning.** `rest_scan_plan` exists and works;
+2. **Settle consumer server-side planning.** `rest_scan_plan` exists and works;
    it is linked only into the e2e test. Either wire `source_scan` /
    `query_service` to it — which also decides where mode dispatch lives — or
    accept that in-process planning is the real path and the REST client is for
    foreign consumers. `generate` is already a REST client on both resume reads,
    so the producer's REST-ness is not the gap; what it does not use is the
    *spec* planning routes.
-5. **Settle configuration.** One surface, one warehouse default. However, a
+3. **Settle configuration.** One surface, one warehouse default. However, a
   qualification and some clarifications: (a) Iceberg tables being defined by
   schemas.cc is fine when they're tightly coupled to a binary. What the final
   shape will likely be is that we'll have a client surface for deriving tables

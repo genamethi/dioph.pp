@@ -6,6 +6,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "primeparts/writer.h"
@@ -51,6 +52,12 @@ struct ShapePolicy {
   int64_t rg_target_bytes() const {
     return rgs_per_file > 0 ? file_target_bytes / rgs_per_file : file_target_bytes;
   }
+
+  std::unordered_map<std::string, std::string> AsTableProperties() const;
+
+  bool FromTableProperties(
+      const std::unordered_map<std::string, std::string>& properties,
+      std::vector<std::string>* absent, std::string* error);
 };
 
 struct ResumeState {
