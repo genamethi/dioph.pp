@@ -33,18 +33,13 @@ dependent code should be fixed.)
 | `primeparts-verify` | `verify_main.cc` | verify, source_scan, scan planner |
 | `primeparts-tui` | `tui_main.cc` | tui_*, query_service, materialize, lua_presets, source_scan |
 | `pp` | `query/pp_main.cc` | lua_query_module, query_service, materialize, source_scan |
+| `pp-graph` | `graph/pp_graph.cc` | pp_graph_store, session, rest_scan_plan, source_scan, materialize |
 | `primeparts-bench-core`, `primeparts-bench-materialize` | `bench.c`, `materialize_bench.c` | core only |
 
-Consumers of scan plans are `source_scan.cc` (the generic reader) and
-`query_service.cc`. Both plan **in-process** from metadata they read off disk.
-
-## Not wired to anything
-
-Start here when deciding what is alive.
-
-- `catalog/rest_scan_plan.{h,cc}` — the four client planning calls and
-  `PlanScanOnServer`. Linked only into the e2e test; **no shipped binary calls
-  it**.
+Consumers of scan plans are `source_scan.cc` (the generic reader),
+`query_service.cc` — both plan **in-process** from metadata they read off disk —
+and `client/session.cc`, which dispatches on the advertised `scan-planning-mode`
+and is what `pp-graph` reads through.
 
 ## ACTIVE WORK HERE ON ...
 
@@ -110,12 +105,12 @@ Roughly in dependency order. Each is a starting point, not a spec.
    Point is we don't want toy examples that are only workable on a bounded prefix.
 
 4. **Settle consumer server-side planning.** `rest_scan_plan` exists and works;
-   it is linked only into the e2e test. Either wire `source_scan` /
-   `query_service` to it — which also decides where mode dispatch lives — or
-   accept that in-process planning is the real path and the REST client is for
-   foreign consumers. `generate` is already a REST client on both resume reads,
-   so the producer's REST-ness is not the gap; what it does not use is the
-   *spec* planning routes.
+   `client::Session` dispatches on the advertised mode and `pp-graph` reads
+   through it. `source_scan` / `query_service` still plan in-process from a local
+   metadata path and never consult the advertisement — wire them to `Session`,
+   or accept that in-process planning is the real path for them. `generate` is
+   already a REST client on both resume reads, so the producer's REST-ness is
+   not the gap; what it does not use is the *spec* planning routes.
 5. ~~**Settle configuration.**~~ done
 
 ## Lower priority leftovers: 

@@ -28,7 +28,7 @@ error log from anywhere. (Screen-switch mechanism: see Open Questions.)
 | **Make Query** | General/ad-hoc queries; where saving a query (to a preset) happens. | **STUB** |
 | **Status** | Warehouse status (max_p, row counts, snapshots) — the `ui_iceberg` reads, re-pointed onto the catalog seam. | **STUB** |
 | **Generate** | Run the generation binary; same idea as the old TUI's generate, new layout. Subprocess output fills the lower half, scrollable, 10 000-line cap. | **STUB** |
-| **Config** | Set default LIMIT, generation defaults; save settings to file; toggle log-line persistence (JSON vs flat text dump). | **STUB** |
+| **Config** | Show the resolved `conf` table and its file; `e` opens it in `$EDITOR` and reloads. | **BUILD** |
 | **Error log** (`Ctrl+L`) | Scrollable error/event log overlay. | **BUILD (minimal)** |
 
 ---
@@ -132,10 +132,9 @@ p-range params; methods run synchronously but are driven from the worker thread.
 
 ## 6. Config
 
-- Default LIMIT; generation defaults (n, batch, threads, …).
-- Save settings to a file (format TBD — Lua table to match the config-language
-  choice, or a simple kv file).
-- Toggle log-line persistence: **JSON** or **flat text dump** (direct dump fine).
+- Read-only view of the resolved `conf` table and the file it came from.
+- `e` suspends notcurses, runs `$EDITOR` on that file, reloads, and reopens the
+  editor on a parse or enum error.
 
 ---
 

@@ -4,10 +4,9 @@ The native tooling embeds Lua 5.5 in two distinct places. Both happen to expose
 a global named `query`, but they live in **separate `lua_State`s** and mean
 different things:
 
-1. **Preset / config DSL** — *declarative* files the TUI loads
-   (`scripts/lua/queries.lua` and a config file). Here `query(...)` and
-   `config(...)` are functions that *register* presets / settings.
-   Implemented in `native/src/tui/lua_presets.cc`.
+1. **Preset DSL** — *declarative* files the TUI loads
+   (`scripts/lua/queries.lua`). Here `query(...)` is a function that
+   *registers* presets. Implemented in `native/src/tui/lua_presets.cc`.
 2. **The `query` reader module** — a *table* of callable functions
    (number theory + data lookups) installed into a `lua_State` bound to a
    `QueryService` (the TUI's query execution, preset `run` bodies, a future REPL
@@ -20,7 +19,7 @@ document describes only what is **actually implemented**.
 
 ---
 
-## 1. Preset & config DSL (TUI-loaded files)
+## 1. Preset DSL (TUI-loaded files)
 
 The TUI owns the `lua_State`, sources these files, and collects what the
 functions register. They are plain Lua, so comments/loops/locals are fine.
@@ -51,25 +50,12 @@ query("lookup", {
 | `desc` | string | human description; `{field}` placeholders are filled from `fields` |
 | `kind` | string | `"by_k"` → `QueryService::ScanByK`; `"lookup"` → `LookupPrime` + partitions |
 | `fields` | table | `name = integer` map of form fields and their defaults |
-| `accepts` | array of strings | schema field names the preset filters on (`p`, `k`, `q_k`, `m_k`, `n_k`, `prime_rank`) |
+| `accepts` | array of strings | schema field names the preset filters on (`p`, `k`, `m_k`, `n_k`, `prime_rank`) |
 | `target` | string | the primary schema field |
 
 Presets are validated by the reader (`QueryService::ValidatePreset`) against the
 catalog schema. Field values are integers. Calling `query(...)` multiple times
 registers multiple presets.
-
-### `config(tbl)` — settings
-
-```lua
-config({ log_limit = 500, log_format = "json", autosave = true })
-```
-
-`config(tbl)` flattens one table of `key = value` pairs into the config sink;
-values may be **boolean, number, or string**. Multiple `config(...)` calls merge,
-**last value wins per key**. The TUI defines which keys it reads — currently
-`log_limit` (int), `log_format` (string, e.g. `"json"`), and `autosave` (bool).
-The TUI can serialize the current config back out to a Lua file (round-trips
-through this same shape).
 
 ---
 

@@ -96,13 +96,11 @@ assertions stay; capability assertions retire with their holes.
   injected `PlanFn` has no cancellation point, so the planning runs to
   completion and the result is discarded at publish time — filed-by
   server_planning 02 — owner: unassigned
-- no single planning entry point reads the advertised `scan-planning-mode` and
-  dispatches. `FetchScanPlanningMode` exposes the value and `PlanScanOnServer`
-  and `scan::PlanTableScan` are both callable, but choosing between them is left
-  to each consumer. In-process consumers (`source_scan.cc`, `query_service.cc`)
-  read metadata off disk and never consult the advertisement at all; that is
-  consistent only while metadata is local to the consumer — filed-by
-  server_planning 05 — owner: unassigned
+- `source_scan.cc` and `query_service.cc` do not reach the planning entry point.
+  `Session::Plan` reads the advertised `scan-planning-mode` and dispatches, and
+  `pp-graph` goes through it, but those two still take a local metadata path and
+  never consult the advertisement; that is consistent only while metadata is
+  local to the consumer — filed-by server_planning 05 — owner: unassigned
 - `createTable` answers 500 when the metadata location's parent does not exist.
   arrow's `LocalFileSystem` does not create parents on open-for-write; object
   stores have no directories at all, so this is specific to filesystem-backed
@@ -272,8 +270,8 @@ One site remains, behind the interface.
 
 ## known-red tests (expected; do not "fix" without closing the hole)
 
-As of 2026-07-23: unit 47 passing / 2 red (`make test`; +3 `PpGraphStore` sliced
-disk-path tests), e2e 18 passing / 1 red (`make e2e`). Every red is deliberate — a
+As of 2026-08-06: unit 48 passing / 2 red (`make test`), e2e 22 passing / 1 red
+(`make e2e`). Every red is deliberate — a
 test written to assert correct
 behavior that is not yet implemented, so it goes green when its hole closes.
 

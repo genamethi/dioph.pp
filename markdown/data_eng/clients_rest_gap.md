@@ -59,7 +59,7 @@ expose an Arrow batch stream. `cols` + `filter` are the IRC `PlanTableScanReques
 | MOR position-delete awareness | done (via `FileScanTaskReader`) |
 | Row-group / page pruning (zone map on `p`) | done (`scan::RefineSplits`) |
 | Server-side planning (`planTableScan`) | done — `catalogd_rest_gap.md` |
-| Planning dispatch on the advertised mode | not done — each consumer chooses |
+| Planning dispatch on the advertised mode | `Session::Plan`; `source_scan`/`query_service` still bypass it |
 
 **Row-group pruning** is `scan::SelectSplits`, driven by `scan::RefineSplits`:
 `InclusiveMetricsEvaluator` over the residual against each row group's parquet
@@ -104,11 +104,9 @@ Both paths are live and take the **same request type**:
 | server | `PlanScanOnServer` (`catalog/rest_scan_plan.h`) | submit → poll → page every plan-task |
 | in-process | `scan::PlanTableScan` + `scan::RefineSplits` | needs metadata and FileIO locally |
 
-`ScanPlanRequest` is the input either way, so a consumer builds one request and
-chooses. `FetchScanPlanningMode` reads the server's advertisement, but **nothing
-dispatches on it automatically** — that choice is each consumer's, and a single
-entry point that reads the mode and routes would couple this client to the
-in-process planner. Filed as a hole.
+`ScanPlanRequest` is the input either way. `Session::Plan` reads the
+advertisement via `FetchScanPlanningMode` and routes; `Session::Scan` and
+`Session::PlanFiles` both go through it, and `pp-graph` reads through those.
 
 In-process consumers (`source_scan.cc`, `query_service.cc`) read metadata off
 disk and never consult the advertisement. That is coherent only while metadata is
