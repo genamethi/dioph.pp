@@ -28,6 +28,12 @@ DUCKDB_RPATH ?= -Wl,-rpath,$(abspath $(PREFIX)/lib)
 
 ICEBERG_CPPFLAGS += -I$(PREFIX)/include $(ICEBERG_FALLBACK_CPPFLAGS)
 ICEBERG_LDFLAGS +=
+ifeq ($(PP_SHARED),1)
+ICEBERG_LDLIBS += \
+	-liceberg_data -liceberg_bundle -liceberg_rest -liceberg \
+	-larrow_compute -lparquet -larrow \
+	-lcurl -lssl -lcrypto -ldl -lrt
+else
 # -l:libfoo.a searches -L paths but matches only the archive, so stale or
 # unrelated shared iceberg/arrow libs in the prefix can never be picked up.
 ICEBERG_LDLIBS += \
@@ -39,6 +45,7 @@ ICEBERG_LDLIBS += \
 	$(PREFIX)/lib/libparquet.a $(PREFIX)/lib/libarrow.a \
 	$(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --libs --static parquet arrow | sed -e 's/-lparquet[ ]//g' -e 's/-larrow[ ]//g' -e 's/-L[^ ]*[ ]//g') \
 	-lcurl -lssl -lcrypto -ldl -lrt
+endif
 
 GTEST_CPPFLAGS := -I$(PREFIX)/include/arrow-gtest
 GTEST_LDLIBS := -larrow_gtest_main -larrow_gmock -larrow_gtest
@@ -46,7 +53,11 @@ GTEST_LDLIBS := -larrow_gtest_main -larrow_gmock -larrow_gtest
 LMDB_DIR := vendor/lmdb/libraries/liblmdb
 LMDB_CPPFLAGS += -I$(LMDB_DIR)
 LMDB_CFLAGS := -O3 -g -fPIC -pthread
+ifeq ($(PP_SHARED),1)
+SQL_CATALOG_LDLIBS := -liceberg_sql_catalog
+else
 SQL_CATALOG_LDLIBS := -l:libiceberg_sql_catalog.a
+endif
 
 BUILD_DIR := build
 CORE_OBJ := $(BUILD_DIR)/core.o

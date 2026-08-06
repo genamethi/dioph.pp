@@ -15,6 +15,7 @@ SANITIZE_VENDOR=
 VENDOR_FLINT=
 FORCE=
 DISTCLEAN=
+SHARED=
 for arg in "$@"; do
   case "$arg" in
     --sanitize) SANITIZE=1 ;;
@@ -23,10 +24,11 @@ for arg in "$@"; do
       SANITIZE_VENDOR=1
       ;;
     --vendor-flint) VENDOR_FLINT=1 ;;
+    --shared) SHARED=1 ;;
     --force) FORCE=1 ;;
     --distclean) DISTCLEAN=1 ;;
     *)
-      echo "unknown option: $arg (supported: --sanitize, --sanitize-vendor, --vendor-flint, --force, --distclean)"
+      echo "unknown option: $arg (supported: --sanitize, --sanitize-vendor, --vendor-flint, --shared, --force, --distclean)"
       exit 1
       ;;
   esac
@@ -252,13 +254,23 @@ else
   echo "cpp-httplib header-only present"
 fi
 
-if needs_install arrow "$PREFIX/lib/libarrow.a"; then
+if [ -n "$SHARED" ]; then
+  ARROW_LINK_FLAGS="-DARROW_BUILD_STATIC=OFF -DARROW_DEPENDENCY_SOURCE=AUTO -DGTest_SOURCE=BUNDLED"
+  ARROW_SENTINEL="$PREFIX/lib/libarrow.so"
+  ICEBERG_SENTINEL="$PREFIX/lib/libiceberg_sql_catalog.so"
+else
+  ARROW_LINK_FLAGS="-DARROW_BUILD_STATIC=ON -DARROW_DEPENDENCY_SOURCE=BUNDLED"
+  ARROW_SENTINEL="$PREFIX/lib/libarrow.a"
+  ICEBERG_SENTINEL="$PREFIX/lib/libiceberg_sql_catalog.a"
+fi
+
+if needs_install arrow "$ARROW_SENTINEL"; then
   vendor_sync arrow
   cd "$VENDOR/arrow/cpp"
   mkdir -p build
   cd build
   cmake .. --preset ninja-release -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-    -DARROW_BUILD_STATIC=ON -DARROW_DEPENDENCY_SOURCE=BUNDLED \
+    $ARROW_LINK_FLAGS \
     -DARROW_WITH_SNAPPY=ON -DARROW_BUILD_UTILITIES=ON -DARROW_TESTING=ON \
     $ARROW_SAN_FLAGS
   ninja -j "$JOBS"
@@ -266,7 +278,7 @@ if needs_install arrow "$PREFIX/lib/libarrow.a"; then
   cd "$ROOT"
   stamp_prefix arrow
 else
-  echo "arrow static present"
+  echo "arrow present"
 fi
 
 if [ ! -f "$PREFIX/include/arrow-gtest/gtest/gtest.h" ]; then
@@ -294,7 +306,7 @@ if [ -n "$FETCHED_NLOHMANN" ] && [ "$FETCHED_NLOHMANN" != "$NLOHMANN_VERSION" ];
   rm -rf "$VENDOR/iceberg-cpp/build"
 fi
 
-if needs_install iceberg-cpp "$PREFIX/lib/libiceberg_sql_catalog.a"; then
+if needs_install iceberg-cpp "$ICEBERG_SENTINEL"; then
   echo "building iceberg against nlohmann-json $NLOHMANN_VERSION"
   vendor_sync iceberg-cpp
   cd "$VENDOR/iceberg-cpp"
@@ -389,6 +401,7 @@ fi
   echo "PREFIX := $PREFIX"
   [ -n "$FALLBACK" ] && echo "ICEBERG_FALLBACK_CPPFLAGS := -I$ICEBERG_SRC"
   [ -n "$SANITIZE" ] && echo "SANITIZE := -fsanitize=address,undefined -fno-omit-frame-pointer"
+  [ -n "$SHARED" ] && echo "PP_SHARED := 1"
 } >"$ROOT/config.mk"
 
 INSTALL_PATH="${PP_INSTALL_PATH:-$HOME/.local/bin}"
