@@ -75,6 +75,9 @@ class Session {
                                    const scan::ScanPlanRequest& request,
                                    std::string* error);
 
+  bool PlanFiles(const TableHandle& table, const scan::ScanPlanRequest& request,
+                 std::vector<std::string>* paths, std::string* error);
+
   bool FieldUpperBound(const TableHandle& table, const std::string& field,
                        int64_t* out, bool* present, std::string* error);
 
@@ -84,6 +87,9 @@ class Session {
   const std::shared_ptr<iceberg::FileIO>& io() const;
 
  private:
+  bool Plan(const TableHandle& table, const scan::ScanPlanRequest& request,
+            scan::ScanPlan* out, std::string* error);
+
   struct Impl;
   explicit Session(std::unique_ptr<Impl> impl);
   std::unique_ptr<Impl> impl_;

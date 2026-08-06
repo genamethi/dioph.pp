@@ -366,16 +366,9 @@ bool PlanPaths(const Options& opt, const std::string& table,
   if (!session) return false;
   client::TableHandle handle;
   if (!session->LoadTable(table, &handle, error)) return false;
-  const auto ns = ppc::ResolveNamespace(opt.ns_name);
   auto t0 = std::chrono::steady_clock::now();
-  std::vector<std::shared_ptr<iceberg::FileScanTask>> tasks;
-  if (!ppc::PlanScanOnServer(opt.rest_uri, ns, table, request,
-                             *handle.metadata(), ppc::PlanPollOptions{}, &tasks,
-                             error)) {
-    return false;
-  }
+  if (!session->PlanFiles(handle, request, paths, error)) return false;
   *t_plan = Seconds(t0);
-  for (const auto& t : tasks) paths->push_back(t->data_file()->file_path);
   return true;
 }
 
@@ -445,19 +438,11 @@ bool ReadEdges(const Options& opt, std::vector<Edge>* out, int64_t* rows_scanned
       iceberg::Expressions::LessThanOrEqual("p",
                                             iceberg::Literal::Long(opt.max_p)));
 
-  const auto ns = ppc::ResolveNamespace(opt.ns_name);
   auto t0 = std::chrono::steady_clock::now();
-  std::vector<std::shared_ptr<iceberg::FileScanTask>> tasks;
-  if (!ppc::PlanScanOnServer(opt.rest_uri, ns, "partitions", request,
-                             *partitions.metadata(), ppc::PlanPollOptions{},
-                             &tasks, error)) {
-    return false;
-  }
+  std::vector<std::string> paths;
+  if (!session->PlanFiles(partitions, request, &paths, error)) return false;
   *t_plan = Seconds(t0);
 
-  std::vector<std::string> paths;
-  paths.reserve(tasks.size());
-  for (const auto& t : tasks) paths.push_back(t->data_file()->file_path);
   if (paths.empty()) return true;
 
   duckdb::DBConfig cfg;

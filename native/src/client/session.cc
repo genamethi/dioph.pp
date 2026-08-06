@@ -479,23 +479,39 @@ bool Session::LoadTable(const std::string& table, TableHandle* out,
   return true;
 }
 
+bool Session::PlanFiles(const TableHandle& table,
+                        const scan::ScanPlanRequest& request,
+                        std::vector<std::string>* paths, std::string* error) {
+  scan::ScanPlan plan;
+  if (!Plan(table, request, &plan, error)) return false;
+  paths->clear();
+  paths->reserve(plan.tasks.size());
+  for (const auto& t : plan.tasks)
+    paths->push_back(t.inner->data_file()->file_path);
+  return true;
+}
+
+bool Session::Plan(const TableHandle& table,
+                   const scan::ScanPlanRequest& request, scan::ScanPlan* out,
+                   std::string* error) {
+  if (table.planning_mode() == catalog::ScanPlanningMode::kServer) {
+    return BuildServerPlan(impl_->options.rest_uri, impl_->ns, table.name(),
+                           table.metadata(), request, impl_->options.poll, out,
+                           error);
+  }
+  return scan::PlanTableScan(table.metadata(), impl_->io, request, out, error);
+}
+
 std::unique_ptr<ScanStream> Session::Scan(const TableHandle& table,
                                           const scan::ScanPlanRequest& request,
                                           std::string* error) {
   auto impl = std::make_unique<ScanStream::Impl>();
   impl->io = impl_->io;
   impl->planned_via = table.planning_mode();
-  if (table.planning_mode() == catalog::ScanPlanningMode::kServer) {
-    if (!BuildServerPlan(impl_->options.rest_uri, impl_->ns, table.name(),
-                         table.metadata(), request, impl_->options.poll,
-                         &impl->plan, error)) {
-      return nullptr;
-    }
-  } else {
-    if (!scan::PlanTableScan(table.metadata(), impl_->io, request, &impl->plan,
-                             error)) {
-      return nullptr;
-    }
+  if (!Plan(table, request, &impl->plan, error)) return nullptr;
+  if (!scan::RefineSplits(&impl->plan, impl_->io, request.case_sensitive,
+                          error)) {
+    return nullptr;
   }
   impl->plan.read_batch_size = impl_->options.read_batch_size;
   const int files = static_cast<int>(impl->plan.tasks.size());
