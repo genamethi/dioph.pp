@@ -316,7 +316,7 @@ std::vector<Preset> built_in_presets() {
              "by_k", {{"k", 0}, {"p_lo", 0}, {"p_hi", 0}, {"limit", 10}},
              {"k"}, "k"},
       Preset{"lookup", "prime p == {p}  ->  k + partitions", "lookup",
-             {{"p", 11}}, {"p", "q_k"}, "p"},
+             {{"p", 11}}, {"p"}, "p"},
   };
 }
 

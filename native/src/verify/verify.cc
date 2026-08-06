@@ -1,5 +1,7 @@
 #include "primeparts/verify/verify.h"
 
+#include "primeparts/partition_math.h"
+
 #include "primeparts/common/thread_pool.h"
 #include "primeparts/core.h"
 #include "primeparts/scan/column_binder.h"
@@ -110,7 +112,7 @@ class PartitionCheck : public Check {
  public:
   PartitionCheck() {
     spec_.table = "partitions";
-    spec_.select = {"p", "m_k", "n_k", "q_k"};
+    spec_.select = {"p", "m_k", "n_k"};
   }
   const CheckSpec& spec() const override { return spec_; }
   std::unique_ptr<ShardState> NewShard() const override {
@@ -122,16 +124,16 @@ class PartitionCheck : public Check {
     const int64_t* p = scan::BindInt64(batch, "p", error);
     const int32_t* m_k = scan::BindInt32(batch, "m_k", error);
     const int32_t* n_k = scan::BindInt32(batch, "n_k", error);
-    const int64_t* q_k = scan::BindInt64(batch, "q_k", error);
-    if (!p || !m_k || !n_k || !q_k) return false;
+    if (!p || !m_k || !n_k) return false;
     const int64_t n = batch.num_rows();
 
     for (int64_t i = 0; i < n; ++i) {
       ++out.rows_checked;
       const int32_t m = m_k[i];
       const int32_t nn = n_k[i];
-      const int64_t q = q_k[i];
-      const bool not_allowed = m < 1 || m > 63 || nn < 1 || q < 2;
+      int64_t q = 0;
+      const bool solved = primeparts::SolveQ(p[i], m, nn, &q);
+      const bool not_allowed = m < 1 || m > 63 || nn < 1 || !solved || q < 2;
       const bool composite_q =
           !not_allowed && !n_is_prime(static_cast<ulong>(q));
       const bool unsatisfied =
@@ -145,7 +147,8 @@ class PartitionCheck : public Check {
           std::string d;
           if (not_allowed)
             d = "not allowed: m_k=" + std::to_string(m) +
-                " n_k=" + std::to_string(nn) + " q_k=" + std::to_string(q);
+                " n_k=" + std::to_string(nn) +
+                (solved ? " q_k=" + std::to_string(q) : " q_k unsolvable");
           else if (unsatisfied)
             d = "unsatisfied: p != 2^" + std::to_string(m) + " + " +
                 std::to_string(q) + "^" + std::to_string(nn);

@@ -127,7 +127,4 @@ Roughly in dependency order. Each is a starting point, not a spec.
 3. **Views** —
    `https://raw.githubusercontent.com/apache/iceberg/refs/heads/main/format/view-spec.md`
 4. **Janitor** for killed-run `.pp-staging` debris.
-6. **Compute `q_k` Dynamically:** The `q_k` column was removed from the
-   `partitions` table. Update all consumers (`query_service.cc`, `verify.cc`,
-   `lua_query_module.cc`) to solve for `q_k` algebraically from `(p, m_k, n_k)`
-   on the fly.
+6. ~~**Compute `q_k` Dynamically**~~ done

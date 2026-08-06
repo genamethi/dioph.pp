@@ -5,7 +5,7 @@
 -- save from the TUI. Each entry:
 --   query("id", { desc=, kind=, fields={name=value,...}, accepts={...}, target= })
 --   kind: "by_k" (QueryService.ScanByK) | "lookup" (LookupPrime + partitions)
---   accepts/target: schema field names (p, k, q_k, m_k, n_k, prime_rank)
+--   accepts/target: schema field names (p, k, m_k, n_k, prime_rank)
 
 query("by-k", {
   desc = "primes where k == {k}, p in [{p_lo},{p_hi}], LIMIT {limit}",
@@ -19,6 +19,6 @@ query("lookup", {
   desc = "prime p == {p}  ->  k + partitions",
   kind = "lookup",
   fields = { p = 11 },
-  accepts = { "p", "q_k" },
+  accepts = { "p" },
   target = "p",
 })

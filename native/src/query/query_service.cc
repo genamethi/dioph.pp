@@ -1,5 +1,7 @@
 #include "primeparts/query/query_service.h"
 
+#include "primeparts/partition_math.h"
+
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
@@ -168,7 +170,7 @@ std::vector<PartitionTuple> QueryService::LookupPartitions(
   auto filter = iceberg::Expressions::Equal("p", iceberg::Literal::Long(p));
   std::string e;
   auto reader = primeparts::SourceTableReader::OpenMetadata(
-      meta, {"p", "m_k", "n_k", "q_k"}, filter, &e);
+      meta, {"p", "m_k", "n_k"}, filter, &e);
   if (!reader) {
     if (error) *error = "open partitions: " + e;
     return out;
@@ -185,15 +187,21 @@ std::vector<PartitionTuple> QueryService::LookupPartitions(
     const int64_t* pa = scan::BindInt64(*batch, "p", &e);
     const int32_t* ma = scan::BindInt32(*batch, "m_k", &e);
     const int32_t* na = scan::BindInt32(*batch, "n_k", &e);
-    const int64_t* qa = scan::BindInt64(*batch, "q_k", &e);
-    if (!pa || !ma || !na || !qa) {
+    if (!pa || !ma || !na) {
       if (error) *error = "partitions batch: " + e;
       return out;
     }
     for (int64_t i = 0; i < batch->num_rows(); ++i) {
-      if (pa[i] == p) {
-        out.push_back(PartitionTuple{.m_k = ma[i], .n_k = na[i], .q_k = qa[i]});
+      if (pa[i] != p) continue;
+      int64_t q = 0;
+      if (!SolveQ(pa[i], ma[i], na[i], &q)) {
+        if (error)
+          *error = "partitions: no q_k for p=" + std::to_string(pa[i]) +
+                   " m_k=" + std::to_string(ma[i]) +
+                   " n_k=" + std::to_string(na[i]);
+        return out;
       }
+      out.push_back(PartitionTuple{.m_k = ma[i], .n_k = na[i], .q_k = q});
     }
   }
   return out;
