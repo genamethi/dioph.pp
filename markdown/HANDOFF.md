@@ -113,6 +113,37 @@ Roughly in dependency order. Each is a starting point, not a spec.
    not the gap; what it does not use is the *spec* planning routes.
 5. ~~**Settle configuration.**~~ done
 
+6. **One runner, one declared config.** Three parts of one thread.
+
+   (a) Too many binaries with their own entry points. Prefer two interfaces:
+   TUI and CLI. A runner is the front door; per-binary entry points may stay
+   behind it. C/C++ with Lua embedded, so the runner stays user-editable and
+   scriptable — Lua for lightness and speed, and threading is not a runner
+   concern. Python has better interactive-progress libraries (tqdm); a Lua
+   equivalent is unknown and may have to be built.
+
+   (b) Declare config in a header: one struct carrying the Lua key name beside
+   the field, with an optional validated-field struct alongside. Generate
+   `example.config.lua` from that declaration on the default `make` target
+   instead of authoring it. Same spirit as argparse or Doxygen — one
+   declaration drives the surface. The generator has to run ahead of the embed
+   step that builds `build/example_config.cc`.
+
+   Pain point this must fix: a key absent from an existing `config.lua` is a
+   hard error today. It should be appended dynamically.
+
+   (c) TUI stays separate — reconsider grouping it under the CLI's
+   `config.lua` at all. The settings screen may come back; keep the `$EDITOR`
+   route either way. Screen was replaced in `310528f`.
+
+   Drop `return conf` unless something principled needs it. It buys `require`
+   today and nothing uses that. Sequence is check, then `load`, then execute.
+   The check wants an LPEG Lua grammar verifying the parsed AST is a subset of
+   the valid ones: whitespace-permissive, little custom code, and another
+   argument for a Lua runner. LPEG is not vendored. The loader calls
+   `luaL_dofile` today, which is `luaL_loadfile` + `lua_pcall` in one — split
+   it so the check lands between them.
+
 ## Lower priority leftovers: 
 
 1. **Lifecycle.** Snapshot expiry is unwired, orphaned files from failed
