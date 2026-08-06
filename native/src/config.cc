@@ -104,6 +104,16 @@ struct Reader {
     lua_pop(L, 1);
   }
 
+  void Bool(const char* section, const char* key, bool* out) {
+    lua_getfield(L, -1, key);
+    if (!lua_isboolean(L, -1)) {
+      Fail(section, key, lua_isnil(L, -1) ? "missing" : "expected a boolean");
+    } else {
+      *out = lua_toboolean(L, -1) != 0;
+    }
+    lua_pop(L, 1);
+  }
+
   void I64(const char* section, const char* key, int64_t* out) {
     lua_getfield(L, -1, key);
     if (!lua_isinteger(L, -1)) {
@@ -158,6 +168,9 @@ bool ReadConf(lua_State* L, const std::string& file, Conf* out,
   }
   if (r.Section("tui")) {
     r.I64("tui", "log_limit", &out->tui.log_limit);
+    r.I64("tui", "default_limit", &out->tui.default_limit);
+    r.Str("tui", "log_format", &out->tui.log_format);
+    r.Bool("tui", "autosave", &out->tui.autosave);
     r.EndSection();
   }
   if (r.ok && out->catalogd.scan_planning_mode != "server" &&
@@ -171,6 +184,9 @@ bool ReadConf(lua_State* L, const std::string& file, Conf* out,
   if (r.ok && out->graph.format != "text" && out->graph.format != "dot" &&
       out->graph.format != "json") {
     r.Fail("graph", "format", "expected text|dot|json");
+  }
+  if (r.ok && out->tui.log_format != "flat" && out->tui.log_format != "json") {
+    r.Fail("tui", "log_format", "expected flat|json");
   }
   return r.ok;
 }

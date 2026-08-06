@@ -145,6 +145,7 @@ bool LuaPresets::SaveAll(const std::vector<QueryPreset>& ps, const fs::path& fil
     if (error) *error = "cannot open " + file.string();
     return false;
   }
+  f << "-- primeparts query presets (managed by the TUI; safe to hand-edit)\n\n";
   for (const auto& p : ps) f << Serialize(p);
   if (!f) {
     if (error) *error = "write failed: " + file.string();

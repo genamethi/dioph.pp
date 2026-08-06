@@ -30,6 +30,9 @@ std::vector<std::string> config_lines(const App& a) {
       "generate.chunk_primes " + std::to_string(c.generate.chunk_primes),
       "query.limit           " + std::to_string(c.query.limit),
       "tui.log_limit         " + std::to_string(c.tui.log_limit),
+      "tui.default_limit     " + std::to_string(c.tui.default_limit),
+      "tui.log_format        " + c.tui.log_format,
+      "tui.autosave          " + std::string(c.tui.autosave ? "true" : "false"),
   };
 }
 

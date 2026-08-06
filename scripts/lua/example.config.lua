@@ -38,7 +38,10 @@ conf = {
   },
 
   tui = {
-    log_limit = 200,
+    log_limit     = 200,
+    default_limit = 10,
+    log_format    = "flat",
+    autosave      = false,
   },
 }
 

@@ -46,6 +46,9 @@ struct Graph {
 
 struct Tui {
   int64_t log_limit = 0;
+  int64_t default_limit = 0;
+  std::string log_format;
+  bool autosave = false;
 };
 
 struct Conf {
