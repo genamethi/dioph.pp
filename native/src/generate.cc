@@ -31,10 +31,21 @@
 #include <termios.h>
 #include <thread>
 #include <unistd.h>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include "iceberg/catalog.h"
+#include "iceberg/partition_field.h"
+#include "iceberg/partition_spec.h"
+#include "iceberg/result.h"
 #include "iceberg/schema.h"
+#include "iceberg/schema_field.h"
+#include "iceberg/table.h"
+#include "iceberg/table_identifier.h"
+#include "iceberg/table_metadata.h"
+#include "iceberg/transform.h"
+#include "iceberg/type.h"
 
 namespace fs = std::filesystem;
 
@@ -559,7 +570,7 @@ bool parse_args(int argc, char** argv, Options* options) {
 
 bool commit_plan(const Options& options,
                  const std::shared_ptr<iceberg::Catalog>& catalog,
-                 const CommitPlan& plan,
+                 const CommitPlan& plan, const ShapePolicy& policy,
                  const std::shared_ptr<iceberg::Schema>& p_schema,
                  const std::shared_ptr<iceberg::Schema>& d_schema,
                  const std::shared_ptr<iceberg::PartitionSpec>& p_spec,
@@ -577,7 +588,8 @@ bool commit_plan(const Options& options,
                             : std::vector<std::string>{"p", "m_k"},
         error);
     if (!spec.declare.sort_order) return false;
-    spec.declare.properties = {{"pp.buckets.self-contained", "true"}};
+    spec.declare.properties = policy.AsTableProperties();
+    spec.declare.properties["pp.buckets.self-contained"] = "true";
     for (const auto& wf : tf.files) {
       if (wf.data_file) spec.files.push_back(wf.data_file);
     }
@@ -586,6 +598,118 @@ bool commit_plan(const Options& options,
   return primeparts::catalog::CommitFilesAtomic(catalog, nullptr, options.rest_uri,
                                                 options.ns, options.warehouse,
                                                 specs, error);
+}
+
+bool schema_matches(const iceberg::Schema& compiled,
+                    const iceberg::Schema& adopted, const std::string& table,
+                    std::string* error) {
+  if (compiled.fields().size() != adopted.fields().size()) {
+    *error = "NotImplemented: " + table + " declares " +
+             std::to_string(adopted.fields().size()) + " fields but generate "
+             "produces rows for " + std::to_string(compiled.fields().size()) +
+             "; writing into an evolved schema requires the generator to build "
+             "batches from the table's schema rather than from schemas.cc";
+    return false;
+  }
+  for (const auto& want : compiled.fields()) {
+    const iceberg::SchemaField* got = nullptr;
+    for (const auto& f : adopted.fields()) {
+      if (f.field_id() == want.field_id()) {
+        got = &f;
+        break;
+      }
+    }
+    if (!got) {
+      *error = "NotImplemented: " + table + " has no field id " +
+               std::to_string(want.field_id()) + " ('" +
+               std::string(want.name()) + "'); writing into an evolved schema "
+               "requires the generator to build batches from the table's "
+               "schema rather than from schemas.cc";
+      return false;
+    }
+    if (got->name() != want.name() ||
+        got->type()->type_id() != want.type()->type_id()) {
+      *error = "NotImplemented: " + table + " field id " +
+               std::to_string(want.field_id()) + " is '" +
+               std::string(got->name()) + " " + got->type()->ToString() +
+               "' but generate produces '" + std::string(want.name()) + " " +
+               want.type()->ToString() +
+               "'; writing into an evolved schema requires the generator to "
+               "build batches from the table's schema rather than from "
+               "schemas.cc";
+      return false;
+    }
+  }
+  return true;
+}
+
+bool spec_matches(const iceberg::PartitionSpec& compiled,
+                  const iceberg::PartitionSpec& adopted,
+                  const std::string& table, std::string* error) {
+  if (compiled.fields().size() != adopted.fields().size()) {
+    *error = "NotImplemented: " + table + " has a default partition spec with " +
+             std::to_string(adopted.fields().size()) + " fields but generate "
+             "partitions on " + std::to_string(compiled.fields().size()) +
+             "; writing under an evolved spec requires the generator to derive "
+             "partition values from the table's default spec";
+    return false;
+  }
+  for (size_t i = 0; i < compiled.fields().size(); ++i) {
+    const auto& want = compiled.fields()[i];
+    const auto& got = adopted.fields()[i];
+    if (got.source_id() != want.source_id() || got.name() != want.name() ||
+        !got.transform() ||
+        got.transform()->transform_type() != iceberg::TransformType::kIdentity) {
+      *error = "NotImplemented: " + table + " partition field " +
+               std::to_string(i) + " is '" + std::string(got.name()) +
+               "' over source " + std::to_string(got.source_id()) +
+               " with transform '" +
+               (got.transform() ? got.transform()->ToString()
+                                : std::string("null")) +
+               "' but generate writes identity '" + std::string(want.name()) +
+               "' over source " + std::to_string(want.source_id()) +
+               "; writing under an evolved spec requires the generator to "
+               "derive partition values from the table's default spec";
+      return false;
+    }
+  }
+  return true;
+}
+
+bool adopt_table(const std::shared_ptr<iceberg::Catalog>& catalog,
+                 const iceberg::Namespace& ns, const std::string& name,
+                 std::shared_ptr<iceberg::Schema>* schema,
+                 std::shared_ptr<iceberg::PartitionSpec>* spec,
+                 std::unordered_map<std::string, std::string>* properties,
+                 bool* adopted, std::string* error) {
+  *adopted = false;
+  auto loaded = catalog->LoadTable(iceberg::TableIdentifier{.ns = ns, .name = name});
+  if (!loaded.has_value()) {
+    if (loaded.error().kind == iceberg::ErrorKind::kNoSuchTable) return true;
+    *error = "LoadTable " + name + ": " + loaded.error().message;
+    return false;
+  }
+  const auto& table = loaded.value();
+
+  auto schema_r = table->schema();
+  if (!schema_r.has_value()) {
+    *error = name + " schema: " + schema_r.error().message;
+    return false;
+  }
+  auto spec_r = table->spec();
+  if (!spec_r.has_value()) {
+    *error = name + " spec: " + spec_r.error().message;
+    return false;
+  }
+  if (!schema_matches(**schema, *schema_r.value(), name, error)) return false;
+  if (!spec_matches(**spec, *spec_r.value(), name, error)) return false;
+
+  *schema = schema_r.value();
+  *spec = spec_r.value();
+  if (properties && table->metadata())
+    *properties = table->metadata()->properties.configs();
+  *adopted = true;
+  return true;
 }
 
 bool resolve_start_idx(const Options& options, const pp_gen_callbacks* callbacks,
@@ -711,6 +835,47 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
     }
 
     ShapePolicy policy;
+    if (catalog) {
+      std::unordered_map<std::string, std::string> p_properties;
+      bool p_adopted = false;
+      bool d_adopted = false;
+      if (!adopt_table(catalog, options.ns, "primes", &p_schema, &p_spec,
+                       &p_properties, &p_adopted, &error) ||
+          !adopt_table(catalog, options.ns, "partitions", &d_schema, &d_spec,
+                       nullptr, &d_adopted, &error)) {
+        set_last_error("adopt table: " + error);
+        log_line(callbacks, "%s", g_last_error.c_str());
+        pp_shutdown();
+        return 1;
+      }
+      if (p_adopted) {
+        std::vector<std::string> absent;
+        if (!policy.FromTableProperties(p_properties, &absent, &error)) {
+          set_last_error("shape: " + error);
+          log_line(callbacks, "%s", g_last_error.c_str());
+          pp_shutdown();
+          return 1;
+        }
+        if (absent.empty()) {
+          log_line(callbacks, "shape: read from primes metadata");
+        } else {
+          std::string joined;
+          for (const auto& k : absent) {
+            if (!joined.empty()) joined += ", ";
+            joined += k;
+          }
+          log_line(callbacks,
+                   "shape: primes declares no %s; using the built-in value",
+                   joined.c_str());
+        }
+      }
+      log_line(callbacks,
+               "shape: file_target_bytes=%" PRId64 " rgs_per_file=%d "
+               "bucket_target_bytes=%" PRId64 " bucket_version=%d",
+               policy.file_target_bytes, policy.rgs_per_file,
+               policy.bucket_target_bytes, policy.bucket_version);
+    }
+
     ResumeState resume;
     if (catalog &&
         !LoadAlignedResume(catalog, options.ns,
@@ -905,7 +1070,7 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
     }
 
     if (!options.temp) {
-      if (!commit_plan(options, catalog, plan, p_schema, d_schema, p_spec, d_spec,
+      if (!commit_plan(options, catalog, plan, policy, p_schema, d_schema, p_spec, d_spec,
                        &error)) {
         set_last_error("commit: " + error);
         log_line(callbacks, "%s", g_last_error.c_str());

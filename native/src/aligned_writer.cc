@@ -3,8 +3,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <memory>
+#include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <arrow/api.h>
@@ -41,7 +44,102 @@ int64_t UpperBoundByKey(const arrow::RecordBatch& batch, const std::string& key,
   return static_cast<int64_t>(std::upper_bound(p, p + n, cut_key) - p);
 }
 
+constexpr char kFileTargetKey[] = "write.target-file-size-bytes";
+constexpr char kRowGroupTargetKey[] = "write.parquet.row-group-size-bytes";
+constexpr char kRgsPerFileKey[] = "pp.write.rgs-per-file";
+constexpr char kBucketTargetKey[] = "pp.buckets.target-bytes";
+constexpr char kBucketVersionKey[] = "pp.buckets.version";
+constexpr char kRefBytesPerRowKey[] = "pp.write.ref-bytes-per-row-prior";
+
+bool ReadProperty(const std::unordered_map<std::string, std::string>& props,
+                  const char* key, std::vector<std::string>* absent,
+                  std::string* error, const std::function<bool(const std::string&)>& set) {
+  auto it = props.find(key);
+  if (it == props.end()) {
+    absent->emplace_back(key);
+    return true;
+  }
+  if (!set(it->second)) {
+    if (error) *error = std::string(key) + ": cannot parse '" + it->second + "'";
+    return false;
+  }
+  return true;
+}
+
 }  // namespace
+
+std::unordered_map<std::string, std::string> ShapePolicy::AsTableProperties()
+    const {
+  return {
+      {kFileTargetKey, std::to_string(file_target_bytes)},
+      {kRowGroupTargetKey, std::to_string(rg_target_bytes())},
+      {kRgsPerFileKey, std::to_string(rgs_per_file)},
+      {kBucketTargetKey, std::to_string(bucket_target_bytes)},
+      {kBucketVersionKey, std::to_string(bucket_version)},
+      {kRefBytesPerRowKey, std::to_string(ref_bytes_per_row_prior)},
+  };
+}
+
+bool ShapePolicy::FromTableProperties(
+    const std::unordered_map<std::string, std::string>& properties,
+    std::vector<std::string>* absent, std::string* error) {
+  absent->clear();
+  auto as_int64 = [](const std::string& s, int64_t* out) {
+    try {
+      size_t used = 0;
+      const int64_t v = std::stoll(s, &used);
+      if (used != s.size()) return false;
+      *out = v;
+      return true;
+    } catch (const std::exception&) {
+      return false;
+    }
+  };
+  auto as_double = [](const std::string& s, double* out) {
+    try {
+      size_t used = 0;
+      const double v = std::stod(s, &used);
+      if (used != s.size()) return false;
+      *out = v;
+      return true;
+    } catch (const std::exception&) {
+      return false;
+    }
+  };
+
+  if (!ReadProperty(properties, kFileTargetKey, absent, error,
+                    [&](const std::string& v) {
+                      return as_int64(v, &file_target_bytes);
+                    }))
+    return false;
+  if (!ReadProperty(properties, kRgsPerFileKey, absent, error,
+                    [&](const std::string& v) {
+                      int64_t n = 0;
+                      if (!as_int64(v, &n) || n <= 0) return false;
+                      rgs_per_file = static_cast<int>(n);
+                      return true;
+                    }))
+    return false;
+  if (!ReadProperty(properties, kBucketTargetKey, absent, error,
+                    [&](const std::string& v) {
+                      return as_int64(v, &bucket_target_bytes);
+                    }))
+    return false;
+  if (!ReadProperty(properties, kBucketVersionKey, absent, error,
+                    [&](const std::string& v) {
+                      int64_t n = 0;
+                      if (!as_int64(v, &n)) return false;
+                      bucket_version = static_cast<int32_t>(n);
+                      return true;
+                    }))
+    return false;
+  if (!ReadProperty(properties, kRefBytesPerRowKey, absent, error,
+                    [&](const std::string& v) {
+                      return as_double(v, &ref_bytes_per_row_prior);
+                    }))
+    return false;
+  return true;
+}
 
 struct AlignedBucketWriter::Impl {
   fs::path warehouse;

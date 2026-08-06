@@ -1,3 +1,4 @@
+#include "primeparts/aligned_writer.h"
 #include "primeparts/catalog/partition_stats.h"
 #include "primeparts/catalog/pp_commit.h"
 #include "primeparts/catalog/pp_iceberg_rest.h"
@@ -38,6 +39,7 @@
 #include "iceberg/row/partition_values.h"
 #include "iceberg/schema.h"
 #include "iceberg/schema_field.h"
+#include "iceberg/sort_order.h"
 #include "iceberg/table.h"
 #include "iceberg/type.h"
 
@@ -121,6 +123,7 @@ void BuildPrimesWarehouse(const fs::path& warehouse,
   ASSERT_NE(arrow_schema, nullptr) << error;
 
   ppc::TableDeclaration declare;
+  declare.sort_order = iceberg::SortOrder::Unsorted();
   auto seed = WritePrimesFiles(warehouse, ns, schema, spec, arrow_schema);
   ASSERT_FALSE(seed.empty());
   std::string meta;
@@ -287,6 +290,97 @@ TEST_F(E2ETest, PartitionStatsPresentAfterCommit) {
   ASSERT_NE(row, nullptr) << "no partition stats row for (1, 2)";
   EXPECT_EQ(row->data_file_count, 2);
   EXPECT_EQ(row->data_record_count, 6);
+}
+
+namespace {
+
+nlohmann::json GateSchema() {
+  return nlohmann::json{
+      {"type", "struct"},
+      {"schema-id", 0},
+      {"fields",
+       nlohmann::json::array(
+           {{{"id", 1}, {"name", "p"}, {"required", true}, {"type", "long"}}})}};
+}
+
+nlohmann::json GateSortOrder(const std::string& transform) {
+  return nlohmann::json{{"order-id", 1},
+                        {"fields", nlohmann::json::array({{{"transform", transform},
+                                                           {"source-id", 1},
+                                                           {"direction", "asc"},
+                                                           {"null-order", "nulls-first"}}})}};
+}
+
+}  // namespace
+
+TEST_F(E2ETest, CreateTableRefusesAnUndeclaredSortOrder) {
+  auto cli = Client();
+  nlohmann::json body{{"name", "gate_undeclared"}, {"schema", GateSchema()}};
+  auto res = cli.Post("/v1/namespaces/primeparts/tables", body.dump(),
+                      "application/json");
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 400) << res->body;
+}
+
+TEST_F(E2ETest, CreateTableRefusesAnUnresolvableSortOrder) {
+  auto cli = Client();
+  nlohmann::json body{{"name", "gate_bucket"},
+                      {"schema", GateSchema()},
+                      {"write-order", GateSortOrder("bucket[4]")}};
+  auto res = cli.Post("/v1/namespaces/primeparts/tables", body.dump(),
+                      "application/json");
+  ASSERT_TRUE(res);
+  ASSERT_EQ(res->status, 501) << res->body;
+  auto parsed = nlohmann::json::parse(res->body);
+  EXPECT_EQ(parsed["error"]["type"], "NotImplemented") << res->body;
+}
+
+TEST_F(E2ETest, CreateTableAcceptsAnExplicitlyUnsortedOrder) {
+  fs::path dir = warehouse_;
+  for (const auto& level : ns_.levels) dir /= level;
+  dir /= "gate_unsorted";
+  std::error_code ec;
+  fs::create_directories(dir / "metadata", ec);
+
+  auto cli = Client();
+  nlohmann::json body{
+      {"name", "gate_unsorted"},
+      {"schema", GateSchema()},
+      {"location", dir.string()},
+      {"write-order", {{"order-id", 0}, {"fields", nlohmann::json::array()}}}};
+  auto res = cli.Post("/v1/namespaces/primeparts/tables", body.dump(),
+                      "application/json");
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 200) << res->body;
+}
+
+TEST_F(E2ETest, UpdateTableCannotEvolveIntoAnUnresolvableSortOrder) {
+  auto cli = Client();
+  nlohmann::json update{
+      {"requirements", nlohmann::json::array()},
+      {"updates", nlohmann::json::array(
+                      {{{"action", "add-sort-order"},
+                        {"sort-order", GateSortOrder("bucket[4]")}}})}};
+  auto res = cli.Post("/v1/namespaces/primeparts/tables/primes", update.dump(),
+                      "application/json");
+  ASSERT_TRUE(res);
+  ASSERT_EQ(res->status, 501) << res->body;
+  auto parsed = nlohmann::json::parse(res->body);
+  EXPECT_EQ(parsed["error"]["type"], "NotImplemented") << res->body;
+}
+
+TEST_F(E2ETest, UpdateTableAcceptsAResolvableSortOrder) {
+  auto cli = Client();
+  nlohmann::json update{
+      {"requirements", nlohmann::json::array()},
+      {"updates", nlohmann::json::array(
+                      {{{"action", "add-sort-order"},
+                        {"sort-order", GateSortOrder("identity")}}})}};
+  auto res = cli.Post("/v1/namespaces/primeparts/tables/primes", update.dump(),
+                      "application/json");
+  ASSERT_TRUE(res);
+  EXPECT_NE(res->status, 400) << res->body;
+  EXPECT_NE(res->status, 501) << res->body;
 }
 
 TEST_F(E2ETest, ConfigAdvertisesEveryPlanningRoute) {
@@ -646,6 +740,7 @@ TEST(E2EFreshCommit, PartitionStatsPresentOnFirstCommit) {
   cspec.table_name = "primes";
   cspec.schema = schema;
   cspec.spec = spec;
+  cspec.declare.sort_order = iceberg::SortOrder::Unsorted();
   cspec.files = WritePrimesFiles(wh, ns, schema, spec, arrow_schema);
   ASSERT_FALSE(cspec.files.empty());
   std::vector<ppc::TableCommitSpec> specs;
@@ -661,6 +756,76 @@ TEST(E2EFreshCommit, PartitionStatsPresentOnFirstCommit) {
   ASSERT_TRUE(ppc::LoadPartitionStats(*table.value(), &stats, &error)) << error;
   ASSERT_FALSE(stats.rows.empty())
       << "partition statistics missing on first commit to a fresh table";
+  fs::remove_all(wh, ec);
+}
+
+TEST(E2EFreshCommit, ShapePolicyRoundTripsThroughTableProperties) {
+  const fs::path wh = fs::temp_directory_path() / "primeparts-e2e-shape";
+  std::error_code ec;
+  fs::remove_all(wh, ec);
+  fs::create_directories(wh, ec);
+  const auto ns = ppc::ResolveNamespace(kNamespace);
+
+  std::string error;
+  auto local = ppc::MakeLocalCatalogWithStore(wh, &error);
+  ASSERT_NE(local.catalog, nullptr) << error;
+  auto schema = primeparts::PrimesSchema();
+  auto spec = primeparts::BucketPartitionSpec(*schema, &error);
+  ASSERT_NE(spec, nullptr) << error;
+  auto arrow_schema =
+      primeparts::IcebergToArrowSchemaWithFieldIds(*schema, &error);
+  ASSERT_NE(arrow_schema, nullptr) << error;
+
+  primeparts::ShapePolicy declared;
+  declared.file_target_bytes = 3LL << 30;
+  declared.rgs_per_file = 6;
+  declared.bucket_target_bytes = 48LL << 30;
+  declared.bucket_version = 7;
+  declared.ref_bytes_per_row_prior = 2.5;
+
+  ppc::TableCommitSpec cspec;
+  cspec.table_name = "primes";
+  cspec.schema = schema;
+  cspec.spec = spec;
+  cspec.declare.sort_order = iceberg::SortOrder::Unsorted();
+  cspec.declare.properties = declared.AsTableProperties();
+  cspec.files = WritePrimesFiles(wh, ns, schema, spec, arrow_schema);
+  ASSERT_FALSE(cspec.files.empty());
+  std::vector<ppc::TableCommitSpec> specs;
+  specs.push_back(std::move(cspec));
+  ASSERT_TRUE(ppc::CommitFilesAtomic(local.catalog, local.store, "", ns, wh,
+                                     specs, &error))
+      << error;
+
+  auto table = local.catalog->LoadTable(
+      iceberg::TableIdentifier{.ns = ns, .name = "primes"});
+  ASSERT_TRUE(table.has_value()) << table.error().message;
+  const auto properties = table.value()->metadata()->properties.configs();
+  EXPECT_EQ(properties.at("write.target-file-size-bytes"),
+            std::to_string(declared.file_target_bytes));
+  EXPECT_EQ(properties.at("write.parquet.row-group-size-bytes"),
+            std::to_string(declared.rg_target_bytes()));
+
+  primeparts::ShapePolicy read;
+  std::vector<std::string> absent;
+  ASSERT_TRUE(read.FromTableProperties(properties, &absent, &error)) << error;
+  EXPECT_TRUE(absent.empty());
+  EXPECT_EQ(read.file_target_bytes, declared.file_target_bytes);
+  EXPECT_EQ(read.rgs_per_file, declared.rgs_per_file);
+  EXPECT_EQ(read.bucket_target_bytes, declared.bucket_target_bytes);
+  EXPECT_EQ(read.bucket_version, declared.bucket_version);
+  EXPECT_DOUBLE_EQ(read.ref_bytes_per_row_prior,
+                   declared.ref_bytes_per_row_prior);
+
+  primeparts::ShapePolicy fallback;
+  const primeparts::ShapePolicy builtin;
+  std::unordered_map<std::string, std::string> partial{
+      {"pp.buckets.version", "9"}};
+  ASSERT_TRUE(fallback.FromTableProperties(partial, &absent, &error)) << error;
+  EXPECT_EQ(fallback.bucket_version, 9);
+  EXPECT_EQ(fallback.file_target_bytes, builtin.file_target_bytes);
+  EXPECT_EQ(absent.size(), 4u);
+
   fs::remove_all(wh, ec);
 }
 

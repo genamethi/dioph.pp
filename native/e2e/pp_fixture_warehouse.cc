@@ -16,6 +16,7 @@
 #include "iceberg/partition_spec.h"
 #include "iceberg/row/partition_values.h"
 #include "iceberg/schema.h"
+#include "iceberg/sort_order.h"
 #include "iceberg/table.h"
 
 namespace ppc = primeparts::catalog;
@@ -111,6 +112,7 @@ int main(int argc, char** argv) {
   cspec.table_name = "primes";
   cspec.schema = schema;
   cspec.spec = spec;
+  cspec.declare.sort_order = iceberg::SortOrder::Unsorted();
   cspec.files = WritePrimesFiles(warehouse, ns, schema, spec, arrow_schema,
                                  &error);
   if (cspec.files.empty()) {

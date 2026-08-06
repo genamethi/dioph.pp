@@ -47,21 +47,7 @@ and is what `pp-graph` reads through.
 
 Roughly in dependency order. Each is a starting point, not a spec.
 
-1. Declare sort order. To fit the spec design shape we need to change it so that
-   tables declare their sort order at creation.
-   We can leverage the IRC spec.
-
-   Make the table creation process enforce, and give a clear
-   return signal when unimplemented, such as NotImplemented.
-
-2. Bringing generate back to a workable state:
-
-   Decided to make initialization deliberate. That is to say,
-   if a table doesn't exist, then it's only created when specified with --init.
-   Set ShapePolicy.file_target_bytes, rgs_per_file shadow
-   write.target-file-size-bytes, etc. at table creation, read from metadata.
-
-3. Implement pp-graph for graph analysis of structure leveraging Hermite
+1. Implement pp-graph for graph analysis of structure leveraging Hermite
    polynomials.
 
    I want to explore the structure of these solutions based on properties like
@@ -104,16 +90,16 @@ Roughly in dependency order. Each is a starting point, not a spec.
    covering all primes under 64 bits (and hopefully beyond, really).
    Point is we don't want toy examples that are only workable on a bounded prefix.
 
-4. **Settle consumer server-side planning.** `rest_scan_plan` exists and works;
+2. **Settle consumer server-side planning.** `rest_scan_plan` exists and works;
    `client::Session` dispatches on the advertised mode and `pp-graph` reads
    through it. `source_scan` / `query_service` still plan in-process from a local
    metadata path and never consult the advertisement — wire them to `Session`,
    or accept that in-process planning is the real path for them. `generate` is
    already a REST client on both resume reads, so the producer's REST-ness is
    not the gap; what it does not use is the *spec* planning routes.
-5. ~~**Settle configuration.**~~ done
+3. ~~**Settle configuration.**~~ done
 
-6. **One runner, one declared config.** Three parts of one thread.
+4. **One runner, one declared config.** Three parts of one thread.
 
    (a) Too many binaries with their own entry points. Prefer two interfaces:
    TUI and CLI. A runner is the front door; per-binary entry points may stay

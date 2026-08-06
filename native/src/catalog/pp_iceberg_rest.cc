@@ -19,6 +19,7 @@
 #include "primeparts/catalog/pp_lmdb_store.h"
 #include "primeparts/common/arrow_init.h"
 #include "primeparts/common/uri.h"
+#include "primeparts/scan/table_traits.h"
 
 namespace primeparts::catalog {
 
@@ -315,6 +316,20 @@ std::shared_ptr<iceberg::Table> EnsureTable(
   auto loaded = catalog->LoadTable(ident);
   if (loaded.has_value()) return std::move(loaded.value());
 
+  if (!declare.sort_order) {
+    if (error) {
+      *error = "CreateTable " + table_name +
+               ": no sort order declared; pass iceberg::SortOrder::Unsorted() "
+               "to create an unordered table";
+    }
+    return nullptr;
+  }
+  if (primeparts::scan::CheckSortOrder(*schema, *declare.sort_order, error) !=
+      primeparts::scan::SortOrderSupport::kOk) {
+    if (error) *error = "CreateTable " + table_name + ": " + *error;
+    return nullptr;
+  }
+
   const fs::path table_dir = NamespaceDir(warehouse, ns) / table_name;
   std::error_code ec;
   fs::create_directories(table_dir / "metadata", ec);
@@ -322,10 +337,8 @@ std::shared_ptr<iceberg::Table> EnsureTable(
       {"write.parquet.compression-codec", "zstd"},
       {"write.parquet.compression-level", "3"}};
   for (const auto& [k, v] : declare.properties) properties[k] = v;
-  auto created = catalog->CreateTable(
-      ident, schema, spec,
-      declare.sort_order ? declare.sort_order : iceberg::SortOrder::Unsorted(),
-      table_dir.string(), properties);
+  auto created = catalog->CreateTable(ident, schema, spec, declare.sort_order,
+                                      table_dir.string(), properties);
   if (!created.has_value()) {
     if (error)
       *error = "CreateTable " + table_name + ": " + created.error().message;

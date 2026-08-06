@@ -10,6 +10,47 @@
 
 namespace primeparts::scan {
 
+namespace {
+
+const iceberg::SchemaField* FieldById(const iceberg::Schema& schema,
+                                      int32_t field_id) {
+  for (const auto& f : schema.fields()) {
+    if (f.field_id() == field_id) return &f;
+  }
+  return nullptr;
+}
+
+}  // namespace
+
+SortOrderSupport CheckSortOrder(const iceberg::Schema& schema,
+                                const iceberg::SortOrder& order,
+                                std::string* error) {
+  if (order.is_unsorted()) return SortOrderSupport::kOk;
+  for (const auto& sf : order.fields()) {
+    if (!sf.transform() ||
+        sf.transform()->transform_type() != iceberg::TransformType::kIdentity) {
+      if (error) {
+        *error = "NotImplemented: declared sort order field " +
+                 std::to_string(sf.source_id()) + " uses transform '" +
+                 (sf.transform() ? sf.transform()->ToString()
+                                 : std::string("null")) +
+                 "'; sort orders resolve identity transforms only — "
+                 "resolving this order requires applying the transform to "
+                 "source values when ordering tasks and slicing batches";
+      }
+      return SortOrderSupport::kUnsupported;
+    }
+    if (!FieldById(schema, sf.source_id())) {
+      if (error) {
+        *error = "sort order references unknown field id " +
+                 std::to_string(sf.source_id());
+      }
+      return SortOrderSupport::kInvalid;
+    }
+  }
+  return SortOrderSupport::kOk;
+}
+
 bool TableReadTraits::FromMetadata(const iceberg::TableMetadata& metadata,
                                    TableReadTraits* out, std::string* error) {
   *out = TableReadTraits{};
@@ -30,37 +71,15 @@ bool TableReadTraits::FromMetadata(const iceberg::TableMetadata& metadata,
   }
   const auto& schema = schema_r.value();
 
+  if (CheckSortOrder(*schema, *order, error) != SortOrderSupport::kOk)
+    return false;
+
   std::vector<SortKey> keys;
   for (const auto& sf : order->fields()) {
-    if (!sf.transform() ||
-        sf.transform()->transform_type() != iceberg::TransformType::kIdentity) {
-      if (error) {
-        *error = "NotImplemented: declared sort order field " +
-                 std::to_string(sf.source_id()) + " uses transform '" +
-                 (sf.transform() ? sf.transform()->ToString()
-                                 : std::string("null")) +
-                 "'; TableReadTraits resolves identity transforms only — "
-                 "resolving this order requires applying the transform to "
-                 "source values when ordering tasks and slicing batches";
-      }
-      return false;
-    }
     SortKey key;
     key.field_id = sf.source_id();
     key.ascending = sf.direction() == iceberg::SortDirection::kAscending;
-    for (const auto& f : schema->fields()) {
-      if (f.field_id() == sf.source_id()) {
-        key.name = std::string(f.name());
-        break;
-      }
-    }
-    if (key.name.empty()) {
-      if (error) {
-        *error = "sort order references unknown field id " +
-                 std::to_string(sf.source_id());
-      }
-      return false;
-    }
+    key.name = std::string(FieldById(*schema, sf.source_id())->name());
     keys.push_back(std::move(key));
   }
   out->sort_keys = std::move(keys);

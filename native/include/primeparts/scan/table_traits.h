@@ -6,10 +6,22 @@
 #include <vector>
 
 namespace iceberg {
+class Schema;
+class SortOrder;
 struct TableMetadata;
 }
 
 namespace primeparts::scan {
+
+enum class SortOrderSupport {
+  kOk,
+  kInvalid,
+  kUnsupported,
+};
+
+SortOrderSupport CheckSortOrder(const iceberg::Schema& schema,
+                                const iceberg::SortOrder& order,
+                                std::string* error);
 
 struct TableReadTraits {
   struct SortKey {

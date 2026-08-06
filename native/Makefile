@@ -86,7 +86,7 @@ TEST_SUITE_LIBOBJS := $(WRITER_OBJ) $(SCHEMAS_OBJ) $(SCAN_OBJS) $(PARTITION_STAT
 
 E2E_BIN := $(BUILD_DIR)/primeparts-e2e
 E2E_OBJ := $(BUILD_DIR)/e2e_test.o
-E2E_LIBOBJS := $(SESSION_OBJ) $(REST_SCAN_PLAN_OBJ) $(PLAN_STATUS_OBJ) $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(PP_ICEBERG_REST_OBJ) $(PP_COMMIT_OBJ) $(PP_LMDB_STORE_OBJ) $(PARTITION_STATS_OBJ) $(LMDB_LIB)
+E2E_LIBOBJS := $(SESSION_OBJ) $(REST_SCAN_PLAN_OBJ) $(PLAN_STATUS_OBJ) $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(WRITER_OBJ) $(ALIGNED_WRITER_OBJ) $(SCHEMAS_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(PP_ICEBERG_REST_OBJ) $(PP_COMMIT_OBJ) $(PP_LMDB_STORE_OBJ) $(PARTITION_STATS_OBJ) $(LMDB_LIB)
 
 .DEFAULT_GOAL := all
 .PHONY: all clean test e2e build-deps install install-service
@@ -201,7 +201,7 @@ $(BUILD_DIR)/pp_main.o: src/query/pp_main.cc include/primeparts/query/lua_query_
 $(BUILD_DIR)/materialize.o: src/query/materialize.cc include/primeparts/query/materialize.h include/primeparts/writer.h include/primeparts/catalog/pp_iceberg_rest.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(PP_ICEBERG_REST_OBJ): src/catalog/pp_iceberg_rest.cc include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/catalog/pp_lmdb_store.h include/primeparts/common/arrow_init.h include/primeparts/common/uri.h | $(BUILD_DIR)
+$(PP_ICEBERG_REST_OBJ): src/catalog/pp_iceberg_rest.cc include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/catalog/pp_lmdb_store.h include/primeparts/common/arrow_init.h include/primeparts/common/uri.h include/primeparts/scan/table_traits.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 # --- LMDB catalog store --------------------------------------------------
@@ -236,7 +236,7 @@ $(BUILD_DIR)/mdb_%: $(LMDB_DIR)/mdb_%.c $(LMDB_LIB) $(LMDB_MODULE_OBJ) | $(BUILD
 .PHONY: lmdb-tools
 lmdb-tools: $(LMDB_TOOLS)
 
-$(PP_CATALOGD_OBJ): src/catalog/pp_catalogd.cc include/primeparts/catalog/pp_catalogd.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/catalog/plan_store.h include/primeparts/scan/scan_planner.h | $(BUILD_DIR)
+$(PP_CATALOGD_OBJ): src/catalog/pp_catalogd.cc include/primeparts/catalog/pp_catalogd.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/catalog/plan_store.h include/primeparts/scan/scan_planner.h include/primeparts/scan/table_traits.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(ICEBERG_SRC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(PP_COMMIT_OBJ): src/catalog/pp_commit.cc include/primeparts/catalog/pp_commit.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/catalog/partition_stats.h | $(BUILD_DIR)
@@ -266,7 +266,7 @@ $(SCAN_PLANNER_OBJ): src/scan/scan_planner.cc include/primeparts/scan/scan_plann
 $(BUILD_DIR)/libprimeparts_core.so: $(CORE_OBJ)
 	$(CC) -shared $(LDFLAGS) $^ $(LDLIBS) -o $@
 
-$(BUILD_DIR)/primeparts-generate: $(CORE_OBJ) $(GENERATE_OBJ) $(CONFIG_OBJS) $(WRITER_OBJ) $(ALIGNED_WRITER_OBJ) $(SCHEMAS_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_COMMIT_OBJ) $(PARTITION_STATS_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
+$(BUILD_DIR)/primeparts-generate: $(CORE_OBJ) $(GENERATE_OBJ) $(CONFIG_OBJS) $(WRITER_OBJ) $(ALIGNED_WRITER_OBJ) $(SCHEMAS_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_COMMIT_OBJ) $(PARTITION_STATS_OBJ) $(TABLE_TRAITS_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(LUA_LDLIBS) -lsqlite3 -pthread -o $@
 
 $(BUILD_DIR)/primeparts-catalogd: $(PP_CATALOGD_MAIN_OBJ) $(PP_CATALOGD_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(CONFIG_OBJS) $(PLAN_STORE_OBJ) $(PLAN_STATUS_OBJ) $(SCAN_OBJS) $(LMDB_LIB)
@@ -299,7 +299,7 @@ $(TEST_SUITE_BIN): $(TEST_SUITE_OBJS) $(TEST_SUITE_LIBOBJS)
 test: $(TEST_SUITE_BIN)
 	$(TEST_SUITE_BIN)
 
-$(E2E_OBJ): e2e/e2e_test.cc | $(BUILD_DIR)
+$(E2E_OBJ): e2e/e2e_test.cc include/primeparts/aligned_writer.h | $(BUILD_DIR)
 	$(CXX) $(GTEST_CPPFLAGS) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(E2E_BIN): $(E2E_OBJ) $(E2E_LIBOBJS)
