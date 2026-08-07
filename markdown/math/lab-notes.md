@@ -764,3 +764,66 @@ k-distribution entry above.
 
    73,964 rows of 20.69e9 = 0.00036%, max n = 23. The one-parameter family
    g_m = He1 + 2^m*He0 is essentially the whole object at this scale.
+
+
+2026-08-06  He_n mod l for n >= 4: root criterion, Galois type, and a
+            non-congruence consequence
+---------------------------------------------------------------------
+
+Sage verification session; extends hermite_congruences.md (phase-03) open
+step 1, and corrects its guess.
+
+1. PHASE-03 CLAIMS RE-VERIFIED
+
+   He_p == x^p (mod p) exact for all primes p < 38. He_3 has a nonzero root
+   in F_l iff (3|l) = 1: zero failures over all primes 5 <= l < 700.
+
+2. THE ROOT CRITERION FOR n >= 4 IS TWO-STAGE (CORE ROOT + QR LIFT)
+
+   Write the odd part of He_n as a polynomial in y = x^2 (the "core"):
+
+       n=4: y^2-6y+3        n=5: y^2-10y+15      n=6: y^3-15y^2+45y-15
+       n=7: y^3-21y^2+105y-105   n=8: y^4-28y^3+210y^2-420y+105
+       n=9: y^4-36y^3+378y^2-1260y+945
+
+   (up to scaling these are the generalized Laguerre L_m^{(-+1/2)}(y/2),
+   m = floor(n/2).) He_n has a nonzero root mod l iff the core has a root
+   t in F_l with t a quadratic residue. Verified with ZERO mismatches for
+   n = 4..9 over every prime 11 <= l < 3000 (425 primes each).
+
+3. GALOIS TYPE IS THE FULL HYPEROCTAHEDRAL GROUP
+
+   Gal(He_n odd part) = C2 wr S_m (order 2^m * m!) for n = 4..11
+   (pari polgalois; degree cap 11 stops the direct check there). Cores
+   carry the full S_m.
+
+4. CONSEQUENCE: FOR n >= 6 THE ROOT CONDITION IS NOT A CONGRUENCE
+
+   For m <= 2 (n = 3,4,5) the criterion reduces to Kronecker symbols
+   ((3|l); (6|l) with the QR lift of 3+-sqrt6; (10|l) likewise). For
+   m >= 3 the core condition is splitting in a degree-m field with
+   nonabelian S_m image, so by Chebotarev NO finite set of moduli /
+   power-residue symbols on l decides it. Phase-03's open-step-1 guess
+   ("cubic and higher residues") holds only in the abelian range n <= 5.
+   Structural reading: the covering/automaton (p-normal) universe is
+   abelian-congruence by construction; the Hermite root condition for
+   n >= 6 lies strictly outside it. The two arithmetics of
+   hermite_congruences.md are not just orthogonal in practice; from n = 6
+   on they are of different kinds.
+
+5. DENSITIES MATCH THE WREATH-GROUP CHEBOTAREV PREDICTION
+
+   Fraction of l < 3000 where He_n has a nonzero root, vs the fixed-point
+   fraction of C2 wr S_m:
+
+       n=4,5: 0.3709 vs 0.3750     n=6,7: 0.4061 / 0.4038 vs 0.3958
+       n=8,9: 0.3897 / 0.3756 vs 0.3932
+
+   As m grows the prediction tends to 1 - e^{-1/2} = 0.3935: the
+   root-avoidance probability per l is asymptotically n-independent.
+
+6. NO ord_2 DEPENDENCE DETECTED
+
+   Hit rates split by ord_2(l) <= 60 vs > 60 differ by at most ~1 sigma
+   at the available sample (48 small-order primes below 3000), consistent
+   with phase-03 orthogonality.

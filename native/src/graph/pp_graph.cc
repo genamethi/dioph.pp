@@ -30,6 +30,7 @@
 #include "primeparts/client/session.h"
 #include "primeparts/config.h"
 #include "primeparts/partition_math.h"
+#include "primeparts/graph/hermite_modl.h"
 #include "primeparts/graph/pp_graph_store.h"
 #include "primeparts/query/materialize.h"
 #include "primeparts/scan/scan_plan.h"
@@ -54,6 +55,8 @@ struct Options {
   std::string format;
   std::string mode;
   int64_t top = -1;
+  int64_t he_n = -1;
+  int64_t ell_max = -1;
 };
 
 struct Edge {
@@ -98,7 +101,9 @@ void Usage(FILE* out) {
       "  --warehouse DIR  warehouse root (conf.core.warehouse)\n"
       "  --namespace NS   catalog namespace (conf.core.namespace)\n"
       "  --threads N      scan/engine threads (conf.graph.threads)\n"
-      "  --mode M         basis | hasse | compose | edges (conf.graph.mode)\n"
+      "  --mode M         basis | hasse | compose | edges | roots (conf.graph.mode)\n"
+      "  --he-n N         mode roots: largest Hermite degree to check\n"
+      "  --ell-max N      mode roots: largest prime modulus to check\n"
       "  --format F       text | dot | json (conf.graph.format)\n"
       "  --top N          rows to show in text listings (conf.graph.top)\n"
       "  --help\n");
@@ -125,6 +130,8 @@ bool ParseArgs(int argc, char** argv, Options* opt) {
       {"top", required_argument, nullptr, 1007},
       {"mode", required_argument, nullptr, 1008},
       {"config", required_argument, nullptr, 1009},
+      {"he-n", required_argument, nullptr, 1010},
+      {"ell-max", required_argument, nullptr, 1011},
       {"help", no_argument, nullptr, 'h'},
       {nullptr, 0, nullptr, 0},
   };
@@ -149,6 +156,12 @@ bool ParseArgs(int argc, char** argv, Options* opt) {
         break;
       case 1008: opt->mode = optarg; break;
       case 1009: opt->config_path = optarg; break;
+      case 1010:
+        if (!ParseI64(optarg, &opt->he_n)) return false;
+        break;
+      case 1011:
+        if (!ParseI64(optarg, &opt->ell_max)) return false;
+        break;
       case 'h': Usage(stdout); std::exit(0);
       default: return false;
     }
@@ -1003,6 +1016,52 @@ void EmitDot(const Poset& g,
   std::printf("}\n");
 }
 
+bool IsSmallPrime(uint64_t v) {
+  if (v < 2) return false;
+  if (v % 2 == 0) return v == 2;
+  for (uint64_t d = 3; d * d <= v; d += 2)
+    if (v % d == 0) return false;
+  return true;
+}
+
+int RunRoots(const Options& opt) {
+  if (opt.he_n < 3 || opt.ell_max < 3) {
+    std::fprintf(stderr,
+                 "mode roots requires --he-n >= 3 and --ell-max >= 3\n");
+    return 2;
+  }
+  auto t0 = std::chrono::steady_clock::now();
+  int64_t pairs = 0;
+  int64_t mismatches = 0;
+  std::printf("He_n root criterion over F_ell: core root (y = x^2) with y a "
+              "quadratic residue\n");
+  for (int n = 3; n <= opt.he_n; ++n) {
+    int64_t total = 0;
+    int64_t hit = 0;
+    int64_t bad = 0;
+    for (uint64_t ell = 3; ell <= static_cast<uint64_t>(opt.ell_max);
+         ell += 2) {
+      if (!IsSmallPrime(ell)) continue;
+      const auto r = primeparts::graph::HermiteRootsModL(n, ell);
+      ++total;
+      if (!r.roots.empty()) ++hit;
+      if (!r.criterion_match) {
+        ++bad;
+        std::printf("MISMATCH n=%d ell=%" PRIu64 "\n", n, ell);
+      }
+    }
+    pairs += total;
+    mismatches += bad;
+    std::printf("n=%2d  moduli=%" PRId64 "  with-root=%" PRId64
+                "  mismatch=%" PRId64 "\n",
+                n, total, hit, bad);
+  }
+  std::printf("%" PRId64 " (n, ell) pairs checked, mismatches=%" PRId64
+              ", %.3fs\n",
+              pairs, mismatches, Seconds(t0));
+  return mismatches == 0 ? 0 : 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1015,8 +1074,11 @@ int main(int argc, char** argv) {
   if (opt.mode == "basis") return RunBasis(opt);
   if (opt.mode == "hasse") return RunHasse(opt);
   if (opt.mode == "compose") return RunCompose(opt);
+  if (opt.mode == "roots") return RunRoots(opt);
   if (opt.mode != "edges") {
-    std::fprintf(stderr, "unknown --mode %s (basis | hasse | compose | edges)\n", opt.mode.c_str());
+    std::fprintf(stderr,
+                 "unknown --mode %s (basis | hasse | compose | edges | roots)\n",
+                 opt.mode.c_str());
     return 2;
   }
 
