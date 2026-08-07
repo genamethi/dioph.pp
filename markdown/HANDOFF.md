@@ -61,35 +61,22 @@ Start here when deciding what is alive.
 
 Roughly in dependency order. Each is a starting point, not a spec.
 
-Items 1 through 4 are one line of enquiry: what algebraic object does a prime's
-set of representations p = 2^m + q^n form, once chains are composed into
-polynomials — and is which representations exist, rather than how many,
-governed by structure that survives reduction mod l? If it is, the existence
-questions become computable in finite characteristic, which is the only route
-by which something like twin primes could come out of this rather than another
-density statement.
-
 1. Implement pp-graph for graph analysis of structure leveraging Hermite
    polynomials.
 
-   I want to explore the structure of these solutions based on properties like
-   the number of solutions per prime. q is a parent when p = 2^m + q^n is 
+   I want to explore the structure of these solutions. Grouping by p by k is of
+   interest when studying classes of solutions. 
+
+   Basic graph shape is given by: q is a parent when p = 2^m + q^n is 
    satisfied. Composing solutions we get chains, and I've noticed the binomial
    expansion yields expressions that are obvious combinations of Hermite
-   polynomials. I want to see if we can leverage any resulting structure.
-   (more on this: chain_hermite_primer.md, collapse_findings.md,
-   research_programme.md.)
+   polynomials. I want to see if we can leverage the structure that emerges.
 
-   We want to have some reusable data which we can leverage for analysis via the
-   IRC interface as it stands today.
-
-   The resulting data to be amenable to usage with ginac expression types
-   (which decompose to subexpressions). This should allow us to do analysis on a
-   given range of prime values.
-
-   One hope is that we will be able to use these as formal expressions for
-   evaluation over the dataset (a la expressions in Polars for example; i.e.,
-   these should give us constraints for satisfaction over subsets of primes.)
+   To that effect I'd like some reusable data which we can leverage for
+   analysis via the IRC interface as it stands today. It should amenable to
+   usage with ginac expression types (decomposes to subexpressions). This
+   should enable  queries for various algebraic or topological properties given
+   a range of prime values.
 
    First round of consumers for this data:
 
@@ -97,33 +84,31 @@ density statement.
      and chain decompositions
    - want to see how the k-many ways a single p is expressed, so those collections
      can be compared within a k value and between k values.
-     Particularly curious about this point because it says something along with
-     the congruences about how the density of solutions might behave (although
-     this is one thing we know fairly well).
+     Particularly curious about this point because it should give insights
+     when considered alongside the congruences.
    - the degree spectrum, and grouping primes by the shape of their coefficient
      sets
 
-   One thing I'm considering is how the arithmetic properties of congruences over
-   the coefficients or exponents affect the number of solutions as they appear.
-  
-   Anything we can figure out about de Polignac numbers may be fun here.
-
-   Everything needs to work scale and be reasonable to work within for a dataset
+   N.B. Everything needs to work scale and be reasonable to work within for a dataset
    covering all primes under 64 bits (and hopefully beyond, really).
-   Point is we don't want toy examples that are only workable on a bounded prefix.
+   Point is we don't want toy examples that are only workable on a bounded prefix
+   or some unmotivated restriction just to hide a design that doesn't scale
+   on truly general datasets (over large ranges compared between one another
+   or won't allow for taking the projective limit, i.e., doing p/l-adic work)
 
 2. The spectrum of a prime, as something we can ask for by name.
 
    Each partition edge is a map x -> x^n + 2^m, and composing along a chain
-   gives a polynomial in the root, so every prime carries a whole collection of
-   these — I've been calling it the spectrum of p. I want to be able to hold
-   that collection for a p I name, and for a set of primes I specify out of the
-   dataset rather than one at a time.
+   gives a polynomial which maps q to p. Every prime carries k many solutions.
+   Provisionally, I'm referring to it as the spectrum of p.
+
+   We want this to enable compute spectra for a general set, with our common
+   predicates.
 
    The sets I care about first are the ones we can already select: everything
    with a given k in a window, and pairs of twin primes — p and p + 2 with both
-   of them prime. For such a pair I want to put Spec(p) and Spec(p + 2) next to
-   each other and see whether anything survives the comparison.
+   of them prime. For such a pair I want to compare Spec(p) and Spec(p + 2)
+   see what falls out.
 
    First round of consumers for this data:
 
@@ -134,45 +119,45 @@ density statement.
    Same constraint as above: this has to be reasonable over the whole dataset,
    not a bounded prefix.
 
-3. The monoid these maps generate mod l, and what the translations leave behind.
+3. The monoid the edge maps generate mod l, and its orbits under translation.
 
-   Reduce the edge maps mod l and they generate a monoid of maps of the affine
-   line. The translations x -> x + c live in that monoid and act on it, and I
-   want to know what the action leaves behind — the orbits — because that seems
-   to be where anything that isn't forced by the action would have to live.
+   Reduce the edge maps mod l. They generate a monoid M of maps of the affine
+   line over F_l. The translations x -> x + c lie in M and form a group T. T
+   acts on M by post-composition, f goes to tau_c composed with f. The action is
+   free, and two maps share an orbit exactly when they differ by a constant. So
+   T\M is the set of chain maps up to an additive constant.
 
-   The part I actually care about is per prime: which of those classes p's own
-   ancestry realizes, and which it never does. The ones it misses are the
-   interesting half, and I'd like to be able to look at them for a prime or for
-   one of the families above.
-
-   First round of consumers for this data:
-
-   - the orbit space itself, per l, over the dataset
-   - the classes realized by a given p
-   - the classes p misses, and what in its ancestry accounts for that
-
-   l = 2 looks like it sees nothing here, so odd l is the range of interest.
-
-4. The same data at l^2 and beyond, and whether a sheaf falls out.
-
-   I want to climb from l to l^2 to l^3 with coefficients in Z_l, and be able to
-   go up a level without starting over. What I'm hoping to see is how the
-   realized classes behave as p varies — whether they hold steady over stretches
-   of primes and jump somewhere in particular, since that's the shape that would
-   make this a sheaf rather than a pile of tables.
-
-   Whether there's cohomology in it is the open question; what I want built is
-   the object that lets us test it. If it works, the payoff is a handle on which
-   solutions exist as p grows — twin primes are the ambitious version of that —
-   rather than another statement about how many.
+   Classify each prime by which orbits its chains realize and which it never
+   reaches. Do the same for the families in 2.
 
    First round of consumers for this data:
 
-   - realized classes at l and at l^2 for the same primes, and the map between
-     the levels
-   - where those classes stay constant across p, and where they change
-   - a read keyed by p: which classes does this prime realize, at this level
+   - T\M over the dataset, per l
+   - the orbits realized by a given p
+   - the orbits p misses, and which (m, n) in its ancestry account for that
+
+   l = 2 kills every translation, so odd l is the range.
+
+4. The same classification at l^2, l^3, and in the limit.
+
+   Repeat item 3 over Z/l^e with coefficients in Z_l. Reduction from Z/l^(e+1)
+   to Z/l^e carries orbits to orbits, so the classifications form an inverse
+   system. Build it so raising e extends the data rather than recomputing it.
+
+   Then ask whether the realized set is constant across stretches of p and
+   changes only at isolated primes. That is the condition for these to be
+   sections of a sheaf on a stratification rather than a table of answers.
+
+   If it stratifies, cohomology is the next question. I am not asserting there
+   is any. The point of building it is to make which solutions exist as p grows
+   a computation, twin primes being the ambitious version, rather than another
+   count.
+
+   First round of consumers for this data:
+
+   - realized orbits at l and l^2 for the same primes, and the map between levels
+   - where they hold constant across p, and where they change
+   - a read keyed by p: which orbits does this prime realize, at level e
 
 5. **Settle consumer server-side planning.** `rest_scan_plan` exists and works;
    it is linked only into the e2e test. Either wire `source_scan` /
