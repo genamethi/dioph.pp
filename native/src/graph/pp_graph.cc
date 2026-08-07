@@ -57,6 +57,10 @@ struct Options {
   int64_t top = -1;
   int64_t he_n = -1;
   int64_t ell_max = -1;
+  int64_t target_p = -1;
+  int64_t k_class = -1;
+  bool sweep = false;
+  bool sweep_only = false;
 };
 
 struct Edge {
@@ -101,9 +105,21 @@ void Usage(FILE* out) {
       "  --warehouse DIR  warehouse root (conf.core.warehouse)\n"
       "  --namespace NS   catalog namespace (conf.core.namespace)\n"
       "  --threads N      scan/engine threads (conf.graph.threads)\n"
-      "  --mode M         basis | hasse | compose | edges | roots | paths (conf.graph.mode)\n"
+      "  --mode M         basis | hasse | compose | edges | roots | paths |\n"
+      "                   spectrum (conf.graph.mode)\n"
       "  --he-n N         mode roots: largest Hermite degree to check\n"
       "  --ell-max N      mode roots: largest prime modulus to check\n"
+      "                   mode spectrum: also reduce the spectrum mod each\n"
+      "                   prime l <= N\n"
+      "  --p P            mode spectrum: target prime whose spectrum to compute\n"
+      "  --k K            mode spectrum: instead of --p, run the whole family\n"
+      "                   { p in [--min, --max] : k(p) = K } off the primes\n"
+      "                   table, one shared edge read\n"
+      "  --sweep          mode spectrum family: recompute the class sets mod\n"
+      "                   every l by a single ascending pass carrying per-node\n"
+      "                   state (degree-1 root-residue bitmask, then full\n"
+      "                   polynomial classes), no per-target walks; cross-\n"
+      "                   checks against the walk results\n"
       "  --format F       text | dot | json (conf.graph.format)\n"
       "  --top N          rows to show in text listings (conf.graph.top)\n"
       "  --help\n");
@@ -132,6 +148,10 @@ bool ParseArgs(int argc, char** argv, Options* opt) {
       {"config", required_argument, nullptr, 1009},
       {"he-n", required_argument, nullptr, 1010},
       {"ell-max", required_argument, nullptr, 1011},
+      {"p", required_argument, nullptr, 1012},
+      {"k", required_argument, nullptr, 1013},
+      {"sweep", no_argument, nullptr, 1014},
+      {"sweep-only", no_argument, nullptr, 1015},
       {"help", no_argument, nullptr, 'h'},
       {nullptr, 0, nullptr, 0},
   };
@@ -162,6 +182,17 @@ bool ParseArgs(int argc, char** argv, Options* opt) {
       case 1011:
         if (!ParseI64(optarg, &opt->ell_max)) return false;
         break;
+      case 1012:
+        if (!ParseI64(optarg, &opt->target_p)) return false;
+        break;
+      case 1013:
+        if (!ParseI64(optarg, &opt->k_class)) return false;
+        break;
+      case 1014: opt->sweep = true; break;
+      case 1015:
+        opt->sweep = true;
+        opt->sweep_only = true;
+        break;
       case 'h': Usage(stdout); std::exit(0);
       default: return false;
     }
@@ -181,6 +212,8 @@ bool ParseArgs(int argc, char** argv, Options* opt) {
   if (opt->top < 0) opt->top = conf.graph.top;
   if (opt->mode.empty()) opt->mode = conf.graph.mode;
   if (opt->format.empty()) opt->format = conf.graph.format;
+  if (opt->mode == "spectrum" && opt->target_p > 0)
+    opt->max_p = opt->target_p;
   if (opt->max_p <= opt->min_p) {
     std::fprintf(stderr, "--max must exceed --min\n");
     return false;
@@ -1245,6 +1278,711 @@ int RunRoots(const Options& opt) {
   return mismatches == 0 ? 0 : 1;
 }
 
+int64_t SatAdd(int64_t a, int64_t b) {
+  int64_t r;
+  if (__builtin_add_overflow(a, b, &r)) return INT64_MAX;
+  return r;
+}
+
+int64_t SatMul(int64_t a, int64_t b) {
+  int64_t r;
+  if (__builtin_mul_overflow(a, b, &r)) return INT64_MAX;
+  return r;
+}
+
+struct SpectrumCore {
+  std::set<int64_t> cone;
+  std::vector<int64_t> roots;
+  size_t seg_count = 0;
+  bool capped = false;
+  std::map<std::vector<int64_t>, int64_t> words;
+};
+
+void ComputeSpectrumCore(int64_t target,
+                         const std::map<int64_t, std::vector<Edge>>& in,
+                         SpectrumCore* out) {
+  out->cone.insert(target);
+  std::vector<int64_t> stack{target};
+  while (!stack.empty()) {
+    const int64_t v = stack.back();
+    stack.pop_back();
+    auto it = in.find(v);
+    if (it == in.end()) continue;
+    for (const auto& e : it->second)
+      if (out->cone.insert(e.q).second) stack.push_back(e.q);
+  }
+
+  std::unordered_map<int64_t, std::vector<Edge>> up;
+  std::vector<Edge> segs;
+  for (const int64_t v : out->cone) {
+    auto it = in.find(v);
+    if (it == in.end()) {
+      out->roots.push_back(v);
+      continue;
+    }
+    for (const auto& e : it->second) {
+      up[e.q].push_back(e);
+      if (e.n >= 2) segs.push_back(e);
+    }
+  }
+  out->seg_count = segs.size();
+
+  auto count_paths_to = [&](int64_t b) {
+    std::unordered_map<int64_t, int64_t> c;
+    c.emplace(b, 1);
+    auto it = out->cone.find(b);
+    if (it == out->cone.end()) return c;
+    while (it != out->cone.begin()) {
+      --it;
+      const int64_t v = *it;
+      auto ue = up.find(v);
+      if (ue == up.end()) continue;
+      int64_t s = 0;
+      for (const auto& e : ue->second) {
+        if (e.n != 1 || e.p > b) continue;
+        auto f = c.find(e.p);
+        if (f != c.end()) s = SatAdd(s, f->second);
+      }
+      if (s) c.emplace(v, s);
+    }
+    return c;
+  };
+
+  const auto to_p = count_paths_to(target);
+  std::vector<std::unordered_map<int64_t, int64_t>> to_q(segs.size());
+  for (size_t i = 0; i < segs.size(); ++i) to_q[i] = count_paths_to(segs[i].q);
+
+  const size_t kCap = 400000;
+  std::vector<std::vector<size_t>> admissible;
+  {
+    std::vector<std::vector<size_t>> frontier;
+    for (size_t i = 0; i < segs.size(); ++i) frontier.push_back({i});
+    while (!frontier.empty() && !out->capped) {
+      std::vector<std::vector<size_t>> next;
+      for (auto& s : frontier) {
+        const Edge& last = segs[s.back()];
+        if (to_p.count(last.p)) {
+          admissible.push_back(s);
+          if (admissible.size() >= kCap) {
+            out->capped = true;
+            break;
+          }
+        }
+        for (size_t j = 0; j < segs.size(); ++j) {
+          if (to_q[j].count(last.p)) {
+            auto s2 = s;
+            s2.push_back(j);
+            next.push_back(std::move(s2));
+          }
+        }
+      }
+      frontier.swap(next);
+    }
+  }
+
+  for (const int64_t r : out->roots) {
+    auto f = to_p.find(r);
+    if (f == to_p.end()) continue;
+    out->words.emplace(std::vector<int64_t>{r, target - r}, f->second);
+  }
+  for (const auto& s : admissible) {
+    const Edge& first = segs[s[0]];
+    for (const int64_t r : out->roots) {
+      auto f0 = to_q[s[0]].find(r);
+      if (f0 == to_q[s[0]].end()) continue;
+      int64_t mult = f0->second;
+      std::vector<int64_t> w{r, first.q - r};
+      bool ok = true;
+      for (size_t i = 0; i < s.size(); ++i) {
+        const Edge& e = segs[s[i]];
+        bool ov = false;
+        const int64_t two_m = IPow(2, e.m, &ov);
+        if (ov) {
+          ok = false;
+          break;
+        }
+        const int64_t next_v = i + 1 < s.size() ? segs[s[i + 1]].q : target;
+        const auto& cmap = i + 1 < s.size() ? to_q[s[i + 1]] : to_p;
+        auto fc = cmap.find(e.p);
+        if (fc == cmap.end()) {
+          ok = false;
+          break;
+        }
+        mult = SatMul(mult, fc->second);
+        w.push_back(e.n);
+        w.push_back(two_m + (next_v - e.p));
+      }
+      if (!ok) continue;
+      auto slot = out->words.try_emplace(std::move(w), 0).first;
+      slot->second = SatAdd(slot->second, mult);
+    }
+  }
+}
+
+int RunSpectrum(const Options& opt) {
+  if (opt.target_p < 3) {
+    std::fprintf(stderr, "mode spectrum requires --p >= 3\n");
+    return 2;
+  }
+  if (opt.min_p >= opt.target_p) {
+    std::fprintf(stderr, "--min must be below --p\n");
+    return 2;
+  }
+  Options ropt = opt;
+  ropt.max_p = opt.target_p;
+
+  std::vector<Edge> edges;
+  int64_t rows = 0;
+  double t_plan = 0.0;
+  double t_read = 0.0;
+  std::string error;
+  if (!ReadEdges(ropt, &edges, &rows, &t_plan, &t_read, &error)) {
+    std::fprintf(stderr, "pp-graph: %s\n", error.c_str());
+    return 1;
+  }
+
+  std::map<int64_t, std::vector<Edge>> in;
+  for (const auto& e : edges) in[e.p].push_back(e);
+
+  if (!in.count(opt.target_p)) {
+    std::printf("pp-graph spectrum  p=%" PRId64 "\n", opt.target_p);
+    std::printf("  no partitions in window: k=0 (root) or p absent\n");
+    return 0;
+  }
+
+  auto t0 = std::chrono::steady_clock::now();
+  SpectrumCore core;
+  ComputeSpectrumCore(opt.target_p, in, &core);
+  const double t_paths = Seconds(t0);
+  const auto& cone = core.cone;
+  const size_t sources = core.roots.size();
+  const bool capped = core.capped;
+  const auto& target_words = core.words;
+
+  GiNaC::symbol x("x");
+  struct Line {
+    int64_t root;
+    int64_t chains;
+    int64_t degree;
+    std::vector<int64_t> word;
+    std::map<int, GiNaC::ex> hermite;
+    std::string key;
+  };
+  std::vector<Line> lines;
+  int64_t mismatches = 0;
+  int64_t total_chains = 0;
+  std::map<std::string, size_t> by_vector;
+
+  t0 = std::chrono::steady_clock::now();
+  for (const auto& [w, cnt] : target_words) {
+    Line ln;
+    ln.root = w[0];
+    ln.chains = cnt;
+    total_chains = SatAdd(total_chains, cnt);
+    ln.word = w;
+    GiNaC::ex P = x + GiNaC::numeric(static_cast<long>(w[1]));
+    ln.degree = 1;
+    for (size_t i = 2; i + 1 < w.size(); i += 2) {
+      P = GiNaC::expand(GiNaC::pow(P, static_cast<int>(w[i])) +
+                        GiNaC::numeric(static_cast<long>(w[i + 1])));
+      ln.degree *= w[i];
+    }
+    const GiNaC::ex at_root =
+        P.subs(x == GiNaC::numeric(static_cast<long>(ln.root)));
+    if (!GiNaC::is_a<GiNaC::numeric>(at_root) ||
+        GiNaC::ex_to<GiNaC::numeric>(at_root).to_long() != opt.target_p)
+      ++mismatches;
+    ln.hermite = primeparts::graph::ToHermite(P, x);
+    std::string key;
+    for (const auto& [d, c] : ln.hermite) {
+      std::ostringstream cs;
+      cs << c;
+      if (cs.str() == "0") continue;
+      key += std::to_string(d) + ":" + cs.str() + ",";
+    }
+    ln.key = key;
+    ++by_vector[key];
+    lines.push_back(std::move(ln));
+  }
+  const double t_alg = Seconds(t0);
+
+  size_t vector_collisions = 0;
+  for (const auto& [k, c] : by_vector)
+    if (c > 1) vector_collisions += c - 1;
+
+  const int64_t k_target = static_cast<int64_t>(in[opt.target_p].size());
+
+  if (opt.format == "json") {
+    std::printf("{\"p\":%" PRId64 ",\"k\":%" PRId64 ",\"window\":[%" PRId64
+                ",%" PRId64 "],\"cone_nodes\":%zu,\"sources\":%zu,"
+                "\"words\":%zu,\"distinct_vectors\":%zu,\"chains\":%" PRId64
+                ",\"vector_collisions\":%zu,\"mismatches\":%" PRId64
+                ",\"capped\":%s}\n",
+                opt.target_p, k_target, opt.min_p, opt.target_p, cone.size(),
+                sources, target_words.size(), by_vector.size(), total_chains,
+                vector_collisions, mismatches, capped ? "true" : "false");
+    return mismatches == 0 ? 0 : 1;
+  }
+
+  std::printf("pp-graph spectrum  p=%" PRId64 "  window [%" PRId64 ", %" PRId64
+              "]\n",
+              opt.target_p, opt.min_p, opt.target_p);
+  std::printf("  k (direct partitions)  : %" PRId64 "\n", k_target);
+  std::printf("  ancestor cone nodes    : %zu\n", cone.size());
+  std::printf("  cone sources           : %zu%s\n", sources,
+              opt.min_p > 0 ? "  (window-truncated; not necessarily k=0 roots)"
+                            : "  (k=0 roots)");
+  std::printf("  canonical words        : %zu%s\n", target_words.size(),
+              capped ? "  (INCOMPLETE: segment-sequence cap hit; raise --min "
+                       "to narrow the window)"
+                     : "");
+  std::printf("  distinct He vectors    : %zu%s\n", by_vector.size(),
+              vector_collisions
+                  ? "  (WORD/VECTOR COLLISION: injectivity violated)"
+                  : "");
+  std::printf("  chains into p          : %" PRId64 "%s\n", total_chains,
+              total_chains == INT64_MAX ? "  (saturated)" : "");
+  if (!target_words.empty())
+    std::printf("  P_w(root) != p         : %" PRId64 "%s\n", mismatches,
+                mismatches == 0 ? "  (all words verified)" : "  (BUG)");
+  std::printf("  plan %.3fs  read %.3fs  paths %.3fs  algebra %.3fs\n", t_plan,
+              t_read, t_paths, t_alg);
+
+  std::sort(lines.begin(), lines.end(), [](const Line& a, const Line& b) {
+    if (a.degree != b.degree) return a.degree > b.degree;
+    return a.chains > b.chains;
+  });
+  std::printf("\nSpectrum (first %" PRId64 " of %zu):\n", opt.top,
+              lines.size());
+  int64_t shown = 0;
+  for (const auto& ln : lines) {
+    if (shown++ >= opt.top) break;
+    std::string t;
+    bool first = true;
+    for (auto it = ln.hermite.rbegin(); it != ln.hermite.rend(); ++it) {
+      std::ostringstream cs;
+      cs << it->second;
+      if (cs.str() == "0") continue;
+      t += (first ? "" : " + ") + cs.str() + "*He" + std::to_string(it->first);
+      first = false;
+    }
+    if (t.size() > 110) t = t.substr(0, 107) + "...";
+    std::string skel;
+    for (size_t i = 2; i + 1 < ln.word.size(); i += 2)
+      skel += (skel.empty() ? "" : ",") + std::to_string(ln.word[i]);
+    std::printf("  deg %-3" PRId64 " root %-9" PRId64 " chains %-8" PRId64
+                " [%s]  %s\n",
+                ln.degree, ln.root, ln.chains,
+                skel.empty() ? "1" : skel.c_str(), t.c_str());
+  }
+  if (static_cast<int64_t>(lines.size()) > opt.top)
+    std::printf("  ... %zu more\n", lines.size() - opt.top);
+
+  if (opt.ell_max >= 3) {
+    std::printf("\nReduction mod l (spectrum classes / distinct vectors):\n");
+    for (uint64_t ell = 3; ell <= static_cast<uint64_t>(opt.ell_max);
+         ell += 2) {
+      if (!IsSmallPrime(ell)) continue;
+      std::set<std::string> classes;
+      for (const auto& [key, c] : by_vector) {
+        std::string red;
+        std::istringstream ks(key);
+        std::string part;
+        while (std::getline(ks, part, ',')) {
+          const auto colon = part.find(':');
+          if (colon == std::string::npos) continue;
+          const GiNaC::numeric coef(part.substr(colon + 1).c_str());
+          GiNaC::numeric r =
+              GiNaC::irem(coef, GiNaC::numeric(static_cast<long>(ell)));
+          if (r.is_negative())
+            r += GiNaC::numeric(static_cast<long>(ell));
+          if (r.is_zero()) continue;
+          std::ostringstream rs;
+          rs << r;
+          red += part.substr(0, colon) + ":" + rs.str() + ",";
+        }
+        classes.insert(red);
+      }
+      std::printf("  l=%-4" PRIu64 " classes %zu / %zu%s\n", ell,
+                  classes.size(), by_vector.size(),
+                  classes.size() < by_vector.size() ? "  (collapses)" : "");
+    }
+  }
+  return mismatches == 0 ? 0 : 1;
+}
+
+std::string MulL(const std::string& a, const std::string& b, uint32_t ell) {
+  if (a.empty() || b.empty()) return {};
+  if (a.size() + b.size() - 1 > 32) return {};
+  std::string r(a.size() + b.size() - 1, '\0');
+  for (size_t i = 0; i < a.size(); ++i)
+    for (size_t j = 0; j < b.size(); ++j) {
+      const uint32_t v = static_cast<uint8_t>(r[i + j]) +
+                         static_cast<uint32_t>(static_cast<uint8_t>(a[i])) *
+                             static_cast<uint8_t>(b[j]);
+      r[i + j] = static_cast<char>(v % ell);
+    }
+  return r;
+}
+
+std::string PowL(const std::string& p, int32_t n, uint32_t ell) {
+  std::string r(1, '\x01');
+  for (int32_t i = 0; i < n; ++i) {
+    r = MulL(r, p, ell);
+    if (r.empty()) return r;
+  }
+  return r;
+}
+
+std::string SegKey(const std::map<int, GiNaC::ex>& hermite) {
+  std::string key;
+  for (const auto& [d, c] : hermite) {
+    std::ostringstream cs;
+    cs << c;
+    if (cs.str() == "0") continue;
+    key += std::to_string(d) + ":" + cs.str() + ",";
+  }
+  return key;
+}
+
+std::string SegKeyModL(const std::map<int, GiNaC::ex>& hermite, uint64_t ell) {
+  std::string key;
+  for (const auto& [d, c] : hermite) {
+    GiNaC::numeric r = GiNaC::irem(GiNaC::ex_to<GiNaC::numeric>(c),
+                                   GiNaC::numeric(static_cast<long>(ell)));
+    if (r.is_negative()) r += GiNaC::numeric(static_cast<long>(ell));
+    if (r.is_zero()) continue;
+    std::ostringstream rs;
+    rs << r;
+    key += std::to_string(d) + ":" + rs.str() + ",";
+  }
+  return key;
+}
+
+int RunSpectraFamily(const Options& opt) {
+  if (opt.k_class < 1) {
+    std::fprintf(stderr,
+                 "mode spectrum requires --p (single prime) or --k >= 1 "
+                 "(family)\n");
+    return 2;
+  }
+
+  std::string error;
+  scan::ScanPlanRequest preq;
+  preq.select = {"p", "k"};
+  preq.filter = iceberg::Expressions::And(
+      iceberg::Expressions::GreaterThanOrEqual(
+          "p", iceberg::Literal::Long(opt.min_p)),
+      iceberg::Expressions::LessThanOrEqual("p",
+                                            iceberg::Literal::Long(opt.max_p)));
+  std::vector<std::string> ppaths;
+  double t_tplan = 0.0;
+  if (!PlanPaths(opt, "primes", preq, &ppaths, &t_tplan, &error)) {
+    std::fprintf(stderr, "pp-graph: %s\n", error.c_str());
+    return 1;
+  }
+  if (ppaths.empty()) {
+    std::fprintf(stderr, "pp-graph: primes has no data files in window\n");
+    return 1;
+  }
+
+  duckdb::DBConfig cfg;
+  cfg.SetOptionByName("threads", duckdb::Value::BIGINT(opt.threads));
+  duckdb::DuckDB db(nullptr, &cfg);
+  duckdb::Connection con(db);
+  auto t0 = std::chrono::steady_clock::now();
+  auto tres = con.Query(
+      "SELECT p FROM read_parquet(" + QuoteList(ppaths) + ") WHERE p >= " +
+      std::to_string(opt.min_p) + " AND p <= " + std::to_string(opt.max_p) +
+      " AND k = " + std::to_string(opt.k_class) + " ORDER BY p");
+  if (tres->HasError()) {
+    std::fprintf(stderr, "pp-graph: %s\n", tres->GetError().c_str());
+    return 1;
+  }
+  std::vector<int64_t> targets;
+  for (auto& row : *tres) targets.push_back(row.GetValue<int64_t>(0));
+  const double t_targets = Seconds(t0);
+  if (targets.empty()) {
+    std::printf("pp-graph spectra  k=%" PRId64 "  window [%" PRId64
+                ", %" PRId64 "]: empty family\n",
+                opt.k_class, opt.min_p, opt.max_p);
+    return 0;
+  }
+
+  Options ropt = opt;
+  ropt.min_p = 0;
+  ropt.max_p = targets.back();
+  std::vector<Edge> edges;
+  int64_t rows = 0;
+  double t_plan = 0.0;
+  double t_read = 0.0;
+  if (!ReadEdges(ropt, &edges, &rows, &t_plan, &t_read, &error)) {
+    std::fprintf(stderr, "pp-graph: %s\n", error.c_str());
+    return 1;
+  }
+  std::map<int64_t, std::vector<Edge>> in;
+  for (const auto& e : edges) in[e.p].push_back(e);
+
+  std::vector<uint64_t> ells;
+  if (opt.ell_max >= 3)
+    for (uint64_t ell = 3; ell <= static_cast<uint64_t>(opt.ell_max); ell += 2)
+      if (IsSmallPrime(ell)) ells.push_back(ell);
+
+  GiNaC::symbol x("x");
+  std::unordered_set<int64_t> fam_a0;
+  std::set<std::string> fam_seg;
+  std::vector<std::set<int64_t>> fam_red_a0(ells.size());
+  std::vector<std::set<std::string>> fam_red_seg(ells.size());
+  size_t total_words = 0;
+  size_t total_seg = 0;
+  std::vector<size_t> sum_classes(ells.size(), 0);
+  int64_t total_chains = 0;
+  int64_t mismatches = 0;
+  size_t capped_targets = 0;
+  double t_cores = 0.0;
+  double t_alg = 0.0;
+  std::vector<std::vector<size_t>> walk_pure;
+  std::vector<std::vector<size_t>> walk_all;
+
+  std::printf("pp-graph spectra  k=%" PRId64 "  window [%" PRId64 ", %" PRId64
+              "]  family %zu\n",
+              opt.k_class, opt.min_p, opt.max_p, targets.size());
+  std::printf("  edges read [0, %" PRId64 "]: %zu (%" PRId64
+              " rows)  plan %.3fs  read %.3fs  targets %.3fs\n\n",
+              targets.back(), edges.size(), rows, t_plan, t_read, t_targets);
+  if (!opt.sweep_only) {
+  std::printf("  %-12s %-8s %-8s %-8s %-5s %-20s", "p", "cone", "roots",
+              "words", "seg", "chains");
+  for (uint64_t ell : ells) std::printf(" c%%%-4" PRIu64, ell);
+  std::printf("\n");
+
+  int64_t shown = 0;
+  for (const int64_t p : targets) {
+    t0 = std::chrono::steady_clock::now();
+    SpectrumCore core;
+    ComputeSpectrumCore(p, in, &core);
+    t_cores += Seconds(t0);
+    if (core.capped) ++capped_targets;
+
+    t0 = std::chrono::steady_clock::now();
+    size_t seg_words = 0;
+    int64_t chains = 0;
+    std::vector<std::set<int64_t>> red_a0(ells.size());
+    std::vector<std::set<std::string>> red_seg(ells.size());
+    for (const auto& [w, cnt] : core.words) {
+      chains = SatAdd(chains, cnt);
+      if (w.size() == 2) {
+        const int64_t a0 = w[1];
+        fam_a0.insert(a0);
+        for (size_t i = 0; i < ells.size(); ++i) {
+          const int64_t r = a0 % static_cast<int64_t>(ells[i]);
+          red_a0[i].insert(r);
+          fam_red_a0[i].insert(r);
+        }
+        continue;
+      }
+      ++seg_words;
+      GiNaC::ex P = x + GiNaC::numeric(static_cast<long>(w[1]));
+      for (size_t i = 2; i + 1 < w.size(); i += 2)
+        P = GiNaC::expand(GiNaC::pow(P, static_cast<int>(w[i])) +
+                          GiNaC::numeric(static_cast<long>(w[i + 1])));
+      const GiNaC::ex at_root =
+          P.subs(x == GiNaC::numeric(static_cast<long>(w[0])));
+      if (!GiNaC::is_a<GiNaC::numeric>(at_root) ||
+          GiNaC::ex_to<GiNaC::numeric>(at_root).to_long() != p)
+        ++mismatches;
+      const auto hermite = primeparts::graph::ToHermite(P, x);
+      fam_seg.insert(SegKey(hermite));
+      for (size_t i = 0; i < ells.size(); ++i) {
+        const std::string rk = SegKeyModL(hermite, ells[i]);
+        red_seg[i].insert(rk);
+        fam_red_seg[i].insert(rk);
+      }
+    }
+    t_alg += Seconds(t0);
+
+    total_words += core.words.size();
+    total_seg += seg_words;
+    total_chains = SatAdd(total_chains, chains);
+    for (size_t i = 0; i < ells.size(); ++i)
+      sum_classes[i] += red_a0[i].size() + red_seg[i].size();
+    if (opt.sweep) {
+      std::vector<size_t> pc(ells.size());
+      std::vector<size_t> ac(ells.size());
+      for (size_t i = 0; i < ells.size(); ++i) {
+        pc[i] = red_a0[i].size();
+        ac[i] = red_a0[i].size() + red_seg[i].size();
+      }
+      walk_pure.push_back(std::move(pc));
+      walk_all.push_back(std::move(ac));
+    }
+
+    if (shown++ < opt.top) {
+      std::printf("  %-12" PRId64 " %-8zu %-8zu %-8zu %-5zu %-20" PRId64,
+                  p, core.cone.size(), core.roots.size(), core.words.size(),
+                  seg_words, chains);
+      for (size_t i = 0; i < ells.size(); ++i)
+        std::printf(" %-6zu", red_a0[i].size() + red_seg[i].size());
+      std::printf("%s\n", core.capped ? "  (capped)" : "");
+    }
+  }
+  if (static_cast<int64_t>(targets.size()) > opt.top)
+    std::printf("  ... %zu more targets\n", targets.size() - opt.top);
+  }
+
+  if (opt.sweep_only) {
+    std::printf("  (--sweep-only: per-target walks skipped)\n");
+  } else {
+  std::printf("\nFamily census (%zu targets):\n", targets.size());
+  std::printf("  spectrum lines, summed   : %zu (%zu segmented)\n",
+              total_words, total_seg);
+  std::printf("  distinct exact lines     : %zu (%zu translation + %zu "
+              "segmented)\n",
+              fam_a0.size() + fam_seg.size(), fam_a0.size(), fam_seg.size());
+  std::printf("  chains, summed           : %" PRId64 "%s\n", total_chains,
+              total_chains == INT64_MAX ? "  (saturated)" : "");
+  std::printf("  P_w(root) != p           : %" PRId64 "\n", mismatches);
+  if (capped_targets)
+    std::printf("  capped targets           : %zu\n", capped_targets);
+  for (size_t i = 0; i < ells.size(); ++i)
+    std::printf("  l=%-4" PRIu64 " family classes %zu   (per-target sum %zu)\n",
+                ells[i], fam_red_a0[i].size() + fam_red_seg[i].size(),
+                sum_classes[i]);
+  std::printf("  cores %.3fs  algebra %.3fs\n", t_cores, t_alg);
+  }
+
+  if (opt.sweep) {
+    if (ells.empty() || ells.back() > 61) {
+      std::fprintf(stderr,
+                   "--sweep needs --ell-max in [3, 61] (bitmask per node)\n");
+      return 2;
+    }
+    t0 = std::chrono::steady_clock::now();
+    std::set<int64_t> node_set;
+    for (const auto& e : edges) {
+      node_set.insert(e.q);
+      node_set.insert(e.p);
+    }
+    std::unordered_map<int64_t, std::vector<uint64_t>> mask;
+    mask.reserve(node_set.size());
+    for (const int64_t v : node_set) {
+      std::vector<uint64_t> mv(ells.size(), 0);
+      auto it = in.find(v);
+      if (it == in.end()) {
+        for (size_t i = 0; i < ells.size(); ++i)
+          mv[i] = 1ULL << (v % static_cast<int64_t>(ells[i]));
+      } else {
+        for (const auto& e : it->second) {
+          if (e.n != 1) continue;
+          auto pm = mask.find(e.q);
+          if (pm == mask.end()) continue;
+          for (size_t i = 0; i < ells.size(); ++i) mv[i] |= pm->second[i];
+        }
+      }
+      mask.emplace(v, std::move(mv));
+    }
+    const double t_sweep = Seconds(t0);
+
+    size_t bad = 0;
+    std::vector<uint64_t> fam_mask(ells.size(), 0);
+    for (size_t t = 0; t < targets.size(); ++t) {
+      const int64_t p = targets[t];
+      auto mit = mask.find(p);
+      for (size_t i = 0; i < ells.size(); ++i) {
+        const uint64_t mv = mit == mask.end() ? 0 : mit->second[i];
+        if (!opt.sweep_only &&
+            static_cast<size_t>(__builtin_popcountll(mv)) != walk_pure[t][i])
+          ++bad;
+        const int64_t ell = static_cast<int64_t>(ells[i]);
+        for (int64_t x = 0; x < ell; ++x)
+          if (mv >> x & 1) fam_mask[i] |= 1ULL << ((p - x) % ell + ell) % ell;
+      }
+    }
+    size_t fam_bad = 0;
+    if (!opt.sweep_only)
+      for (size_t i = 0; i < ells.size(); ++i)
+        if (static_cast<size_t>(__builtin_popcountll(fam_mask[i])) !=
+            fam_red_a0[i].size())
+          ++fam_bad;
+
+    std::printf("\nSingle-pass sweep (degree-1 classes, no per-target walks):\n");
+    std::printf("  nodes carried            : %zu  (state %zu bytes)\n",
+                node_set.size(), node_set.size() * ells.size() * 8);
+    std::printf("  sweep time               : %.3fs  (walks took %.3fs)\n",
+                t_sweep, t_cores);
+    std::printf("  per-target agreement     : %zu / %zu%s\n",
+                targets.size() * ells.size() - bad,
+                targets.size() * ells.size(), bad ? "  (MISMATCH)" : "");
+    std::printf("  family-class agreement   : %zu / %zu%s\n",
+                ells.size() - fam_bad, ells.size(),
+                fam_bad ? "  (MISMATCH)" : "");
+    if (bad || fam_bad) return 1;
+
+    std::printf("\nFull-class sweep (all degrees, monomial basis, per l):\n");
+    size_t cls_bad = 0;
+    for (size_t li = 0; li < ells.size(); ++li) {
+      const uint32_t ell = static_cast<uint32_t>(ells[li]);
+      t0 = std::chrono::steady_clock::now();
+      std::unordered_map<int64_t, std::vector<std::string>> cls;
+      cls.reserve(node_set.size());
+      size_t total_entries = 0;
+      size_t max_state = 0;
+      for (const int64_t v : node_set) {
+        std::unordered_set<std::string> sv;
+        auto it = in.find(v);
+        if (it == in.end()) {
+          sv.insert(std::string("\x00\x01", 2));
+        } else {
+          for (const auto& e : it->second) {
+            auto pm = cls.find(e.q);
+            if (pm == cls.end()) continue;
+            bool ov = false;
+            const char c = static_cast<char>(IPow(2, e.m, &ov) % ell);
+            if (ov) continue;
+            for (const std::string& P : pm->second) {
+              std::string Q = e.n == 1 ? P : PowL(P, e.n, ell);
+              if (Q.empty()) continue;
+              Q[0] = static_cast<char>((static_cast<uint8_t>(Q[0]) +
+                                        static_cast<uint8_t>(c)) %
+                                       ell);
+              sv.insert(std::move(Q));
+            }
+          }
+        }
+        std::vector<std::string> flat(sv.begin(), sv.end());
+        total_entries += flat.size();
+        max_state = std::max(max_state, flat.size());
+        cls.emplace(v, std::move(flat));
+      }
+      const double t_cls = Seconds(t0);
+
+      size_t cbad = 0;
+      std::unordered_set<std::string> fam_cls;
+      for (size_t t = 0; t < targets.size(); ++t) {
+        auto f = cls.find(targets[t]);
+        const size_t n = f == cls.end() ? 0 : f->second.size();
+        if (!opt.sweep_only && n != walk_all[t][li]) ++cbad;
+        if (f != cls.end())
+          fam_cls.insert(f->second.begin(), f->second.end());
+      }
+      const size_t fam_walk =
+          opt.sweep_only ? fam_cls.size()
+                         : fam_red_a0[li].size() + fam_red_seg[li].size();
+      cls_bad += cbad + (fam_cls.size() != fam_walk ? 1 : 0);
+
+      std::printf("  l=%-4u state %zu entries (max %zu, mean %.2f)  %.3fs  "
+                  "targets %zu/%zu  family %zu vs walk %zu%s\n",
+                  ell, total_entries, max_state,
+                  static_cast<double>(total_entries) / node_set.size(), t_cls,
+                  targets.size() - cbad, targets.size(), fam_cls.size(),
+                  fam_walk,
+                  cbad || fam_cls.size() != fam_walk ? "  (MISMATCH)" : "");
+    }
+    if (cls_bad) return 1;
+  }
+  return mismatches == 0 ? 0 : 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1259,10 +1997,12 @@ int main(int argc, char** argv) {
   if (opt.mode == "compose") return RunCompose(opt);
   if (opt.mode == "roots") return RunRoots(opt);
   if (opt.mode == "paths") return RunPaths(opt);
+  if (opt.mode == "spectrum")
+    return opt.target_p >= 0 ? RunSpectrum(opt) : RunSpectraFamily(opt);
   if (opt.mode != "edges") {
     std::fprintf(stderr,
                  "unknown --mode %s (basis | hasse | compose | edges | roots "
-                 "| paths)\n",
+                 "| paths | spectrum)\n",
                  opt.mode.c_str());
     return 2;
   }

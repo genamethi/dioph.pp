@@ -178,8 +178,11 @@ bool ReadConf(lua_State* L, const std::string& file, Conf* out,
     r.Fail("catalogd", "scan_planning_mode", "expected \"server\" or \"client\"");
   }
   if (r.ok && out->graph.mode != "basis" && out->graph.mode != "hasse" &&
-      out->graph.mode != "compose" && out->graph.mode != "edges") {
-    r.Fail("graph", "mode", "expected basis|hasse|compose|edges");
+      out->graph.mode != "compose" && out->graph.mode != "edges" &&
+      out->graph.mode != "roots" && out->graph.mode != "paths" &&
+      out->graph.mode != "spectrum") {
+    r.Fail("graph", "mode",
+           "expected basis|hasse|compose|edges|roots|paths|spectrum");
   }
   if (r.ok && out->graph.format != "text" && out->graph.format != "dot" &&
       out->graph.format != "json") {
