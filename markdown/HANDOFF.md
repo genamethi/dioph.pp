@@ -61,6 +61,14 @@ Start here when deciding what is alive.
 
 Roughly in dependency order. Each is a starting point, not a spec.
 
+Items 1 through 4 are one line of enquiry: what algebraic object does a prime's
+set of representations p = 2^m + q^n form, once chains are composed into
+polynomials — and is which representations exist, rather than how many,
+governed by structure that survives reduction mod l? If it is, the existence
+questions become computable in finite characteristic, which is the only route
+by which something like twin primes could come out of this rather than another
+density statement.
+
 1. Implement pp-graph for graph analysis of structure leveraging Hermite
    polynomials.
 
@@ -104,14 +112,76 @@ Roughly in dependency order. Each is a starting point, not a spec.
    covering all primes under 64 bits (and hopefully beyond, really).
    Point is we don't want toy examples that are only workable on a bounded prefix.
 
-2. **Settle consumer server-side planning.** `rest_scan_plan` exists and works;
+2. The spectrum of a prime, as something we can ask for by name.
+
+   Each partition edge is a map x -> x^n + 2^m, and composing along a chain
+   gives a polynomial in the root, so every prime carries a whole collection of
+   these — I've been calling it the spectrum of p. I want to be able to hold
+   that collection for a p I name, and for a set of primes I specify out of the
+   dataset rather than one at a time.
+
+   The sets I care about first are the ones we can already select: everything
+   with a given k in a window, and pairs of twin primes — p and p + 2 with both
+   of them prime. For such a pair I want to put Spec(p) and Spec(p + 2) next to
+   each other and see whether anything survives the comparison.
+
+   First round of consumers for this data:
+
+   - the spectrum of a named p
+   - the spectra of a family { p : k(p) = K } over a window
+   - the spectra of a pair of twin primes, side by side
+
+   Same constraint as above: this has to be reasonable over the whole dataset,
+   not a bounded prefix.
+
+3. The monoid these maps generate mod l, and what the translations leave behind.
+
+   Reduce the edge maps mod l and they generate a monoid of maps of the affine
+   line. The translations x -> x + c live in that monoid and act on it, and I
+   want to know what the action leaves behind — the orbits — because that seems
+   to be where anything that isn't forced by the action would have to live.
+
+   The part I actually care about is per prime: which of those classes p's own
+   ancestry realizes, and which it never does. The ones it misses are the
+   interesting half, and I'd like to be able to look at them for a prime or for
+   one of the families above.
+
+   First round of consumers for this data:
+
+   - the orbit space itself, per l, over the dataset
+   - the classes realized by a given p
+   - the classes p misses, and what in its ancestry accounts for that
+
+   l = 2 looks like it sees nothing here, so odd l is the range of interest.
+
+4. The same data at l^2 and beyond, and whether a sheaf falls out.
+
+   I want to climb from l to l^2 to l^3 with coefficients in Z_l, and be able to
+   go up a level without starting over. What I'm hoping to see is how the
+   realized classes behave as p varies — whether they hold steady over stretches
+   of primes and jump somewhere in particular, since that's the shape that would
+   make this a sheaf rather than a pile of tables.
+
+   Whether there's cohomology in it is the open question; what I want built is
+   the object that lets us test it. If it works, the payoff is a handle on which
+   solutions exist as p grows — twin primes are the ambitious version of that —
+   rather than another statement about how many.
+
+   First round of consumers for this data:
+
+   - realized classes at l and at l^2 for the same primes, and the map between
+     the levels
+   - where those classes stay constant across p, and where they change
+   - a read keyed by p: which classes does this prime realize, at this level
+
+5. **Settle consumer server-side planning.** `rest_scan_plan` exists and works;
    it is linked only into the e2e test. Either wire `source_scan` /
    `query_service` to it — which also decides where mode dispatch lives — or
    accept that in-process planning is the real path and the REST client is for
    foreign consumers. `generate` is already a REST client on both resume reads,
    so the producer's REST-ness is not the gap; what it does not use is the
    *spec* planning routes.
-3. **Settle configuration.** One surface, one warehouse default. However, a
+6. **Settle configuration.** One surface, one warehouse default. However, a
   qualification and some clarifications: (a) Iceberg tables being defined by
   schemas.cc is fine when they're tightly coupled to a binary. What the final
   shape will likely be is that we'll have a client surface for deriving tables
