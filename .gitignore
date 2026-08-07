@@ -111,7 +111,6 @@ native/bin/nth_prime_boundaries
 .codex
 .mcp.json
 native/vendor/lua-5.5.0/
-native/vendor/lua-5.5.0.tar.gz
 markdown/math/.speculative
 
 # graphify knowledge-graph output (regenerable)

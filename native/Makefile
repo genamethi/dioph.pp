@@ -47,8 +47,8 @@ ICEBERG_LDLIBS += \
 	-lcurl -lssl -lcrypto -ldl -lrt
 endif
 
-GTEST_CPPFLAGS := -I$(PREFIX)/include/arrow-gtest
-GTEST_LDLIBS := -larrow_gtest_main -larrow_gmock -larrow_gtest
+GTEST_CPPFLAGS ?= -I$(PREFIX)/include/arrow-gtest
+GTEST_LDLIBS ?= -larrow_gtest_main -larrow_gmock -larrow_gtest
 
 LMDB_DIR := vendor/lmdb/libraries/liblmdb
 LMDB_CPPFLAGS += -I$(LMDB_DIR)

@@ -10,12 +10,48 @@ CXX="${CXX:-g++}"
 SUDO=
 [ "$(id -u)" = 0 ] || SUDO=sudo
 
+LUA_VERSION="${LUA_VERSION:-5.5.0}"
+LUA_SHA256="${LUA_SHA256-57ccc32bbbd005cab75bcc52444052535af691789dba2b9016d5c50640d68b3d}"
+CPP_HTTPLIB_VERSION="${CPP_HTTPLIB_VERSION:-v0.52.0}"
+CPP_HTTPLIB_SHA256="${CPP_HTTPLIB_SHA256-4b4453dc2261b8304e377526f4a45e3ed175913d1e718c65f06530a11a92dd27}"
+DUCKDB_VERSION="${DUCKDB_VERSION:-v1.5.5}"
+DUCKDB_CLI_SHA256="${DUCKDB_CLI_SHA256-08c0ca117111fcede14239d0093792352befdc174218c344d232c13279643d05}"
+DUCKDB_LIB_SHA256="${DUCKDB_LIB_SHA256-1fb8ce388157d84a25abe685a8a2520bf00c00321821968e4bb398fd766e7abb}"
+
+fetch_verified() {
+  fv_dest=$1
+  fv_sha=$2
+  shift 2
+  for fv_url in "$@"; do
+    if curl -fL --retry 2 --retry-delay 2 --retry-connrefused \
+      --connect-timeout 10 --max-time 900 -o "$fv_dest" "$fv_url"; then
+      if [ -z "$fv_sha" ]; then
+        echo "warn: fetched $fv_url without checksum verification"
+        return 0
+      fi
+      fv_got=$(sha256sum "$fv_dest" | cut -d' ' -f1)
+      if [ "$fv_got" = "$fv_sha" ]; then
+        return 0
+      fi
+      echo "checksum mismatch for $fv_url"
+      echo "  expected $fv_sha"
+      echo "  got      $fv_got"
+      rm -f "$fv_dest"
+      return 1
+    fi
+    echo "fetch failed: $fv_url"
+  done
+  echo "all sources exhausted for $fv_dest"
+  return 1
+}
+
 SANITIZE=
 SANITIZE_VENDOR=
 VENDOR_FLINT=
 FORCE=
 DISTCLEAN=
 SHARED=
+SYSTEM_ARROW=
 for arg in "$@"; do
   case "$arg" in
     --sanitize) SANITIZE=1 ;;
@@ -25,10 +61,11 @@ for arg in "$@"; do
       ;;
     --vendor-flint) VENDOR_FLINT=1 ;;
     --shared) SHARED=1 ;;
+    --system-arrow) SYSTEM_ARROW=1 ;;
     --force) FORCE=1 ;;
     --distclean) DISTCLEAN=1 ;;
     *)
-      echo "unknown option: $arg (supported: --sanitize, --sanitize-vendor, --vendor-flint, --shared, --force, --distclean)"
+      echo "unknown option: $arg (supported: --sanitize, --sanitize-vendor, --vendor-flint, --shared, --system-arrow, --force, --distclean)"
       exit 1
       ;;
   esac
@@ -93,8 +130,23 @@ elif command -v apt-get >/dev/null 2>&1; then
 
   PKGS="build-essential pkgconf cmake ninja-build git curl tar unzip \
 libboost-dev libgmp-dev libmpfr-dev libprimesieve-dev libprimecount-dev \
-libsqlite3-dev libssl-dev libreadline-dev libginac-dev nlohmann-json3.12-dev \
+libsqlite3-dev libssl-dev libreadline-dev libginac-dev \
 zlib1g-dev libzstd-dev libbz2-dev libbrotli-dev"
+
+  if [ ! -f /usr/include/nlohmann/json.hpp ] && [ ! -f "$PREFIX/include/nlohmann/json.hpp" ]; then
+    nlohmann_pkg=
+    for c in nlohmann-json3.12-dev nlohmann-json3-dev nlohmann-json-dev; do
+      if apt-cache show "$c" 2>/dev/null | grep -q '^Package:'; then
+        nlohmann_pkg=$c
+        break
+      fi
+    done
+    [ -n "$nlohmann_pkg" ] || {
+      echo "no nlohmann-json development package available in apt"
+      exit 1
+    }
+    PKGS="$PKGS $nlohmann_pkg"
+  fi
 
   deb_have libcurl4-openssl-dev || deb_have libcurl4-gnutls-dev || PKGS="$PKGS libcurl4-openssl-dev"
   [ -e "$PREFIX/lib/libpari.so" ] || [ -e "$PREFIX/lib/libpari.a" ] || deb_have libpari-dev || PKGS="$PKGS libpari-dev"
@@ -213,18 +265,36 @@ else
   exit 1
 fi
 
-if [ ! -x /usr/local/bin/lua ] || ! /usr/local/bin/lua -v 2>&1 | grep -q "Lua 5.5"; then
+LUA_SERIES=$(echo "$LUA_VERSION" | cut -d. -f1,2)
+if [ ! -x /usr/local/bin/lua ] || ! /usr/local/bin/lua -v 2>&1 | grep -q "Lua $LUA_SERIES"; then
   tmp=$(mktemp -d)
   cd "$tmp"
-  curl -L -R -O https://www.lua.org/ftp/lua-5.5.0.tar.gz
-  tar zxf lua-5.5.0.tar.gz
-  cd lua-5.5.0
+  lua_vendored="$VENDOR/lua-$LUA_VERSION.tar.gz"
+  if [ -f "$lua_vendored" ]; then
+    cp "$lua_vendored" "lua-$LUA_VERSION.tar.gz"
+    if [ -n "$LUA_SHA256" ]; then
+      lua_got=$(sha256sum "lua-$LUA_VERSION.tar.gz" | cut -d' ' -f1)
+      [ "$lua_got" = "$LUA_SHA256" ] || {
+        echo "vendored $lua_vendored does not match LUA_SHA256"
+        echo "  expected $LUA_SHA256"
+        echo "  got      $lua_got"
+        exit 1
+      }
+    fi
+    echo "lua $LUA_VERSION from vendored tarball"
+  else
+    fetch_verified "lua-$LUA_VERSION.tar.gz" "$LUA_SHA256" \
+      "https://www.lua.org/ftp/lua-$LUA_VERSION.tar.gz" \
+      "http://deb.debian.org/debian/pool/main/l/lua$LUA_SERIES/lua${LUA_SERIES}_$LUA_VERSION.orig.tar.gz"
+  fi
+  tar zxf "lua-$LUA_VERSION.tar.gz"
+  cd "lua-$LUA_VERSION"
   make all test
   $SUDO make install
   cd "$ROOT"
   rm -rf "$tmp"
 else
-  echo "lua 5.5 present"
+  echo "lua $LUA_SERIES present"
 fi
 
 httplib_ok=
@@ -234,14 +304,10 @@ for f in "$PREFIX/include/httplib.h" /usr/local/include/httplib.h /usr/include/h
   break
 done
 if [ -z "$httplib_ok" ]; then
-  tag=$(curl -fsSL https://api.github.com/repos/yhirose/cpp-httplib/releases/latest |
-    sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')
-  [ -n "$tag" ] || {
-    echo "could not resolve latest cpp-httplib release"
-    exit 1
-  }
+  tag="$CPP_HTTPLIB_VERSION"
   tmp=$(mktemp)
-  curl -fsSL "https://raw.githubusercontent.com/yhirose/cpp-httplib/$tag/httplib.h" -o "$tmp"
+  fetch_verified "$tmp" "$CPP_HTTPLIB_SHA256" \
+    "https://raw.githubusercontent.com/yhirose/cpp-httplib/$tag/httplib.h"
   grep -q 'inline Server::Server' "$tmp" || {
     echo "fetched cpp-httplib $tag is not header-only"
     exit 1
@@ -264,28 +330,51 @@ else
   ICEBERG_SENTINEL="$PREFIX/lib/libiceberg_sql_catalog.a"
 fi
 
-if needs_install arrow "$ARROW_SENTINEL"; then
-  vendor_sync arrow
-  cd "$VENDOR/arrow/cpp"
-  mkdir -p build
-  cd build
-  cmake .. --preset ninja-release -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-    $ARROW_LINK_FLAGS \
-    -DARROW_WITH_SNAPPY=ON -DARROW_BUILD_UTILITIES=ON -DARROW_TESTING=ON \
-    $ARROW_SAN_FLAGS
-  ninja -j "$JOBS"
-  $SUDO cmake --install .
-  cd "$ROOT"
-  stamp_prefix arrow
-else
-  echo "arrow present"
-fi
+GTEST_CPPFLAGS_OUT=
+GTEST_LDLIBS_OUT=
 
-if [ ! -f "$PREFIX/include/arrow-gtest/gtest/gtest.h" ]; then
-  echo "arrow's bundled gtest missing ($PREFIX/include/arrow-gtest/gtest/gtest.h); rebuild arrow with -DARROW_TESTING=ON"
-  exit 1
+if [ -n "$SYSTEM_ARROW" ]; then
+  have_pc arrow || {
+    echo "--system-arrow: no arrow.pc found (install libarrow-dev, e.g. from"
+    echo "  https://apache.jfrog.io/artifactory/arrow/ubuntu \$(lsb_release -cs) main)"
+    exit 1
+  }
+  have_pc parquet || {
+    echo "--system-arrow: arrow.pc found but parquet.pc missing (install libparquet-dev)"
+    exit 1
+  }
+  echo "arrow present (system): $(PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PKG_CONFIG_PATH" pkg-config --modversion arrow)"
+  have_pc gtest && have_pc gmock || {
+    echo "--system-arrow: needs googletest (install libgtest-dev libgmock-dev)"
+    exit 1
+  }
+  GTEST_CPPFLAGS_OUT=$(PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PKG_CONFIG_PATH" pkg-config --cflags gtest gmock)
+  GTEST_LDLIBS_OUT=$(PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PKG_CONFIG_PATH" pkg-config --libs gmock_main gmock gtest)
+  echo "gtest: system googletest $(PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PKG_CONFIG_PATH" pkg-config --modversion gtest)"
+else
+  if needs_install arrow "$ARROW_SENTINEL"; then
+    vendor_sync arrow
+    cd "$VENDOR/arrow/cpp"
+    mkdir -p build
+    cd build
+    cmake .. --preset ninja-release -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+      $ARROW_LINK_FLAGS \
+      -DARROW_WITH_SNAPPY=ON -DARROW_BUILD_UTILITIES=ON -DARROW_TESTING=ON \
+      $ARROW_SAN_FLAGS
+    ninja -j "$JOBS"
+    $SUDO cmake --install .
+    cd "$ROOT"
+    stamp_prefix arrow
+  else
+    echo "arrow present"
+  fi
+
+  if [ ! -f "$PREFIX/include/arrow-gtest/gtest/gtest.h" ]; then
+    echo "arrow's bundled gtest missing ($PREFIX/include/arrow-gtest/gtest/gtest.h); rebuild arrow with -DARROW_TESTING=ON"
+    exit 1
+  fi
+  echo "arrow-gtest bundle present"
 fi
-echo "arrow-gtest bundle present"
 
 NLOHMANN_VERSION=$(nlohmann_version "$PREFIX/include/nlohmann/detail/abi_macros.hpp")
 [ -n "$NLOHMANN_VERSION" ] ||
@@ -310,11 +399,16 @@ if needs_install iceberg-cpp "$ICEBERG_SENTINEL"; then
   echo "building iceberg against nlohmann-json $NLOHMANN_VERSION"
   vendor_sync iceberg-cpp
   cd "$VENDOR/iceberg-cpp"
+  if [ -n "$ICEBERG_ENABLE_TESTS" ]; then
+    ICEBERG_TEST_FLAGS="-DICEBERG_BUILD_TESTS=ON -DICEBERG_BUILD_REST_INTEGRATION_TESTS=ON"
+  else
+    ICEBERG_TEST_FLAGS="-DICEBERG_BUILD_TESTS=OFF -DICEBERG_BUILD_REST_INTEGRATION_TESTS=OFF"
+  fi
   cmake -S . -B build -G Ninja \
     -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_PREFIX_PATH="$PREFIX" \
     -DICEBERG_BUILD_BUNDLE=ON -DICEBERG_BUILD_SHARED=ON \
     -DICEBERG_SQL_SQLITE=ON -DICEBERG_BUILD_SQL_CATALOG=ON \
-    -DICEBERG_BUILD_REST_INTEGRATION_TESTS=ON \
+    $ICEBERG_TEST_FLAGS \
     $ICEBERG_SAN_FLAGS
   cmake --build build -j "$JOBS"
   $SUDO cmake --install build
@@ -338,11 +432,26 @@ else
   echo "iceberg catalog headers present"
 fi
 
+case "$(uname -m)" in
+x86_64) DUCKDB_ARCH=amd64 ;;
+aarch64 | arm64) DUCKDB_ARCH=arm64 ;;
+*)
+  echo "unsupported arch for duckdb: $(uname -m)"
+  exit 1
+  ;;
+esac
+
 DUCKDB="$(command -v duckdb 2>/dev/null || true)"
-[ -x "$DUCKDB" ] || DUCKDB="$HOME/.duckdb/cli/latest/duckdb"
-if [ ! -x "$DUCKDB" ]; then
-  curl -fsSL https://install.duckdb.org | sh
-  DUCKDB="$HOME/.duckdb/cli/latest/duckdb"
+[ -x "$DUCKDB" ] || DUCKDB="$PREFIX/bin/duckdb"
+if [ ! -x "$DUCKDB" ] || ! "$DUCKDB" --version 2>/dev/null | grep -q "^$DUCKDB_VERSION "; then
+  tmp=$(mktemp -d)
+  fetch_verified "$tmp/duckdb_cli.zip" "$DUCKDB_CLI_SHA256" \
+    "https://github.com/duckdb/duckdb/releases/download/$DUCKDB_VERSION/duckdb_cli-linux-$DUCKDB_ARCH.zip"
+  (cd "$tmp" && unzip -oq duckdb_cli.zip)
+  $SUDO mkdir -p "$PREFIX/bin"
+  $SUDO cp -p "$tmp/duckdb" "$PREFIX/bin/duckdb"
+  rm -rf "$tmp"
+  DUCKDB="$PREFIX/bin/duckdb"
 fi
 [ -x "$DUCKDB" ] || {
   echo "duckdb install failed (expected $DUCKDB)"
@@ -367,31 +476,15 @@ else
 fi
 
 if [ ! -f "$PREFIX/include/duckdb.hpp" ] || [ ! -f "$PREFIX/lib/libduckdb.so" ]; then
-  DUCKDB_VER="$("$DUCKDB" --version 2>/dev/null | awk '{print $1}')"
-  [ -n "$DUCKDB_VER" ] || {
-    echo "could not resolve duckdb version for libduckdb bundle"
-    exit 1
-  }
-  case "$(uname -m)" in
-  x86_64) DUCKDB_ARCH=amd64 ;;
-  aarch64 | arm64) DUCKDB_ARCH=arm64 ;;
-  *)
-    echo "unsupported arch for libduckdb bundle: $(uname -m)"
-    exit 1
-    ;;
-  esac
   tmp=$(mktemp -d)
-  curl -fsSL -o "$tmp/libduckdb.zip" \
-    "https://github.com/duckdb/duckdb/releases/download/$DUCKDB_VER/libduckdb-linux-$DUCKDB_ARCH.zip" || {
-    echo "libduckdb bundle download failed ($DUCKDB_VER / $DUCKDB_ARCH)"
-    exit 1
-  }
+  fetch_verified "$tmp/libduckdb.zip" "$DUCKDB_LIB_SHA256" \
+    "https://github.com/duckdb/duckdb/releases/download/$DUCKDB_VERSION/libduckdb-linux-$DUCKDB_ARCH.zip"
   (cd "$tmp" && unzip -oq libduckdb.zip)
   $SUDO cp -p "$tmp/libduckdb.so" "$tmp/libduckdb_static.a" "$PREFIX/lib/"
   $SUDO cp -p "$tmp/duckdb.hpp" "$tmp/duckdb.h" "$PREFIX/include/"
   $SUDO ldconfig 2>/dev/null || true
   rm -rf "$tmp"
-  echo "libduckdb $DUCKDB_VER installed to $PREFIX"
+  echo "libduckdb $DUCKDB_VERSION installed to $PREFIX"
 else
   echo "libduckdb present"
 fi
@@ -402,6 +495,8 @@ fi
   [ -n "$FALLBACK" ] && echo "ICEBERG_FALLBACK_CPPFLAGS := -I$ICEBERG_SRC"
   [ -n "$SANITIZE" ] && echo "SANITIZE := -fsanitize=address,undefined -fno-omit-frame-pointer"
   [ -n "$SHARED" ] && echo "PP_SHARED := 1"
+  [ -n "$GTEST_CPPFLAGS_OUT" ] && echo "GTEST_CPPFLAGS := $GTEST_CPPFLAGS_OUT"
+  [ -n "$GTEST_LDLIBS_OUT" ] && echo "GTEST_LDLIBS := $GTEST_LDLIBS_OUT"
 } >"$ROOT/config.mk"
 
 INSTALL_PATH="${PP_INSTALL_PATH:-$HOME/.local/bin}"
