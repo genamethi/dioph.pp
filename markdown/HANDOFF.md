@@ -96,68 +96,25 @@ Roughly in dependency order. Each is a starting point, not a spec.
    on truly general datasets (over large ranges compared between one another
    or won't allow for taking the projective limit, i.e., doing p/l-adic work)
 
-2. The spectrum of a prime, as something we can ask for by name.
+2. The spectrum of a prime.
 
-   Each partition edge is a map x -> x^n + 2^m, and composing along a chain
-   gives a polynomial which maps q to p. Every prime carries k many solutions.
-   Provisionally, I'm referring to it as the spectrum of p.
+   Each solution can be thought of as a map expressed as a polynomial to be
+   evaluated at q. The collection of those polynomials I'm going to call the
+   spectrum of p for now.
 
-   We want this to enable compute spectra for a general set, with our common
-   predicates.
+   We want this workable through the query engine, so spectra can be computed
+   for a general set with our common predicates.
 
-   The sets I care about first are the ones we can already select: everything
-   with a given k in a window, and pairs of twin primes — p and p + 2 with both
-   of them prime. For such a pair I want to compare Spec(p) and Spec(p + 2)
-   see what falls out.
+3. Mod l these maps generate a monoid containing the translations. Quotient by
+   them, and ask which classes a prime's polynomials realize, which they never
+   reach, and what in its ancestry accounts for a miss. Same for sets from 2.
+   l = 2 is degenerate, so odd l.
 
-   First round of consumers for this data:
-
-   - the spectrum of a named p
-   - the spectra of a family { p : k(p) = K } over a window
-   - the spectra of a pair of twin primes, side by side
-
-   Same constraint as above: this has to be reasonable over the whole dataset,
-   not a bounded prefix.
-
-3. The monoid the edge maps generate mod l, and its orbits under translation.
-
-   Reduce the edge maps mod l. They generate a monoid M of maps of the affine
-   line over F_l. The translations x -> x + c lie in M and form a group T. T
-   acts on M by post-composition, f goes to tau_c composed with f. The action is
-   free, and two maps share an orbit exactly when they differ by a constant. So
-   T\M is the set of chain maps up to an additive constant.
-
-   Classify each prime by which orbits its chains realize and which it never
-   reaches. Do the same for the families in 2.
-
-   First round of consumers for this data:
-
-   - T\M over the dataset, per l
-   - the orbits realized by a given p
-   - the orbits p misses, and which (m, n) in its ancestry account for that
-
-   l = 2 kills every translation, so odd l is the range.
-
-4. The same classification at l^2, l^3, and in the limit.
-
-   Repeat item 3 over Z/l^e with coefficients in Z_l. Reduction from Z/l^(e+1)
-   to Z/l^e carries orbits to orbits, so the classifications form an inverse
-   system. Build it so raising e extends the data rather than recomputing it.
-
-   Then ask whether the realized set is constant across stretches of p and
-   changes only at isolated primes. That is the condition for these to be
-   sections of a sheaf on a stratification rather than a table of answers.
-
-   If it stratifies, cohomology is the next question. I am not asserting there
-   is any. The point of building it is to make which solutions exist as p grows
-   a computation, twin primes being the ambitious version, rather than another
-   count.
-
-   First round of consumers for this data:
-
-   - realized orbits at l and l^2 for the same primes, and the map between levels
-   - where they hold constant across p, and where they change
-   - a read keyed by p: which orbits does this prime realize, at level e
+4. The same over Z/l^e with coefficients in Z_l, built so raising e extends the
+   data instead of recomputing it. The question is whether the classes hold
+   constant across stretches of p and change only at isolated ones. That would
+   be a stratification, and then the sheaf question is worth asking. I am not
+   claiming it is one.
 
 5. **Settle consumer server-side planning.** `rest_scan_plan` exists and works;
    it is linked only into the e2e test. Either wire `source_scan` /
