@@ -17,4 +17,6 @@ HermiteRootsReport HermiteRootsModL(int n, uint64_t ell);
 
 uint64_t HermiteEvalModL(int n, uint64_t value, uint64_t ell);
 
+std::vector<uint64_t> PrimitiveMersenneFactors(int d);
+
 }  // namespace primeparts::graph

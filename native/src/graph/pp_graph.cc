@@ -101,7 +101,7 @@ void Usage(FILE* out) {
       "  --warehouse DIR  warehouse root (conf.core.warehouse)\n"
       "  --namespace NS   catalog namespace (conf.core.namespace)\n"
       "  --threads N      scan/engine threads (conf.graph.threads)\n"
-      "  --mode M         basis | hasse | compose | edges | roots (conf.graph.mode)\n"
+      "  --mode M         basis | hasse | compose | edges | roots | paths (conf.graph.mode)\n"
       "  --he-n N         mode roots: largest Hermite degree to check\n"
       "  --ell-max N      mode roots: largest prime modulus to check\n"
       "  --format F       text | dot | json (conf.graph.format)\n"
@@ -1016,6 +1016,189 @@ void EmitDot(const Poset& g,
   std::printf("}\n");
 }
 
+struct GpEdge {
+  int64_t p;
+  int64_t q;
+  int32_t m;
+  int32_t n;
+};
+
+int RunPaths(const Options& opt) {
+  std::string error;
+  scan::ScanPlanRequest request;
+  request.select = {"p", "m_k", "n_k"};
+  std::vector<std::string> paths;
+  double t_plan = 0.0;
+  if (!PlanPaths(opt, "partitions", request, &paths, &t_plan, &error)) {
+    std::fprintf(stderr, "pp-graph: %s\n", error.c_str());
+    return 1;
+  }
+  if (paths.empty()) {
+    std::fprintf(stderr, "pp-graph: partitions has no data files\n");
+    return 1;
+  }
+
+  duckdb::DBConfig cfg;
+  cfg.SetOptionByName("threads", duckdb::Value::BIGINT(opt.threads));
+  duckdb::DuckDB db(nullptr, &cfg);
+  duckdb::Connection con(db);
+
+  auto t0 = std::chrono::steady_clock::now();
+  const int64_t n_floor = opt.he_n >= 2 ? opt.he_n : 2;
+  auto result = con.Query("SELECT p, m_k, n_k FROM read_parquet(" +
+                          QuoteList(paths) + ") WHERE n_k >= " +
+                          std::to_string(n_floor));
+  if (result->HasError()) {
+    std::fprintf(stderr, "pp-graph: %s\n", result->GetError().c_str());
+    return 1;
+  }
+  std::vector<GpEdge> edges;
+  int64_t unsolved = 0;
+  int64_t max_q = 0;
+  for (auto& row : *result) {
+    const int64_t p = row.GetValue<int64_t>(0);
+    const int32_t m = row.GetValue<int32_t>(1);
+    const int32_t n = row.GetValue<int32_t>(2);
+    int64_t q = 0;
+    if (!SolveQ(p, m, n, &q)) {
+      ++unsolved;
+      continue;
+    }
+    max_q = std::max(max_q, q);
+    edges.push_back(GpEdge{p, q, m, n});
+  }
+  const double t_scan = Seconds(t0);
+
+  scan::ScanPlanRequest preq;
+  preq.select = {"p", "m_k", "n_k"};
+  preq.filter = iceberg::Expressions::LessThanOrEqual(
+      "p", iceberg::Literal::Long(max_q));
+  std::vector<std::string> ppaths;
+  double t_pplan = 0.0;
+  if (!PlanPaths(opt, "partitions", preq, &ppaths, &t_pplan, &error)) {
+    std::fprintf(stderr, "pp-graph: %s\n", error.c_str());
+    return 1;
+  }
+  std::unordered_map<int64_t, std::vector<std::pair<int32_t, int32_t>>> parents;
+  t0 = std::chrono::steady_clock::now();
+  if (!ppaths.empty()) {
+    auto presult = con.Query("SELECT p, m_k, n_k FROM read_parquet(" +
+                             QuoteList(ppaths) + ") WHERE p <= " +
+                             std::to_string(max_q));
+    if (presult->HasError()) {
+      std::fprintf(stderr, "pp-graph: %s\n", presult->GetError().c_str());
+      return 1;
+    }
+    for (auto& row : *presult) {
+      parents[row.GetValue<int64_t>(0)].push_back(
+          {row.GetValue<int32_t>(1), row.GetValue<int32_t>(2)});
+    }
+  }
+  const double t_parent = Seconds(t0);
+
+  std::vector<std::vector<uint64_t>> prim(64);
+  for (int d = 2; d < 64; ++d)
+    prim[d] = primeparts::graph::PrimitiveMersenneFactors(d);
+
+  std::map<std::pair<int, uint64_t>, std::pair<int, int>> root_cache;
+  auto subgroup_roots = [&](int n, uint64_t ell, int d) -> std::pair<int, int> {
+    const auto key = std::make_pair(n, ell);
+    auto it = root_cache.find(key);
+    if (it != root_cache.end()) return it->second;
+    int count = 0;
+    uint64_t z = 1 % ell;
+    for (int j = 0; j < d; ++j) {
+      if (primeparts::graph::HermiteEvalModL(n, z, ell) == 0) ++count;
+      z = (z * 2) % ell;
+    }
+    const auto val = std::make_pair(count, d);
+    root_cache.emplace(key, val);
+    return val;
+  };
+
+  struct Hit {
+    int64_t p;
+    int64_t q;
+    int32_t n;
+    int32_t mp;
+    uint64_t ell;
+    int d;
+    char reading;
+  };
+  std::vector<Hit> hits;
+  int64_t parentless = 0;
+  int64_t path_count = 0;
+  int64_t evals_a = 0, hits_a = 0;
+  int64_t evals_b = 0, hits_b = 0;
+  double null_a = 0.0, null_b = 0.0;
+
+  t0 = std::chrono::steady_clock::now();
+  for (const auto& e : edges) {
+    auto it = parents.find(e.q);
+    if (it == parents.end()) {
+      ++parentless;
+      continue;
+    }
+    const auto& reps = it->second;
+    std::set<int> gap_a;
+    for (size_t i = 0; i < reps.size(); ++i)
+      for (size_t j = i + 1; j < reps.size(); ++j)
+        gap_a.insert(std::abs(reps[i].first - reps[j].first));
+    for (const auto& [mp, np] : reps) {
+      ++path_count;
+      const auto eval_reading = [&](int d, char reading) {
+        if (d < 2 || d > 63) return;
+        for (uint64_t ell : prim[d]) {
+          const auto [in_sub, sub_size] = subgroup_roots(e.n, ell, d);
+          if (in_sub == 0 || in_sub == sub_size) continue;
+          const uint64_t x = (mp < 64 ? (1ULL << mp) : 0) % ell;
+          const uint64_t v = primeparts::graph::HermiteEvalModL(e.n, x, ell);
+          const double null_p =
+              static_cast<double>(in_sub) / static_cast<double>(sub_size);
+          if (reading == 'A') {
+            ++evals_a;
+            null_a += null_p;
+          } else {
+            ++evals_b;
+            null_b += null_p;
+          }
+          if (v == 0 && x != 0) {
+            if (reading == 'A') ++hits_a; else ++hits_b;
+            hits.push_back(Hit{e.p, e.q, e.n, mp, ell, d, reading});
+          }
+        }
+      };
+      for (int d : gap_a) eval_reading(d, 'A');
+      eval_reading(std::abs(e.m - mp), 'B');
+    }
+  }
+  const double t_eval = Seconds(t0);
+
+  std::printf("pp-graph paths (n >= 2 grandparent evaluation)\n");
+  std::printf("  n>=2 edges                : %zu (unsolved %" PRId64 ")\n",
+              edges.size(), unsolved);
+  std::printf("  parentless (k(q)=0)       : %" PRId64 "\n", parentless);
+  std::printf("  grandparent paths         : %" PRId64 "\n", path_count);
+  std::printf("  reading A (parent gaps)   : evals=%" PRId64 " hits=%" PRId64
+              "  null-expected=%.2f\n",
+              evals_a, hits_a, null_a);
+  std::printf("  reading B (|m - m'|)      : evals=%" PRId64 " hits=%" PRId64
+              "  null-expected=%.2f\n",
+              evals_b, hits_b, null_b);
+  std::printf("  scan %.1fs  parent %.1fs  eval %.1fs\n", t_scan, t_parent,
+              t_eval);
+  const size_t show = std::min(hits.size(), static_cast<size_t>(50));
+  for (size_t i = 0; i < show; ++i) {
+    const auto& h = hits[i];
+    std::printf("  HIT %c p=%" PRId64 " q=%" PRId64 " n=%d m'=%d ell=%" PRIu64
+                " d=%d\n",
+                h.reading, h.p, h.q, h.n, h.mp, h.ell, h.d);
+  }
+  if (hits.size() > show)
+    std::printf("  (+%zu more hits)\n", hits.size() - show);
+  return 0;
+}
+
 bool IsSmallPrime(uint64_t v) {
   if (v < 2) return false;
   if (v % 2 == 0) return v == 2;
@@ -1075,9 +1258,11 @@ int main(int argc, char** argv) {
   if (opt.mode == "hasse") return RunHasse(opt);
   if (opt.mode == "compose") return RunCompose(opt);
   if (opt.mode == "roots") return RunRoots(opt);
+  if (opt.mode == "paths") return RunPaths(opt);
   if (opt.mode != "edges") {
     std::fprintf(stderr,
-                 "unknown --mode %s (basis | hasse | compose | edges | roots)\n",
+                 "unknown --mode %s (basis | hasse | compose | edges | roots "
+                 "| paths)\n",
                  opt.mode.c_str());
     return 2;
   }

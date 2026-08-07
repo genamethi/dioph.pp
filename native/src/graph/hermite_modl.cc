@@ -90,6 +90,29 @@ HermiteRootsReport HermiteRootsModL(int n, uint64_t ell) {
   return r;
 }
 
+std::vector<uint64_t> PrimitiveMersenneFactors(int d) {
+  std::vector<uint64_t> out;
+  if (d < 2 || d > 63) return out;
+  const uint64_t mersenne = (1ULL << d) - 1;
+  n_factor_t fac;
+  n_factor_init(&fac);
+  n_factor(&fac, mersenne, 0);
+  for (int i = 0; i < fac.num; ++i) {
+    const uint64_t p = fac.p[i];
+    const uint64_t pinv = n_preinvert_limb(p);
+    bool primitive = true;
+    for (int e = 1; e < d; ++e) {
+      if (d % e != 0) continue;
+      if (n_powmod2_ui_preinv(2 % p, e, p, pinv) == 1) {
+        primitive = false;
+        break;
+      }
+    }
+    if (primitive) out.push_back(p);
+  }
+  return out;
+}
+
 uint64_t HermiteEvalModL(int n, uint64_t value, uint64_t ell) {
   const uint64_t ninv = n_preinvert_limb(ell);
   const uint64_t x = value % ell;
