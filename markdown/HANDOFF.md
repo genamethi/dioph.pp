@@ -98,9 +98,9 @@ Roughly in dependency order. Each is a starting point, not a spec.
 
 2. The spectrum of a prime.
 
-   Each solution can be thought of as a map expressed as a polynomial to be
-   evaluated at q. The collection of those polynomials I'm going to call the
-   spectrum of p for now.
+   Each chain into p is expressed by a polynomial in x which, evaluated at the
+   chain's initial q value, yields p. The collection of those polynomials I'm
+   going to call the spectrum of p for now.
 
    We want this workable through the query engine, so spectra can be computed
    for a general set with our common predicates.
