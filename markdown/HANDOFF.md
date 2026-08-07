@@ -105,10 +105,10 @@ Roughly in dependency order. Each is a starting point, not a spec.
    We want this workable through the query engine, so spectra can be computed
    for a general set with our common predicates.
 
-3. Mod l these maps generate a monoid containing the translations. Quotient by
-   them, and ask which classes a prime's polynomials realize, which they never
-   reach, and what in its ancestry accounts for a miss. Same for sets from 2.
-   l = 2 is degenerate, so odd l.
+3. Mod l these maps generate a monoid containing the translations. Quotient the
+   monoid by the translations and ask which classes of maps a prime's
+   polynomials realize, which they never reach, and what in its ancestry
+   accounts for a miss. Same for sets from 2. l = 2 is degenerate, so odd l.
 
 4. The same over Z/l^e with coefficients in Z_l, built so raising e extends the
    data instead of recomputing it. The question is whether the classes hold
