@@ -81,13 +81,12 @@ Roughly in dependency order. Each is a starting point, not a spec.
    First round of consumers for this data:
 
    - produce Hasse-diagram(s) corresponding to a queried set of primes,
-     and chain decompositions
+     and chain decompositions. Emit these in a form I can render.
    - want to see how the k-many ways a single p is expressed, so those collections
      can be compared within a k value and between k values.
      Particularly curious about this point because it should give insights
      when considered alongside the congruences.
-   - the degree spectrum, and grouping primes by the shape of their coefficient
-     sets
+   - the degree spectrum, and grouping primes by which He_i appear
 
    N.B. Everything needs to work scale and be reasonable to work within for a dataset
    covering all primes under 64 bits (and hopefully beyond, really).
@@ -95,19 +94,24 @@ Roughly in dependency order. Each is a starting point, not a spec.
    or some unmotivated restriction just to hide a design that doesn't scale
    on truly general datasets (over large ranges compared between one another
    or won't allow for taking the projective limit, i.e., doing p/l-adic work)
+   Work should extend the C++ codebase and use the data that is already there.
+   Whatever we query over, the moduli and the ranges and all the rest, should be
+   parameters rather than fixed in the code.
 
 2. The spectrum of a prime.
 
    Each chain into p is expressed by a polynomial in x which, evaluated at the
-   chain's initial q value, yields p. The collection of those polynomials I'm
-   going to call the spectrum of p for now.
+   chain's initial q value, yields p. A chain begins at a q with k = 0. The
+   collection of those polynomials I'm going to call the spectrum of p for now.
 
    We want this workable through the query engine, so spectra can be computed
    for a general set with our common predicates.
 
 3. Mod l these maps generate a monoid. It contains every translation x -> x + c,
    and these act by post-composition. Characterize the orbits, per prime as well
-   as for the sets from the previous item. l = 2 is degenerate, so odd l.
+   as for the sets from the previous item. I want to be able to draw a given
+   prime's orbit structure; tables aren't giving me a clear view of it. l = 2 is
+   degenerate, so odd l.
 
 4. The same over Z/l^e with coefficients in Z_l, built so raising e extends the
    data instead of recomputing it. The question is whether the classes hold
