@@ -83,19 +83,27 @@ identifies `L_psi(f^2)` with `L_psi(f)`, so pulling back along an even-exponent
 edge may collapse. Whether that kills the construction or is the content of it
 is not clear either way.
 
-*Pushforward.* `P_*Q_ell` has rank `deg P = prod n_i`, is lisse off the branch
-locus, and its trace function at `x` is `#P^{-1}(x)(F_q)`, the number of points
-in the fiber. Its monodromy as a permutation representation on the fiber is the
-Galois group of the Galois closure of `P`, which is the arboreal group of the
-chain and the same object A2 asks for.
+*Pushforward.* `P_*Q_ell` has rank `deg P = prod n_i`, is lisse wherever `P` is
+etale, and its trace function at `x` is `#P^{-1}(x)(F_q)`, the number of points
+in the fiber. Those three are standard for any finite `P`; the stalk is the
+permutation representation on the geometric fiber, so the Frobenius trace counts
+rational points of the fiber.
 
-The pushforward reading is the one to test first. The fiber count is the `k`
-structure the project already measures; the branch locus of a composite of
-unicritical maps is its postcritical set, so `--critical` (`:2331`) would be
-computing the singular locus rather than something analogous to it; and A2's
-monodromy and the Galois-group question become the same question asked twice.
-What has to be established is that this is the right sheaf rather than a
-plausible one, and where the pullback still has a role.
+Two further statements are standard only for *separable* `P`: that the branch
+locus is the set of critical values, and that the monodromy of the permutation
+representation is the Galois group of the Galois closure. Over `F_2` an
+even-exponent edge is inseparable, `x -> x^2` being Frobenius with identically
+vanishing derivative, so neither can be assumed here. That is the same fault
+line as the Artin-Schreier collapse above, reached from the other side, and it
+is the thing to settle first.
+
+If those two do survive in some form, the pushforward reading is the one to
+build on. The fiber count is the `k` structure the project already measures; the
+branch locus of a composite of unicritical maps would be its postcritical set,
+making `--critical` (`:2331`) a computation of the singular locus rather than
+something analogous to it; and A2's monodromy and the Galois-group question
+become the same question asked twice. What remains after that is where the
+pullback still has a role.
 
 Nothing in the code builds a sheaf, a trace function, a pullback or a
 pushforward. `--critical` carries each node's set of critical values mod `l`
