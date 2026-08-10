@@ -62,6 +62,8 @@ std::shared_ptr<iceberg::Catalog> OpenCatalog(const fs::path& warehouse,
 
 bool RestServerReachable(const std::string& rest_uri);
 
+std::string AdvertisedWarehouse(const std::string& rest_uri);
+
 enum class FieldBoundState {
   kTableAbsent,
   kNoSnapshot,

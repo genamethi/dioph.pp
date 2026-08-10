@@ -4,6 +4,7 @@
 #include <atomic>
 #include <csignal>
 #include <chrono>
+#include <filesystem>
 #include <unordered_map>
 #include <cstdint>
 #include <cstdio>
@@ -51,6 +52,7 @@ namespace {
 
 using json = nlohmann::json;
 namespace ir = iceberg::rest;
+namespace fs = std::filesystem;
 
 
 void SendJson(httplib::Response& res, int status, const json& body) {
@@ -916,13 +918,15 @@ int RunCatalogd(const CatalogdOptions& opts) {
              res.status = 204;
            });
 
-  svr.Get("/v1/config", [endpoints = routes.endpoints()](
-                            const httplib::Request&, httplib::Response& res) {
-    SendJson(res, 200,
-             json{{"defaults", json::object()},
-                  {"overrides", json::object()},
-                  {"endpoints", endpoints}});
-  });
+  svr.Get("/v1/config",
+          [endpoints = routes.endpoints(),
+           warehouse = fs::path(opts.warehouse).lexically_normal().string()](
+              const httplib::Request&, httplib::Response& res) {
+            SendJson(res, 200,
+                     json{{"defaults", json::object()},
+                          {"overrides", json{{"warehouse", warehouse}}},
+                          {"endpoints", endpoints}});
+          });
 
   svr.set_exception_handler(
       [](const httplib::Request&, httplib::Response& res, std::exception_ptr ep) {

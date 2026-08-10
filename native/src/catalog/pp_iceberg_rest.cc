@@ -138,6 +138,22 @@ bool RestServerReachable(const std::string& rest_uri) {
   return res && res->status == 200;
 }
 
+std::string AdvertisedWarehouse(const std::string& rest_uri) {
+  if (rest_uri.empty()) return {};
+  httplib::Client cli(rest_uri);
+  cli.set_connection_timeout(1, 0);
+  cli.set_read_timeout(2, 0);
+  auto res = cli.Get("/v1/config");
+  if (!res || res->status != 200) return {};
+  const auto body = nlohmann::json::parse(res->body, nullptr, false);
+  if (body.is_discarded()) return {};
+  const auto ov = body.find("overrides");
+  if (ov == body.end() || !ov->is_object()) return {};
+  const auto wh = ov->find("warehouse");
+  if (wh == ov->end() || !wh->is_string()) return {};
+  return wh->get<std::string>();
+}
+
 std::string_view FieldBoundStateName(FieldBoundState state) {
   switch (state) {
     case FieldBoundState::kTableAbsent:
@@ -237,6 +253,19 @@ std::shared_ptr<iceberg::Catalog> OpenCatalog(const fs::path& warehouse,
   if (!RestServerReachable(uri)) {
     if (error) *error = "catalogd unreachable at " + uri + " (start pp-catalogd)";
     return nullptr;
+  }
+  const std::string served = AdvertisedWarehouse(uri);
+  if (!served.empty()) {
+    const fs::path want = warehouse.lexically_normal();
+    const fs::path have = fs::path(served).lexically_normal();
+    if (want != have) {
+      if (error)
+        *error = "warehouse mismatch: " + uri + " serves " + have.string() +
+                 ", this process was given " + want.string() +
+                 " (data files and catalog metadata would land in different "
+                 "warehouses)";
+      return nullptr;
+    }
   }
   RestOptions opts;
   opts.rest_uri = uri;
