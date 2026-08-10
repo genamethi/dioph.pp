@@ -827,3 +827,12 @@ step 1, and corrects its guess.
    Hit rates split by ord_2(l) <= 60 vs > 60 differ by at most ~1 sigma
    at the available sample (48 small-order primes below 3000), consistent
    with phase-03 orthogonality.
+
+
+2026-08-09  W(F_2) = Z_2: 2-adic lift is the way
+-------------------------------------------------
+
+W(F_2) = Z_2, so lifting the base to Z/2^e recovers the m-record exactly
+(a constant's binary digits are its m-record). Lifting to Z/l^e for odd l
+reads that record only through m mod ord_l(2). The Z/l^e tower deforms
+away from the structure it is supposed to resolve.
