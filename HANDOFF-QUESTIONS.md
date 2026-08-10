@@ -19,7 +19,8 @@ checked out together.
 
 ## A. Corrections
 
-**A1. The base is `F_2` and `ell` is the coefficient prime.**
+**A1. The base is `F_2` and `ell` is the coefficient prime. The tower over the
+base is where the `m`-record lives.**
 
 FKMS fixes a base `F_q` and a prime `ell != q`; trace functions are
 `Qbar_ell`-valued functions on `A^1(F_q)` (§3.1). Two primes, two roles.
@@ -30,12 +31,31 @@ growing family is not a range of primes but the degree-`d` closed points of
 `A^1_{F_2}`, i.e. `F_{2^d}` with Frobenius acting. Item 3's "l = 2 is
 degenerate, so odd l" fixes the base rather than dropping it.
 
+The level-one collapse is not an argument against this and is worth stating
+exactly, because it is the base case of the tower rather than an obstruction.
+Normalize a chain polynomial by subtracting its target, `S = P - p`. Then mod 2
+every `q` is a unit, so `S + q ≡ S + 1`, and induction from `S ≡ x + 1` at the
+roots gives
+
+    S ≡ x^N + 1  (mod 2),   equivalently  P ≡ x^N  (mod 2),   N = prod n_i.
+
+Every `2^m` vanishes and the level-one class is the degree alone. That is a
+statement about level one, not about the base: the constants are carried in the
+tower `Z/2^e` above it, and `q mod 2^e` exposes exactly the exponents `m' < e`,
+so **level `e` resolves the exponents below `e`**. Item 4's tower with `l = 2`
+is therefore the object that recovers what level one drops, and `ZeroConst`
+deleting the constant term is deleting precisely the datum being recovered.
+Definitions, the operator `T_{q,n}(S) = (S+q)^n - q^n`, the Kummer and Lucas
+filters on its coefficients, and the measured tables are in
+`markdown/math/notation.md`.
+
 In the code the single letter `l` plays the base role and only the base role.
-`ClassSweep` (`:1798`) reduces polynomial coefficients mod `l` with `nmod_poly`;
-`ParseEllList` (`:1745`) and `IsSmallPrime` (`:1321`) admit odd primes only, and
-the same filter is applied again at `:788`, `:1346`, `:1676` and `:2044`.
-Nothing in the tree names a coefficient prime distinct from the reduction
-modulus.
+`ClassSweep` reduces polynomial coefficients mod `l` with `nmod_poly`. Until
+`65bd8bb` the filter in `ParseEllList` rejected 2 outright — it now admits any
+small prime, so `--ells 2 --e E` reaches the base. `IsSmallPrime` always
+accepted 2; the odd-only loops driven by `--ell-max` at `:788`, `:1346`,
+`:1676` and `:2044` still skip it. Nothing in the tree names a coefficient
+prime distinct from the reduction modulus.
 
 **A2. Item 3 wants the monodromy group, not the mod-`l` orbits.**
 
@@ -56,18 +76,29 @@ degree bound `D` in play and prints it as "faithful on `GF(l^d)`-points"
 request for a drawing is a request to draw the monodromy object, not the orbit
 digraph currently emitted at `:2538`.
 
-**A3. Item 4's tower is `rho mod ell^e`, not the maps over `Z/l^e`.**
+**A3. Item 4's tower over `Z/2^e` is the object, and it is not a stand-in for
+`rho mod ell^e`.**
 
-The `ell`-adic structure sits in the coefficients of the Galois representation.
-Finite levels are the representation reduced mod `ell^e`; that is what makes
-raising `e` extend the data rather than recompute it, since the levels are a
-compatible system by construction.
+An earlier pass here claimed the tower should be the Galois representation
+reduced mod `ell^e` rather than the maps over `Z/l^e`. That is empty under any
+reading in which the sheaf is a pushforward: the stalk is then a permutation
+representation on the geometric fiber, permutation representations are defined
+over `Z`, so `rho mod ell^e` is the same combinatorial datum at every `e` and
+raising `e` adds nothing. Uniformity in `ell` is why the conductor bounds are
+uniform; it is also why `ell` is not a source of new data.
 
-The tower in the code takes the maps over `Z/l^e`: `ClassSweep` is called with
-`mod = l^e` (`:2609`) and levels are compared by truncating coefficient keys
-(`TruncKey`, `:1925`; the `e`-loop at `:2607`). That is a different object. The
-truncation check it runs is a real consistency check on the object it builds, so
-it survives as a regression test after the tower is replaced.
+The tower the code builds is the reduction of the chain maps over `Z/l^e`:
+`ClassSweep` called with `mod = l^e`, levels compared by truncating coefficient
+keys (`TruncKey`). With `l = 2` that is the deformation of the `F_2`-datum over
+`Z_2`, and by A1 it is exactly the filtration that restores the `m`-record one
+exponent per level. Keep it. Its truncation check is a real consistency check on
+the object it builds.
+
+Measured at `l = 2` on `--k 1-8` under 2e6, family classes by level:
+13, 42, 179, 727, 2880, 8894, 24881, 64335 for `e = 1..8`, against 13 realizable
+degrees at level one. Under 1e10 with `--k 1-16` and `e = 1..4`: 20, 74, 387,
+2247 classes and 244, 1301, 25842, 519082 distinct per-prime sets over 376
+million primes.
 
 ## B. Open
 
@@ -81,7 +112,9 @@ and they give different objects.
 trace function `psi(P(x))`. In characteristic 2, Artin-Schreier reduction
 identifies `L_psi(f^2)` with `L_psi(f)`, so pulling back along an even-exponent
 edge may collapse. Whether that kills the construction or is the content of it
-is not clear either way.
+is not clear either way. Note that at level one there is nothing left to pull
+back along: `P ≡ x^N` by A1, so the whole family degenerates to the `N`-th power
+map and the question is really what `P^*` means over `Z/2^e` for `e > 1`.
 
 *Pushforward.* `P_*Q_ell` has rank `deg P = prod n_i`, is lisse wherever `P` is
 etale, and its trace function at `x` is `#P^{-1}(x)(F_q)`, the number of points
@@ -130,6 +163,15 @@ that the growing family is the degree-`d` points. Both halves of that need
 checking, the conductor bound against the paper's definition and the agreement
 against what the chain data actually contains, before it counts as an answer.
 
+What the rank does is now exact rather than a worry. `N = prod n_i` and a chain
+into `p` from a root `q_0 >= 3` has `p > q_0^N`, so `N <= floor(log_3 p)`. That
+bound is attained and every value below it occurs: at `e = 1` the class count
+equals `floor(log_3 p_max)` in all seven windows measured from 1e5 to 1e10, and
+the largest level-one state set has exactly that many elements. So rank does not
+grow with the window except logarithmically, and it does not depend on `d` at
+all — but the family it is uniform over is a fixed chain, which is not the
+family items 1 through 4 range over. That tension is the real content of B2.
+
 Nothing computes a conductor, a rank, or a Swan conductor. Degree is available
 from the word layout in `ComputeSpectrumCore` (`:1474`) and is used as a
 truncation bound in the orbit pass (`max_degree`, `:2437`); `--critical`'s
@@ -150,6 +192,37 @@ corresponds to is itself the work.
 Every output in the tree is a count or a set size (`Family census`, `:2224`;
 orbit report, `:2560`). No signed quantity is summed anywhere, so there is
 nothing to point cancellation at yet.
+
+## B'. Next direction
+
+Stated in the same register as the rest: these are exact questions with exact
+answers, and a fitted growth law is not an answer to any of them. Definitions
+and the measured tables behind each are in `markdown/math/notation.md`.
+
+**B'1. Which degree sets occur.** By A1 a prime's level-one state is its set of
+realizable chain degrees, a subset of `[1, D]` with `D = floor(log_3 p_max)`.
+Measured over `--k 1-16`, the number of distinct such sets is 52, 82, 118, 160,
+201, 244 at `D = 10, 12, 14, 16, 18, 20`. At `D = 20` that is 244 subsets out of
+`2^20` across 376 million primes. Characterize the 244. This is a level-one
+question, so it costs one sweep at `--ells 2 --e 1`.
+
+**B'2. Separation depth against `k`.** At 1e10 and `e = 4`, `k = 14` separates
+completely, 6 sets over 6 primes, while `k = 1` gives 248374 sets over 130
+million primes. The state set of `p` is a union over its `k` parents, and by A1
+level `e` sees the exponents `m' < e`. Give the level at which a given `k`
+separates.
+
+**B'3. Read the chain off the Hermite vector.** For a word of degree `N` with
+partial degrees `N_i`, the coefficients above index `N - N_1` are those of `x^N`
+and depend on `N` alone, and `c_i` first appears at index `N - N_i` with linear
+coefficient `(N / N_i) c_i`. So the Hermite grading is a depth filtration of the
+chain and the constants are a linear readout of it. Settle whether the support
+alone determines the skeleton. `SegKey` is already that support, so this is a
+grouping question over data the tree emits today.
+
+**B'4. Wire `--critical` and the orbit pass onto the shared state.** Both still
+carry per-node sets keyed by the absolute polynomial. The normalization of A1
+applies verbatim, and without it neither runs past about 1e7.
 
 ## C. Code to mathematics
 
@@ -186,16 +259,18 @@ nothing to point cancellation at yet.
 The monoid structure itself does not appear to carry weight. FKMS attaches its
 invariants to one sheaf at a time, computed from one chain polynomial; that the
 set of composites is closed under composition is not used anywhere in the
-paper. What survives from this pass is the translation quotient, and it survives
-for a different reason than item 3 gives: post-composing by `x -> x + c` twists
-the sheaf by `L_psi(c)`, which is geometrically constant of rank 1, so `G^geom`
-does not see additive constants at all. That makes `ZeroConst` the right
-normalization and makes "characterize the orbits" the wrong question to put on
-top of it, since the constant is not part of the geometric datum to begin with.
+paper. What survives from this pass is a normalization of the constant term, but
+**not** `ZeroConst`. Deleting the constant deletes the `m`-record: by A1 the
+constants are the only place the exponents survive, and level `e` of the tower
+reads them out. The correct normalization subtracts the *target* rather than
+zeroing, `S = P - p`, which is invariant along `n = 1` edges and keeps every
+exponent. `ZeroConst` and `S` agree only on the sub-question of what a twist by
+`L_psi(c)` cannot see, and that sub-question is not item 4's.
 
 | Code | Object |
 |---|---|
-| `ZeroConst` (`:1894`) | the polynomial with its constant term zeroed and the key retrimmed. Read as the translation quotient it is item 3's orbit representative; read geometrically it is the removal of a twist `G^geom` cannot see |
+| `SharedSweep` (`65bd8bb`) | `S = P - p` as the carried state: invariant along `n = 1` edges, `S_p = (S_q + q)^n - q^n` on `n >= 2`. The normalization item 3 should have asked for |
+| `ZeroConst` (`:1894`) | the polynomial with its constant term zeroed. Read as the translation quotient it is item 3's orbit representative; read against A1 it discards the exponents and is the wrong normalization for the tower |
 | ambient BFS (`:2459`-`:2490`) | the monoid `M_l` generated by the reductions of the edges actually present, closed under the generator action from the seed `x` |
 | `realized` / `missed` (`:2435`, `:2501`) | which orbits the queried family attains and which of the ambient it does not |
 | `signatures` (`:2451`) | the per-prime realized set, counted by distinct signature. This is the per-prime reading item 3 asks for |
@@ -206,9 +281,11 @@ top of it, since the constant is not part of the geometric datum to begin with.
 
 | Code | Object |
 |---|---|
-| `ClassSweep(mod = l^e)` (`:2609`) | the class sets over `Z/l^e` |
+| `ClassSweep(mod = l^e)` (`:2609`) | the class sets over `Z/l^e`, keyed by the absolute polynomial |
 | `TruncKey` (`:1925`) and the `e`-loop (`:2607`) | levels compared by truncating the top-level answer to each lower modulus; a mismatch is a hard failure |
 | per-`e` family-class and per-prime-set counts (`:2628`) | the stratification question as item 4 poses it: whether the realized set changes only at isolated `p` |
+| `--shared` (`65bd8bb`) | the same counts off `S = P - p`, interned and shared between primes; `--ells 2` now reaches the base. Agrees with `ClassSweep` at `l = 2, 3, 5, 7` on every level checked, and is what makes 1e10 reachable |
+| `--k` taking a list or range (`65bd8bb`) | the stratification read per `k` off one sweep, since the sweep is over nodes and `k` only selects which nodes are reported |
 
 ### C5. Known wrong or off-goal
 
@@ -239,10 +316,12 @@ top of it, since the constant is not part of the geometric datum to begin with.
    carries on, so a truncated answer is reported as an answer. `kMonoidBound`
    (`:1739`) does report and skip rather than truncate silently.
 
-5. **The odd-only modulus filter excludes the base.** `IsSmallPrime` (`:1321`)
-   and `ParseEllList` (`:1745`) both reject 2, and the filter is reapplied at
-   `:788`, `:1346`, `:1676`, `:2044`. Under A1 the base is exactly 2, so this
-   excludes the base from every place the code could look at it.
+5. **The odd-only modulus filter excludes the base.** Partly fixed in
+   `65bd8bb`: `ParseEllList` no longer rejects 2, so `--ells 2 --e E` reaches
+   the base and produces the tables quoted in A1 and A3. `IsSmallPrime` always
+   accepted 2. Still open: the `ell = 3; ell += 2` loops driven by `--ell-max`
+   at `:788`, `:1346`, `:1676`, `:2044` skip it, so anything reached only
+   through `--ell-max` still never sees the base.
 
 6. **`FaithfulDegree` reports a gap it does not close.** It prints the `d` at
    which the degree-bounded maps become separated by `GF(l^d)`-points, and every
@@ -267,3 +346,13 @@ top of it, since the constant is not part of the geometric datum to begin with.
     conductor, no rank, no monodromy group. B1 through B3 are entirely
     unimplemented, and by A2 item 3's current implementation is not a partial
     step toward the object it should produce.
+
+11. **`--critical` and the orbit pass still carry absolute per-node sets.** Both
+    predate the normalization in A1 and neither runs much past 1e7. `--shared`
+    covers only the tower. Per B'4 the fix is mechanical: they carry the same
+    kind of state and `S = P - p` applies to them verbatim.
+
+12. **`--ells 2` at `e = 1` is a correct but empty computation.** By A1 it
+    returns the degree and nothing else. It is worth running only as the base of
+    a tower or as the degree-spectrum readout of B'1; a single `e = 1` sweep at
+    `l = 2` reported on its own says only `floor(log_3 p_max)`.
