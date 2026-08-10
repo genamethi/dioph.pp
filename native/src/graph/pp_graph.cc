@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cinttypes>
 #include <cstdint>
@@ -23,6 +24,8 @@
 #include "iceberg/table_metadata.h"
 #include "iceberg/table_scan.h"
 
+#include <flint/nmod_poly.h>
+#include <flint/ulong_extras.h>
 #include <ginac/ginac.h>
 
 #include "primeparts/catalog/pp_iceberg_rest.h"
@@ -61,6 +64,12 @@ struct Options {
   int64_t k_class = -1;
   bool sweep = false;
   bool sweep_only = false;
+  bool orbits = false;
+  bool critical = false;
+  bool branches = false;
+  int64_t e_level = -1;
+  bool materialize = false;
+  std::string ells_list;
 };
 
 struct Edge {
@@ -69,6 +78,11 @@ struct Edge {
   int32_t m;
   int32_t n;
 };
+
+void EmitConeDot(int64_t target, const std::set<int64_t>& cone,
+                 const std::map<int64_t, std::vector<Edge>>& in, int64_t top);
+bool IsSmallPrime(uint64_t v);
+bool ParseEllList(const std::string& spec, std::vector<uint64_t>* out);
 
 std::string QuoteList(const std::vector<std::string>& paths) {
   std::string s = "[";
@@ -111,6 +125,8 @@ void Usage(FILE* out) {
       "  --ell-max N      mode roots: largest prime modulus to check\n"
       "                   mode spectrum: also reduce the spectrum mod each\n"
       "                   prime l <= N\n"
+      "  --ells LIST      explicit odd moduli, comma separated (3,7,31);\n"
+      "                   overrides --ell-max\n"
       "  --p P            mode spectrum: target prime whose spectrum to compute\n"
       "  --k K            mode spectrum: instead of --p, run the whole family\n"
       "                   { p in [--min, --max] : k(p) = K } off the primes\n"
@@ -120,7 +136,30 @@ void Usage(FILE* out) {
       "                   state (degree-1 root-residue bitmask, then full\n"
       "                   polynomial classes), no per-target walks; cross-\n"
       "                   checks against the walk results\n"
-      "  --format F       text | dot | json (conf.graph.format)\n"
+      "  --sweep-only     as --sweep, but skip the per-target walks entirely\n"
+      "                   (no cross-check)\n"
+      "  --orbits         with --sweep: quotient the maps mod l by the\n"
+      "                   translations and report, per prime and for the\n"
+      "                   family, which orbits are realized and which the\n"
+      "                   ambient monoid reaches but the primes never do\n"
+      "  --critical       with --sweep: carry each node's set of chain\n"
+      "                   critical values mod each l, and report for which l\n"
+      "                   a target is ramified (some critical value v of a\n"
+      "                   chain into p has v == p mod l)\n"
+      "  --branches       mode spectrum family: for every chain and every\n"
+      "                   even exponent in it, test whether the degree-2\n"
+      "                   branch factor g(x) + q has square constant term,\n"
+      "                   the condition under which its Galois group drops\n"
+      "  --e E            with --sweep: carry the classes over Z/l^e as\n"
+      "                   l-adic digits, checking each level against a native\n"
+      "                   pass at that modulus (conf.graph.e)\n"
+      "  --materialize    mode spectrum family: commit the walked spectra to\n"
+      "                   <namespace>.spectra as (p, root, degree, chains,\n"
+      "                   skeleton, hermite); needs the walk, so not with\n"
+      "                   --sweep-only\n"
+      "  --format F       text | dot | json (conf.graph.format); dot in the\n"
+      "                   spectrum family draws the orbit space and needs\n"
+      "                   --orbits with a single --ells\n"
       "  --top N          rows to show in text listings (conf.graph.top)\n"
       "  --help\n");
 }
@@ -151,6 +190,12 @@ bool ParseArgs(int argc, char** argv, Options* opt) {
       {"p", required_argument, nullptr, 1012},
       {"k", required_argument, nullptr, 1013},
       {"sweep", no_argument, nullptr, 1014},
+      {"orbits", no_argument, nullptr, 1016},
+      {"e", required_argument, nullptr, 1017},
+      {"ells", required_argument, nullptr, 1018},
+      {"materialize", no_argument, nullptr, 1019},
+      {"critical", no_argument, nullptr, 1020},
+      {"branches", no_argument, nullptr, 1021},
       {"sweep-only", no_argument, nullptr, 1015},
       {"help", no_argument, nullptr, 'h'},
       {nullptr, 0, nullptr, 0},
@@ -193,6 +238,17 @@ bool ParseArgs(int argc, char** argv, Options* opt) {
         opt->sweep = true;
         opt->sweep_only = true;
         break;
+      case 1016:
+        opt->orbits = true;
+        break;
+      case 1017:
+        if (!ParseI64(optarg, &opt->e_level)) return false;
+        break;
+      case 1018: opt->ells_list = optarg; break;
+      case 1019: opt->materialize = true; break;
+      case 1020: opt->critical = true; break;
+      case 1021: opt->branches = true; break;
+        break;
       case 'h': Usage(stdout); std::exit(0);
       default: return false;
     }
@@ -212,6 +268,16 @@ bool ParseArgs(int argc, char** argv, Options* opt) {
   if (opt->top < 0) opt->top = conf.graph.top;
   if (opt->mode.empty()) opt->mode = conf.graph.mode;
   if (opt->format.empty()) opt->format = conf.graph.format;
+  if (opt->e_level < 0) opt->e_level = conf.graph.e_level;
+  if (opt->he_n < 0) opt->he_n = conf.graph.he_n;
+  if (opt->ell_max < 0) opt->ell_max = conf.graph.ell_max;
+  if (opt->ells_list.empty()) opt->ells_list = conf.graph.ells;
+  opt->sweep = opt->sweep || conf.graph.sweep || conf.graph.sweep_only;
+  opt->sweep_only = opt->sweep_only || conf.graph.sweep_only;
+  opt->orbits = opt->orbits || conf.graph.orbits;
+  opt->materialize = opt->materialize || conf.graph.materialize;
+  opt->critical = opt->critical || conf.graph.critical;
+  opt->branches = opt->branches || conf.graph.branches;
   if (opt->mode == "spectrum" && opt->target_p > 0)
     opt->max_p = opt->target_p;
   if (opt->max_p <= opt->min_p) {
@@ -709,11 +775,24 @@ int RunHasse(const Options& opt) {
   }
   const int64_t n_span = ns.back() - ns.front() + 1;
 
-  static const int64_t kPrimes[] = {3, 5, 7, 11, 13, 17, 19, 23, 29, 31};
+  std::vector<uint64_t> moduli;
+  if (!opt.ells_list.empty()) {
+    if (!ParseEllList(opt.ells_list, &moduli)) {
+      std::fprintf(stderr, "--ells wants a comma-separated list of odd primes, "
+                           "got '%s'\n", opt.ells_list.c_str());
+      return 2;
+    }
+  } else {
+    const int64_t upto = opt.ell_max >= 3 ? opt.ell_max : 31;
+    for (uint64_t l = 3; l <= static_cast<uint64_t>(upto); l += 2)
+      if (IsSmallPrime(l)) moduli.push_back(l);
+  }
+
   std::vector<int64_t> ls;
   std::vector<Partition> parts;
   std::vector<bool> degenerate;
-  for (int64_t l : kPrimes) {
+  for (const uint64_t lu : moduli) {
+    const int64_t l = static_cast<int64_t>(lu);
     ls.push_back(l);
     parts.push_back(CongruencePartition(ns, l - 1));
     degenerate.push_back(l - 1 > n_span);
@@ -940,10 +1019,17 @@ int RunCompose(const Options& opt) {
   }
 
   if (opt.format == "dot") {
+    const size_t draw =
+        opt.top > 0 ? std::min(static_cast<size_t>(opt.top), comp.size())
+                    : comp.size();
+    if (draw < comp.size())
+      std::fprintf(stderr,
+                   "pp-graph: %zu composites, drawing %zu; raise --top\n",
+                   comp.size(), draw);
     std::printf("digraph compose {\n  rankdir=BT;\n  node [shape=plaintext];\n");
-    for (size_t i = 0; i < comp.size() && i < 400; ++i)
+    for (size_t i = 0; i < draw; ++i)
       std::printf("  c%zu [label=\"%" PRId64 "\"];\n", i, comp[i].value);
-    for (size_t i = 0; i < comp.size() && i < 400; ++i)
+    for (size_t i = 0; i < draw; ++i)
       if (comp[i].parent >= 0)
         std::printf("  c%d -> c%zu [label=\"(%d,%d)\"];\n", comp[i].parent, i,
                     comp[i].m, comp[i].n);
@@ -1512,6 +1598,11 @@ int RunSpectrum(const Options& opt) {
 
   const int64_t k_target = static_cast<int64_t>(in[opt.target_p].size());
 
+  if (opt.format == "dot") {
+    EmitConeDot(opt.target_p, cone, in, opt.top);
+    return mismatches == 0 ? 0 : 1;
+  }
+
   if (opt.format == "json") {
     std::printf("{\"p\":%" PRId64 ",\"k\":%" PRId64 ",\"window\":[%" PRId64
                 ",%" PRId64 "],\"cone_nodes\":%zu,\"sources\":%zu,"
@@ -1608,30 +1699,242 @@ int RunSpectrum(const Options& opt) {
                   classes.size() < by_vector.size() ? "  (collapses)" : "");
     }
   }
-  return mismatches == 0 ? 0 : 1;
+  if (capped)
+    std::fprintf(stderr,
+                 "pp-graph: segment-sequence cap hit; the spectrum is "
+                 "incomplete\n");
+  return (mismatches == 0 && !capped) ? 0 : 1;
 }
 
-std::string MulL(const std::string& a, const std::string& b, uint32_t ell) {
-  if (a.empty() || b.empty()) return {};
-  if (a.size() + b.size() - 1 > 32) return {};
-  std::string r(a.size() + b.size() - 1, '\0');
-  for (size_t i = 0; i < a.size(); ++i)
-    for (size_t j = 0; j < b.size(); ++j) {
-      const uint32_t v = static_cast<uint8_t>(r[i + j]) +
-                         static_cast<uint32_t>(static_cast<uint8_t>(a[i])) *
-                             static_cast<uint8_t>(b[j]);
-      r[i + j] = static_cast<char>(v % ell);
-    }
+std::string PolyKey(const nmod_poly_t p) {
+  const slong len = nmod_poly_length(p);
+  std::string s(static_cast<size_t>(len) * sizeof(ulong), '\0');
+  for (slong i = 0; i < len; ++i) {
+    const ulong c = nmod_poly_get_coeff_ui(p, i);
+    std::memcpy(s.data() + static_cast<size_t>(i) * sizeof(ulong), &c,
+                sizeof(ulong));
+  }
+  return s;
+}
+
+void KeyToPoly(nmod_poly_t out, const std::string& s) {
+  nmod_poly_zero(out);
+  const size_t n = s.size() / sizeof(ulong);
+  for (size_t i = 0; i < n; ++i) {
+    ulong c;
+    std::memcpy(&c, s.data() + i * sizeof(ulong), sizeof(ulong));
+    nmod_poly_set_coeff_ui(out, static_cast<slong>(i), c);
+  }
+}
+
+std::string SeedKey(uint64_t ell) {
+  nmod_poly_t p;
+  nmod_poly_init(p, ell);
+  nmod_poly_set_coeff_ui(p, 1, 1 % ell);
+  std::string k = PolyKey(p);
+  nmod_poly_clear(p);
+  return k;
+}
+
+constexpr size_t kMonoidBound = 4000000;
+
+bool ParseEllList(const std::string& spec, std::vector<uint64_t>* out) {
+  size_t i = 0;
+  while (i < spec.size()) {
+    size_t j = spec.find(',', i);
+    if (j == std::string::npos) j = spec.size();
+    const std::string tok = spec.substr(i, j - i);
+    if (tok.empty()) return false;
+    char* end = nullptr;
+    const unsigned long long v = std::strtoull(tok.c_str(), &end, 10);
+    if (end == nullptr || *end != '\0' || v < 3 || v % 2 == 0) return false;
+    out->push_back(static_cast<uint64_t>(v));
+    i = j + 1;
+  }
+  if (out->empty()) return false;
+  std::sort(out->begin(), out->end());
+  out->erase(std::unique(out->begin(), out->end()), out->end());
+  return true;
+}
+
+struct ClassStats {
+  size_t entries = 0;
+  size_t max_state = 0;
+};
+
+struct SpectrumRow {
+  int64_t p;
+  int64_t root;
+  int64_t degree;
+  int64_t chains;
+  std::string skeleton;
+  std::string hermite;
+};
+
+std::unordered_map<int64_t, std::vector<std::string>> ClassSweep(
+    const std::set<int64_t>& node_set,
+    const std::map<int64_t, std::vector<Edge>>& in, uint64_t mod,
+    ClassStats* stats);
+
+void EmitConeDot(int64_t target, const std::set<int64_t>& cone,
+                 const std::map<int64_t, std::vector<Edge>>& in, int64_t top);
+
+uint64_t TwoPowMod(int32_t m, uint64_t ell) {
+  uint64_t r = 1 % ell;
+  for (int32_t i = 0; i < m; ++i) r = (r * 2) % ell;
   return r;
 }
 
-std::string PowL(const std::string& p, int32_t n, uint32_t ell) {
-  std::string r(1, '\x01');
-  for (int32_t i = 0; i < n; ++i) {
-    r = MulL(r, p, ell);
-    if (r.empty()) return r;
+uint64_t PowMod(uint64_t base, int32_t n, uint64_t ell) {
+  uint64_t r = 1 % ell;
+  uint64_t b = base % ell;
+  for (int32_t e = n; e > 0; e >>= 1) {
+    if (e & 1) r = (r * b) % ell;
+    b = (b * b) % ell;
   }
   return r;
+}
+
+std::unordered_map<int64_t, std::vector<std::string>> ClassSweep(
+    const std::set<int64_t>& node_set,
+    const std::map<int64_t, std::vector<Edge>>& in, uint64_t mod,
+    ClassStats* stats) {
+  std::unordered_map<int64_t, std::vector<std::string>> cls;
+  cls.reserve(node_set.size());
+  const std::string seed = SeedKey(mod);
+  nmod_poly_t P, Q;
+  nmod_poly_init(P, mod);
+  nmod_poly_init(Q, mod);
+  for (const int64_t v : node_set) {
+    std::unordered_set<std::string> sv;
+    auto it = in.find(v);
+    if (it == in.end()) {
+      sv.insert(seed);
+    } else {
+      for (const auto& e : it->second) {
+        auto pm = cls.find(e.q);
+        if (pm == cls.end()) continue;
+        const ulong c = TwoPowMod(e.m, mod);
+        for (const std::string& key : pm->second) {
+          KeyToPoly(P, key);
+          if (e.n == 1)
+            nmod_poly_set(Q, P);
+          else
+            nmod_poly_pow(Q, P, static_cast<ulong>(e.n));
+          nmod_poly_set_coeff_ui(Q, 0,
+                                 (nmod_poly_get_coeff_ui(Q, 0) + c) % mod);
+          sv.insert(PolyKey(Q));
+        }
+      }
+    }
+    std::vector<std::string> flat(sv.begin(), sv.end());
+    if (stats != nullptr) {
+      stats->entries += flat.size();
+      stats->max_state = std::max(stats->max_state, flat.size());
+    }
+    cls.emplace(v, std::move(flat));
+  }
+  nmod_poly_clear(P);
+  nmod_poly_clear(Q);
+  return cls;
+}
+
+void EmitConeDot(int64_t target, const std::set<int64_t>& cone,
+                 const std::map<int64_t, std::vector<Edge>>& in, int64_t top) {
+  std::set<int64_t> keep;
+  std::vector<int64_t> queue{target};
+  keep.insert(target);
+  const size_t cap = top > 0 ? static_cast<size_t>(top) : cone.size();
+  for (size_t qi = 0; qi < queue.size() && keep.size() < cap; ++qi) {
+    auto it = in.find(queue[qi]);
+    if (it == in.end()) continue;
+    for (const auto& e : it->second) {
+      if (keep.size() >= cap) break;
+      if (cone.count(e.q) && keep.insert(e.q).second) queue.push_back(e.q);
+    }
+  }
+  if (keep.size() < cone.size())
+    std::fprintf(stderr,
+                 "pp-graph: cone has %zu nodes, drawing the %zu nearest the "
+                 "target; raise --top for more\n",
+                 cone.size(), keep.size());
+
+  std::printf("digraph cone {\n  rankdir=BT;\n  node [shape=ellipse];\n");
+  for (const int64_t v : keep) {
+    const bool is_root = in.find(v) == in.end();
+    std::printf("  n%" PRId64 " [label=\"%" PRId64 "\"", v, v);
+    if (v == target)
+      std::printf(", shape=doubleoctagon, style=filled, fillcolor=gold");
+    else if (is_root)
+      std::printf(", shape=box, style=filled, fillcolor=lightgrey");
+    std::printf("];\n");
+  }
+  for (const int64_t v : keep) {
+    auto it = in.find(v);
+    if (it == in.end()) continue;
+    for (const auto& e : it->second)
+      if (keep.count(e.q))
+        std::printf("  n%" PRId64 " -> n%" PRId64 " [label=\"(%d,%d)\"%s];\n",
+                    e.q, e.p, e.m, e.n,
+                    e.n == 1 ? "" : ", penwidth=2, color=firebrick");
+  }
+  std::printf("}\n");
+}
+
+int FaithfulDegree(uint64_t ell, size_t max_degree) {
+  int d = 1;
+  uint64_t size = ell;
+  while (size <= max_degree) {
+    size *= ell;
+    ++d;
+  }
+  return d;
+}
+
+std::string ZeroConst(const std::string& key) {
+  if (key.empty()) return key;
+  std::string out = key;
+  const ulong zero = 0;
+  std::memcpy(out.data(), &zero, sizeof(ulong));
+  size_t len = out.size() / sizeof(ulong);
+  while (len > 0) {
+    ulong c;
+    std::memcpy(&c, out.data() + (len - 1) * sizeof(ulong), sizeof(ulong));
+    if (c != 0) break;
+    --len;
+  }
+  out.resize(len * sizeof(ulong));
+  return out;
+}
+
+std::string PolyLabel(const std::string& key) {
+  const size_t n = key.size() / sizeof(ulong);
+  std::string s;
+  for (size_t i = n; i-- > 0;) {
+    ulong c;
+    std::memcpy(&c, key.data() + i * sizeof(ulong), sizeof(ulong));
+    if (c == 0) continue;
+    if (!s.empty()) s += "+";
+    if (i == 0 || c != 1) s += std::to_string(c);
+    if (i == 1) s += "x";
+    if (i > 1) s += "x^" + std::to_string(i);
+  }
+  return s.empty() ? "0" : s;
+}
+
+std::string TruncKey(const std::string& key, uint64_t mod) {
+  const size_t n = key.size() / sizeof(ulong);
+  std::vector<ulong> c(n);
+  for (size_t i = 0; i < n; ++i) {
+    std::memcpy(&c[i], key.data() + i * sizeof(ulong), sizeof(ulong));
+    c[i] %= mod;
+  }
+  size_t len = n;
+  while (len > 0 && c[len - 1] == 0) --len;
+  std::string out(len * sizeof(ulong), '\0');
+  for (size_t i = 0; i < len; ++i)
+    std::memcpy(out.data() + i * sizeof(ulong), &c[i], sizeof(ulong));
+  return out;
 }
 
 std::string SegKey(const std::map<int, GiNaC::ex>& hermite) {
@@ -1664,6 +1967,12 @@ int RunSpectraFamily(const Options& opt) {
     std::fprintf(stderr,
                  "mode spectrum requires --p (single prime) or --k >= 1 "
                  "(family)\n");
+    return 2;
+  }
+  const bool drawing = opt.format == "dot";
+  FILE* const rep = drawing ? stderr : stdout;
+  if (drawing && !opt.orbits) {
+    std::fprintf(stderr, "mode spectrum family: --format dot needs --orbits\n");
     return 2;
   }
 
@@ -1703,7 +2012,7 @@ int RunSpectraFamily(const Options& opt) {
   for (auto& row : *tres) targets.push_back(row.GetValue<int64_t>(0));
   const double t_targets = Seconds(t0);
   if (targets.empty()) {
-    std::printf("pp-graph spectra  k=%" PRId64 "  window [%" PRId64
+    std::fprintf(rep, "pp-graph spectra  k=%" PRId64 "  window [%" PRId64
                 ", %" PRId64 "]: empty family\n",
                 opt.k_class, opt.min_p, opt.max_p);
     return 0;
@@ -1724,9 +2033,22 @@ int RunSpectraFamily(const Options& opt) {
   for (const auto& e : edges) in[e.p].push_back(e);
 
   std::vector<uint64_t> ells;
-  if (opt.ell_max >= 3)
+  if (!opt.ells_list.empty()) {
+    if (!ParseEllList(opt.ells_list, &ells)) {
+      std::fprintf(stderr, "--ells wants a comma-separated list of odd primes, "
+                           "got '%s'\n", opt.ells_list.c_str());
+      return 2;
+    }
+  } else if (opt.ell_max >= 3) {
     for (uint64_t ell = 3; ell <= static_cast<uint64_t>(opt.ell_max); ell += 2)
       if (IsSmallPrime(ell)) ells.push_back(ell);
+  }
+  if (drawing && ells.size() != 1) {
+    std::fprintf(stderr,
+                 "mode spectrum family: --format dot draws one modulus, pass "
+                 "--ells L\n");
+    return 2;
+  }
 
   GiNaC::symbol x("x");
   std::unordered_set<int64_t> fam_a0;
@@ -1743,18 +2065,22 @@ int RunSpectraFamily(const Options& opt) {
   double t_alg = 0.0;
   std::vector<std::vector<size_t>> walk_pure;
   std::vector<std::vector<size_t>> walk_all;
+  std::vector<SpectrumRow> table;
+  size_t br_total = 0;
+  size_t br_square = 0;
+  std::vector<std::pair<std::vector<int64_t>, std::array<int64_t, 3>>> br_examples;
 
-  std::printf("pp-graph spectra  k=%" PRId64 "  window [%" PRId64 ", %" PRId64
+  std::fprintf(rep, "pp-graph spectra  k=%" PRId64 "  window [%" PRId64 ", %" PRId64
               "]  family %zu\n",
               opt.k_class, opt.min_p, opt.max_p, targets.size());
-  std::printf("  edges read [0, %" PRId64 "]: %zu (%" PRId64
+  std::fprintf(rep, "  edges read [0, %" PRId64 "]: %zu (%" PRId64
               " rows)  plan %.3fs  read %.3fs  targets %.3fs\n\n",
               targets.back(), edges.size(), rows, t_plan, t_read, t_targets);
   if (!opt.sweep_only) {
-  std::printf("  %-12s %-8s %-8s %-8s %-5s %-20s", "p", "cone", "roots",
+  std::fprintf(rep, "  %-12s %-8s %-8s %-8s %-5s %-20s", "p", "cone", "roots",
               "words", "seg", "chains");
-  for (uint64_t ell : ells) std::printf(" c%%%-4" PRIu64, ell);
-  std::printf("\n");
+  for (uint64_t ell : ells) std::fprintf(rep, " c%%%-4" PRIu64, ell);
+  std::fprintf(rep, "\n");
 
   int64_t shown = 0;
   for (const int64_t p : targets) {
@@ -1779,9 +2105,32 @@ int RunSpectraFamily(const Options& opt) {
           red_a0[i].insert(r);
           fam_red_a0[i].insert(r);
         }
+        if (opt.materialize)
+          table.push_back({p, w[0], 1, cnt, "[]",
+                           "{\"0\":" + std::to_string(a0) + ",\"1\":1}"});
         continue;
       }
       ++seg_words;
+      if (opt.branches) {
+        int64_t node = w[0] + w[1];
+        int64_t zero = w[1];
+        for (size_t i = 2; i + 1 < w.size(); i += 2) {
+          const int32_t nn = static_cast<int32_t>(w[i]);
+          if (nn % 2 == 0) {
+            ++br_total;
+            const int64_t b = zero + node;
+            if (b >= 0 && n_is_square(static_cast<ulong>(b))) {
+              ++br_square;
+              if (br_examples.size() < 12)
+                br_examples.push_back({w, {p, b, node}});
+            }
+          }
+          bool ov = false;
+          node = SatAdd(IPow(node, nn, &ov), w[i + 1]);
+          zero = SatAdd(IPow(zero, nn, &ov), w[i + 1]);
+          if (ov) break;
+        }
+      }
       GiNaC::ex P = x + GiNaC::numeric(static_cast<long>(w[1]));
       for (size_t i = 2; i + 1 < w.size(); i += 2)
         P = GiNaC::expand(GiNaC::pow(P, static_cast<int>(w[i])) +
@@ -1793,6 +2142,28 @@ int RunSpectraFamily(const Options& opt) {
         ++mismatches;
       const auto hermite = primeparts::graph::ToHermite(P, x);
       fam_seg.insert(SegKey(hermite));
+      if (opt.materialize) {
+        int64_t degree = 1;
+        std::string skel = "[";
+        for (size_t i = 2; i + 1 < w.size(); i += 2) {
+          degree *= w[i];
+          if (i > 2) skel += ",";
+          skel += std::to_string(w[i]);
+        }
+        skel += "]";
+        std::string hv = "{";
+        bool first = true;
+        for (const auto& [d, coef] : hermite) {
+          std::ostringstream cs;
+          cs << coef;
+          if (cs.str() == "0") continue;
+          if (!first) hv += ",";
+          first = false;
+          hv += "\"" + std::to_string(d) + "\":" + cs.str();
+        }
+        hv += "}";
+        table.push_back({p, w[0], degree, cnt, std::move(skel), std::move(hv)});
+      }
       for (size_t i = 0; i < ells.size(); ++i) {
         const std::string rk = SegKeyModL(hermite, ells[i]);
         red_seg[i].insert(rk);
@@ -1818,43 +2189,62 @@ int RunSpectraFamily(const Options& opt) {
     }
 
     if (shown++ < opt.top) {
-      std::printf("  %-12" PRId64 " %-8zu %-8zu %-8zu %-5zu %-20" PRId64,
+      std::fprintf(rep, "  %-12" PRId64 " %-8zu %-8zu %-8zu %-5zu %-20" PRId64,
                   p, core.cone.size(), core.roots.size(), core.words.size(),
                   seg_words, chains);
       for (size_t i = 0; i < ells.size(); ++i)
-        std::printf(" %-6zu", red_a0[i].size() + red_seg[i].size());
-      std::printf("%s\n", core.capped ? "  (capped)" : "");
+        std::fprintf(rep, " %-6zu", red_a0[i].size() + red_seg[i].size());
+      std::fprintf(rep, "%s\n", core.capped ? "  (capped)" : "");
     }
   }
   if (static_cast<int64_t>(targets.size()) > opt.top)
-    std::printf("  ... %zu more targets\n", targets.size() - opt.top);
+    std::fprintf(rep, "  ... %zu more targets\n", targets.size() - opt.top);
   }
 
   if (opt.sweep_only) {
-    std::printf("  (--sweep-only: per-target walks skipped)\n");
+    std::fprintf(rep, "  (--sweep-only: per-target walks skipped)\n");
   } else {
-  std::printf("\nFamily census (%zu targets):\n", targets.size());
-  std::printf("  spectrum lines, summed   : %zu (%zu segmented)\n",
+  if (opt.branches) {
+    std::fprintf(rep,
+                 "\nBranch degeneration (even exponents; the d=2 factor is "
+                 "g(x) + q, Galois drops when its constant is square):\n");
+    std::fprintf(rep, "  (chain, even-exponent) pairs : %zu\n", br_total);
+    std::fprintf(rep, "  square constant              : %zu  (%.3e)\n",
+                 br_square,
+                 br_total ? static_cast<double>(br_square) / br_total : 0.0);
+    for (const auto& [w, e] : br_examples) {
+      std::fprintf(rep, "    p=%-10" PRId64 " b=%-10" PRId64 " node=%-10" PRId64
+                   " word=[", e[0], e[1], e[2]);
+      for (size_t i = 0; i < w.size(); ++i)
+        std::fprintf(rep, "%s%" PRId64, i ? "," : "", w[i]);
+      std::fprintf(rep, "]\n");
+    }
+  }
+
+  std::fprintf(rep, "\nFamily census (%zu targets):\n", targets.size());
+  std::fprintf(rep, "  spectrum lines, summed   : %zu (%zu segmented)\n",
               total_words, total_seg);
-  std::printf("  distinct exact lines     : %zu (%zu translation + %zu "
+  std::fprintf(rep, "  distinct exact lines     : %zu (%zu translation + %zu "
               "segmented)\n",
               fam_a0.size() + fam_seg.size(), fam_a0.size(), fam_seg.size());
-  std::printf("  chains, summed           : %" PRId64 "%s\n", total_chains,
+  std::fprintf(rep, "  chains, summed           : %" PRId64 "%s\n", total_chains,
               total_chains == INT64_MAX ? "  (saturated)" : "");
-  std::printf("  P_w(root) != p           : %" PRId64 "\n", mismatches);
+  std::fprintf(rep, "  P_w(root) != p           : %" PRId64 "\n", mismatches);
   if (capped_targets)
-    std::printf("  capped targets           : %zu\n", capped_targets);
+    std::fprintf(stderr,
+                 "pp-graph: %zu targets hit the segment-sequence cap; their "
+                 "spectra are incomplete\n",
+                 capped_targets);
   for (size_t i = 0; i < ells.size(); ++i)
-    std::printf("  l=%-4" PRIu64 " family classes %zu   (per-target sum %zu)\n",
+    std::fprintf(rep, "  l=%-4" PRIu64 " family classes %zu   (per-target sum %zu)\n",
                 ells[i], fam_red_a0[i].size() + fam_red_seg[i].size(),
                 sum_classes[i]);
-  std::printf("  cores %.3fs  algebra %.3fs\n", t_cores, t_alg);
+  std::fprintf(rep, "  cores %.3fs  algebra %.3fs\n", t_cores, t_alg);
   }
 
   if (opt.sweep) {
-    if (ells.empty() || ells.back() > 61) {
-      std::fprintf(stderr,
-                   "--sweep needs --ell-max in [3, 61] (bitmask per node)\n");
+    if (ells.empty()) {
+      std::fprintf(stderr, "--sweep needs --ell-max >= 3\n");
       return 2;
     }
     t0 = std::chrono::steady_clock::now();
@@ -1863,97 +2253,159 @@ int RunSpectraFamily(const Options& opt) {
       node_set.insert(e.q);
       node_set.insert(e.p);
     }
+    std::vector<size_t> word_at(ells.size());
+    size_t words = 0;
+    for (size_t i = 0; i < ells.size(); ++i) {
+      word_at[i] = words;
+      words += (ells[i] + 63) / 64;
+    }
+    auto set_bit = [&](std::vector<uint64_t>& mv, size_t i, uint64_t r) {
+      mv[word_at[i] + r / 64] |= 1ULL << (r % 64);
+    };
+    auto get_bit = [&](const std::vector<uint64_t>& mv, size_t i, uint64_t r) {
+      return (mv[word_at[i] + r / 64] >> (r % 64)) & 1;
+    };
+    auto count_bits = [&](const std::vector<uint64_t>& mv, size_t i) {
+      size_t n = 0;
+      for (size_t w = word_at[i]; w < word_at[i] + (ells[i] + 63) / 64; ++w)
+        n += static_cast<size_t>(__builtin_popcountll(mv[w]));
+      return n;
+    };
+
     std::unordered_map<int64_t, std::vector<uint64_t>> mask;
     mask.reserve(node_set.size());
     for (const int64_t v : node_set) {
-      std::vector<uint64_t> mv(ells.size(), 0);
+      std::vector<uint64_t> mv(words, 0);
       auto it = in.find(v);
       if (it == in.end()) {
         for (size_t i = 0; i < ells.size(); ++i)
-          mv[i] = 1ULL << (v % static_cast<int64_t>(ells[i]));
+          set_bit(mv, i, static_cast<uint64_t>(v) % ells[i]);
       } else {
         for (const auto& e : it->second) {
           if (e.n != 1) continue;
           auto pm = mask.find(e.q);
           if (pm == mask.end()) continue;
-          for (size_t i = 0; i < ells.size(); ++i) mv[i] |= pm->second[i];
+          for (size_t w = 0; w < words; ++w) mv[w] |= pm->second[w];
         }
       }
       mask.emplace(v, std::move(mv));
     }
     const double t_sweep = Seconds(t0);
 
+    const std::vector<uint64_t> empty_mask(words, 0);
     size_t bad = 0;
-    std::vector<uint64_t> fam_mask(ells.size(), 0);
+    std::vector<std::vector<uint64_t>> fam_mask(
+        ells.size(), std::vector<uint64_t>(words, 0));
     for (size_t t = 0; t < targets.size(); ++t) {
       const int64_t p = targets[t];
       auto mit = mask.find(p);
+      const std::vector<uint64_t>& mv =
+          mit == mask.end() ? empty_mask : mit->second;
       for (size_t i = 0; i < ells.size(); ++i) {
-        const uint64_t mv = mit == mask.end() ? 0 : mit->second[i];
-        if (!opt.sweep_only &&
-            static_cast<size_t>(__builtin_popcountll(mv)) != walk_pure[t][i])
-          ++bad;
+        if (!opt.sweep_only && count_bits(mv, i) != walk_pure[t][i]) ++bad;
         const int64_t ell = static_cast<int64_t>(ells[i]);
         for (int64_t x = 0; x < ell; ++x)
-          if (mv >> x & 1) fam_mask[i] |= 1ULL << ((p - x) % ell + ell) % ell;
+          if (get_bit(mv, i, static_cast<uint64_t>(x)))
+            set_bit(fam_mask[i], i,
+                    static_cast<uint64_t>(((p - x) % ell + ell) % ell));
       }
     }
     size_t fam_bad = 0;
     if (!opt.sweep_only)
       for (size_t i = 0; i < ells.size(); ++i)
-        if (static_cast<size_t>(__builtin_popcountll(fam_mask[i])) !=
-            fam_red_a0[i].size())
-          ++fam_bad;
+        if (count_bits(fam_mask[i], i) != fam_red_a0[i].size()) ++fam_bad;
 
-    std::printf("\nSingle-pass sweep (degree-1 classes, no per-target walks):\n");
-    std::printf("  nodes carried            : %zu  (state %zu bytes)\n",
-                node_set.size(), node_set.size() * ells.size() * 8);
-    std::printf("  sweep time               : %.3fs  (walks took %.3fs)\n",
+    std::fprintf(rep, "\nSingle-pass sweep (degree-1 classes, no per-target walks):\n");
+    std::fprintf(rep, "  nodes carried            : %zu  (state %zu bytes)\n",
+                node_set.size(), node_set.size() * words * 8);
+    std::fprintf(rep, "  sweep time               : %.3fs  (walks took %.3fs)\n",
                 t_sweep, t_cores);
-    std::printf("  per-target agreement     : %zu / %zu%s\n",
+    std::fprintf(rep, "  per-target agreement     : %zu / %zu%s\n",
                 targets.size() * ells.size() - bad,
                 targets.size() * ells.size(), bad ? "  (MISMATCH)" : "");
-    std::printf("  family-class agreement   : %zu / %zu%s\n",
+    std::fprintf(rep, "  family-class agreement   : %zu / %zu%s\n",
                 ells.size() - fam_bad, ells.size(),
                 fam_bad ? "  (MISMATCH)" : "");
     if (bad || fam_bad) return 1;
 
-    std::printf("\nFull-class sweep (all degrees, monomial basis, per l):\n");
+    if (opt.critical) {
+      t0 = std::chrono::steady_clock::now();
+      std::map<std::array<uint64_t, 3>, std::vector<uint8_t>> tbl;
+      for (size_t i = 0; i < ells.size(); ++i) {
+        const uint64_t ell = ells[i];
+        for (const auto& e : edges) {
+          const uint64_t c = TwoPowMod(e.m, ell);
+          const std::array<uint64_t, 3> key{ell, c,
+                                            static_cast<uint64_t>(e.n)};
+          if (tbl.count(key)) continue;
+          std::vector<uint8_t> t(ell);
+          for (uint64_t u = 0; u < ell; ++u)
+            t[u] = static_cast<uint8_t>((PowMod(u, e.n, ell) + c) % ell);
+          tbl.emplace(key, std::move(t));
+        }
+      }
+
+      std::unordered_map<int64_t, std::vector<uint64_t>> crit;
+      crit.reserve(node_set.size());
+      for (const int64_t v : node_set) {
+        std::vector<uint64_t> cv(words, 0);
+        auto it = in.find(v);
+        if (it != in.end()) {
+          for (const auto& e : it->second) {
+            auto pc = crit.find(e.q);
+            for (size_t i = 0; i < ells.size(); ++i) {
+              const uint64_t ell = ells[i];
+              const uint64_t c = TwoPowMod(e.m, ell);
+              set_bit(cv, i, c);
+              if (pc == crit.end()) continue;
+              const auto& t =
+                  tbl[std::array<uint64_t, 3>{ell, c,
+                                              static_cast<uint64_t>(e.n)}];
+              for (uint64_t u = 0; u < ell; ++u)
+                if (get_bit(pc->second, i, u)) set_bit(cv, i, t[u]);
+            }
+          }
+        }
+        crit.emplace(v, std::move(cv));
+      }
+      const double t_crit = Seconds(t0);
+
+      std::fprintf(rep,
+                   "\nCritical-value sweep (l ramifies for p iff some critical "
+                   "value v of a chain into p has v == p mod l):\n");
+      std::fprintf(rep, "  nodes carried            : %zu  (state %zu bytes)\n",
+                   node_set.size(), node_set.size() * words * 8);
+      std::fprintf(rep, "  sweep time               : %.3fs\n", t_crit);
+      std::fprintf(rep, "  %-8s %-12s %-12s %s\n", "l", "ramified", "of", "mean |CritVal mod l|");
+      for (size_t i = 0; i < ells.size(); ++i) {
+        const uint64_t ell = ells[i];
+        size_t ram = 0;
+        size_t tot = 0;
+        for (const int64_t p : targets) {
+          auto cit = crit.find(p);
+          if (cit == crit.end()) continue;
+          tot += count_bits(cit->second, i);
+          if (get_bit(cit->second, i, static_cast<uint64_t>(p) % ell)) ++ram;
+        }
+        std::fprintf(rep, "  %-8" PRIu64 " %-12zu %-12zu %.2f\n", ell, ram,
+                     targets.size(),
+                     static_cast<double>(tot) / targets.size());
+      }
+    }
+
+    std::fprintf(rep, "\nFull-class sweep (all degrees, monomial basis, per l):\n");
     size_t cls_bad = 0;
     for (size_t li = 0; li < ells.size(); ++li) {
-      const uint32_t ell = static_cast<uint32_t>(ells[li]);
+      const uint64_t ell = ells[li];
       t0 = std::chrono::steady_clock::now();
       std::unordered_map<int64_t, std::vector<std::string>> cls;
       cls.reserve(node_set.size());
       size_t total_entries = 0;
       size_t max_state = 0;
-      for (const int64_t v : node_set) {
-        std::unordered_set<std::string> sv;
-        auto it = in.find(v);
-        if (it == in.end()) {
-          sv.insert(std::string("\x00\x01", 2));
-        } else {
-          for (const auto& e : it->second) {
-            auto pm = cls.find(e.q);
-            if (pm == cls.end()) continue;
-            bool ov = false;
-            const char c = static_cast<char>(IPow(2, e.m, &ov) % ell);
-            if (ov) continue;
-            for (const std::string& P : pm->second) {
-              std::string Q = e.n == 1 ? P : PowL(P, e.n, ell);
-              if (Q.empty()) continue;
-              Q[0] = static_cast<char>((static_cast<uint8_t>(Q[0]) +
-                                        static_cast<uint8_t>(c)) %
-                                       ell);
-              sv.insert(std::move(Q));
-            }
-          }
-        }
-        std::vector<std::string> flat(sv.begin(), sv.end());
-        total_entries += flat.size();
-        max_state = std::max(max_state, flat.size());
-        cls.emplace(v, std::move(flat));
-      }
+      ClassStats cstats;
+      cls = ClassSweep(node_set, in, ell, &cstats);
+      total_entries = cstats.entries;
+      max_state = cstats.max_state;
       const double t_cls = Seconds(t0);
 
       size_t cbad = 0;
@@ -1970,17 +2422,267 @@ int RunSpectraFamily(const Options& opt) {
                          : fam_red_a0[li].size() + fam_red_seg[li].size();
       cls_bad += cbad + (fam_cls.size() != fam_walk ? 1 : 0);
 
-      std::printf("  l=%-4u state %zu entries (max %zu, mean %.2f)  %.3fs  "
+      std::fprintf(rep, "  l=%-4" PRIu64 " state %zu entries (max %zu, mean %.2f)  %.3fs  "
                   "targets %zu/%zu  family %zu vs walk %zu%s\n",
                   ell, total_entries, max_state,
                   static_cast<double>(total_entries) / node_set.size(), t_cls,
                   targets.size() - cbad, targets.size(), fam_cls.size(),
                   fam_walk,
                   cbad || fam_cls.size() != fam_walk ? "  (MISMATCH)" : "");
+
+      if (!opt.orbits) continue;
+
+      std::unordered_set<std::string> realized;
+      std::vector<std::set<std::string>> per_target(targets.size());
+      size_t max_degree = 0;
+      for (size_t t = 0; t < targets.size(); ++t) {
+        auto f = cls.find(targets[t]);
+        if (f == cls.end()) continue;
+        for (const std::string& key : f->second) {
+          max_degree = std::max(max_degree, key.size() / sizeof(ulong));
+          std::string orb = ZeroConst(key);
+          per_target[t].insert(orb);
+          realized.insert(std::move(orb));
+        }
+      }
+      if (max_degree > 0) --max_degree;
+
+      std::map<std::string, int64_t> signatures;
+      for (size_t t = 0; t < targets.size(); ++t) {
+        std::string sig;
+        for (const std::string& o : per_target[t]) sig += o;
+        auto s = signatures.emplace(std::move(sig), 0);
+        ++s.first->second;
+      }
+
+      std::set<std::pair<uint64_t, int32_t>> gens;
+      for (const auto& e : edges) gens.insert({TwoPowMod(e.m, ell), e.n});
+
+      nmod_poly_t A, B;
+      nmod_poly_init(A, ell);
+      nmod_poly_init(B, ell);
+      const std::string seed = SeedKey(ell);
+      std::unordered_set<std::string> monoid{seed};
+      std::vector<std::string> frontier{seed};
+      bool bounded = false;
+      while (!frontier.empty() && !bounded) {
+        std::vector<std::string> next;
+        for (const std::string& f : frontier) {
+          for (const auto& [c, n] : gens) {
+            KeyToPoly(A, f);
+            if (n == 1)
+              nmod_poly_set(B, A);
+            else
+              nmod_poly_pow(B, A, static_cast<ulong>(n));
+            if (static_cast<size_t>(nmod_poly_degree(B)) > max_degree) continue;
+            nmod_poly_set_coeff_ui(B, 0,
+                                   (nmod_poly_get_coeff_ui(B, 0) + c) % ell);
+            std::string g = PolyKey(B);
+            if (monoid.insert(g).second) next.push_back(std::move(g));
+            if (monoid.size() > kMonoidBound) {
+              bounded = true;
+              break;
+            }
+          }
+          if (bounded) break;
+        }
+        frontier.swap(next);
+      }
+      nmod_poly_clear(A);
+      nmod_poly_clear(B);
+
+      if (bounded) {
+        std::fprintf(rep, "      orbits l=%" PRIu64 ": ambient exceeded %zu maps, "
+                    "realized %zu (complement not computed)\n",
+                    ell, kMonoidBound, realized.size());
+        continue;
+      }
+      std::unordered_set<std::string> ambient;
+      for (const std::string& f : monoid) ambient.insert(ZeroConst(f));
+      size_t missed = 0;
+      for (const std::string& o : ambient)
+        if (realized.find(o) == realized.end()) ++missed;
+
+      if (drawing) {
+        if (opt.top > 0 && ambient.size() > static_cast<size_t>(opt.top)) {
+          std::fprintf(stderr,
+                       "pp-graph: T\\M_l has %zu classes at l=%" PRIu64
+                       "; raise --top to draw it\n",
+                       ambient.size(), ell);
+        } else {
+          std::map<std::string, size_t> idx;
+          for (const std::string& o : ambient) idx.emplace(o, idx.size());
+          std::set<std::pair<size_t, size_t>> arcs;
+          nmod_poly_t U, V;
+          nmod_poly_init(U, ell);
+          nmod_poly_init(V, ell);
+          for (const std::string& f : monoid) {
+            auto a = idx.find(ZeroConst(f));
+            if (a == idx.end()) continue;
+            for (const auto& [c, n] : gens) {
+              KeyToPoly(U, f);
+              if (n == 1)
+                nmod_poly_set(V, U);
+              else
+                nmod_poly_pow(V, U, static_cast<ulong>(n));
+              if (static_cast<size_t>(nmod_poly_degree(V)) > max_degree)
+                continue;
+              nmod_poly_set_coeff_ui(V, 0,
+                                     (nmod_poly_get_coeff_ui(V, 0) + c) % ell);
+              auto b = idx.find(ZeroConst(PolyKey(V)));
+              if (b != idx.end()) arcs.insert({a->second, b->second});
+            }
+          }
+          nmod_poly_clear(U);
+          nmod_poly_clear(V);
+          std::printf("digraph orbits {\n  rankdir=LR;\n"
+                      "  node [shape=box, fontsize=9];\n");
+          std::map<size_t, std::vector<size_t>> by_degree;
+          for (const auto& [rep, i] : idx) {
+            const size_t deg =
+                rep.empty() ? 0 : rep.size() / sizeof(ulong) - 1;
+            by_degree[deg].push_back(i);
+            std::printf("  o%zu [label=\"%s\"%s];\n", i, PolyLabel(rep).c_str(),
+                        realized.count(rep) != 0
+                            ? ", style=filled, fillcolor=palegreen"
+                            : ", style=dashed, color=grey40");
+          }
+          for (const auto& [deg, ids] : by_degree) {
+            std::printf("  { rank=same;");
+            for (const size_t i : ids) std::printf(" o%zu;", i);
+            std::printf(" }\n");
+          }
+          for (const auto& [a, b] : arcs)
+            std::printf("  o%zu -> o%zu;\n", a, b);
+          std::printf("}\n");
+        }
+      }
+      std::fprintf(rep, "      orbits l=%" PRIu64 " deg<=%zu: |M_l| %zu  "
+                  "ambient T\\M_l %zu  family realizes %zu  misses %zu  "
+                  "gens %zu  (faithful on GF(%" PRIu64 "^%d)-points)\n",
+                  ell, max_degree, monoid.size(), ambient.size(),
+                  realized.size(), missed, gens.size(), ell,
+                  FaithfulDegree(ell, max_degree));
+      std::fprintf(rep, "        per-prime: %zu distinct realized sets over %zu "
+                  "primes\n",
+                  signatures.size(), targets.size());
+      {
+        std::map<size_t, std::pair<size_t, size_t>> by_deg;
+        for (const std::string& o : ambient) {
+          const size_t d = o.empty() ? 0 : o.size() / sizeof(ulong) - 1;
+          ++by_deg[d].first;
+          if (realized.count(o) != 0) ++by_deg[d].second;
+        }
+        std::fprintf(rep, "        degree profile (ambient / realized):");
+        for (const auto& [d, pr] : by_deg)
+          std::fprintf(rep, "  %zu:%zu/%zu", d, pr.first, pr.second);
+        std::fprintf(rep, "\n");
+      }
+      for (size_t t = 0; t < targets.size() && t < static_cast<size_t>(opt.top);
+           ++t)
+        std::fprintf(rep, "        p=%-12" PRId64 " realizes %zu  misses %zu\n",
+                    targets[t], per_target[t].size(),
+                    ambient.size() - per_target[t].size());
     }
     if (cls_bad) return 1;
+
+    if (opt.e_level > 1) {
+      std::fprintf(rep, "\nl-adic tower (Z/l^e, coefficients as l-adic digits):\n");
+      size_t tower_bad = 0;
+      for (const uint64_t ell : ells) {
+        uint64_t top_mod = 1;
+        bool fits = true;
+        for (int64_t e = 0; e < opt.e_level; ++e) {
+          if (top_mod > (uint64_t{1} << 62) / ell) {
+            fits = false;
+            break;
+          }
+          top_mod *= ell;
+        }
+        if (!fits) {
+          std::fprintf(rep, "  l=%-4" PRIu64 " e=%-2" PRId64 " skipped: l^e exceeds "
+                      "62 bits\n", ell, opt.e_level);
+          continue;
+        }
+        ClassStats ts;
+        auto tower = ClassSweep(node_set, in, top_mod, &ts);
+        uint64_t mod_e = 1;
+        for (int64_t e = 1; e <= opt.e_level; ++e) {
+          mod_e *= ell;
+          auto native = ClassSweep(node_set, in, mod_e, nullptr);
+          size_t disagree = 0;
+          std::map<std::string, int64_t> sigs;
+          std::unordered_set<std::string> fam;
+          for (const int64_t p : targets) {
+            std::set<std::string> from_tower, from_native;
+            if (auto f = tower.find(p); f != tower.end())
+              for (const std::string& k : f->second)
+                from_tower.insert(TruncKey(k, mod_e));
+            if (auto f = native.find(p); f != native.end())
+              from_native.insert(f->second.begin(), f->second.end());
+            if (from_tower != from_native) ++disagree;
+            std::string sig;
+            for (const std::string& k : from_tower) sig += k;
+            ++sigs.emplace(std::move(sig), 0).first->second;
+            fam.insert(from_tower.begin(), from_tower.end());
+          }
+          tower_bad += disagree;
+          std::fprintf(rep, "  l=%-4" PRIu64 " e=%-2" PRId64 " mod %-12" PRIu64
+                      " family classes %-8zu distinct per-prime sets %-6zu "
+                      "truncation vs native %zu/%zu%s\n",
+                      ell, e, mod_e, fam.size(), sigs.size(),
+                      targets.size() - disagree, targets.size(),
+                      disagree ? "  (MISMATCH)" : "");
+        }
+      }
+      if (tower_bad) return 1;
+    }
   }
-  return mismatches == 0 ? 0 : 1;
+
+  if (opt.materialize) {
+    if (opt.sweep_only) {
+      std::fprintf(stderr,
+                   "--materialize needs the walk; drop --sweep-only\n");
+      return 2;
+    }
+    std::string mode_str;
+    std::string merr;
+    auto catalog = ppc::OpenCatalog(opt.warehouse, opt.rest_uri, &mode_str,
+                                    &merr);
+    if (!catalog) {
+      std::fprintf(stderr, "pp-graph: OpenCatalog: %s\n", merr.c_str());
+      return 1;
+    }
+    static const char* const names[] = {"p",      "root",     "degree",
+                                        "chains", "skeleton", "hermite"};
+    std::vector<primeparts::query::MaterializeColumn> columns(6);
+    for (size_t i = 0; i < 6; ++i) columns[i].name = names[i];
+    columns[4].type = primeparts::query::ColumnType::kString;
+    columns[4].no_stats = true;
+    columns[5].type = primeparts::query::ColumnType::kString;
+    columns[5].no_stats = true;
+    for (const auto& r : table) {
+      columns[0].ints.push_back(r.p);
+      columns[1].ints.push_back(r.root);
+      columns[2].ints.push_back(r.degree);
+      columns[3].ints.push_back(r.chains);
+      columns[4].strings.push_back(r.skeleton);
+      columns[5].strings.push_back(r.hermite);
+    }
+    primeparts::query::MaterializeOptions mopt;
+    mopt.sort_keys = {"p", "degree"};
+    std::string metadata_location;
+    if (!primeparts::query::MaterializeColumns(
+            catalog, ppc::ResolveNamespace(opt.ns_name), opt.warehouse,
+            "spectra", columns, mopt, &metadata_location, &merr)) {
+      std::fprintf(stderr, "pp-graph: MaterializeColumns: %s\n", merr.c_str());
+      return 1;
+    }
+    std::fprintf(rep, "\ncommitted %s.spectra (%zu rows)\n  %s\n",
+                 opt.ns_name.c_str(), table.size(),
+                 metadata_location.c_str());
+  }
+  return (mismatches == 0 && capped_targets == 0) ? 0 : 1;
 }
 
 }  // namespace
