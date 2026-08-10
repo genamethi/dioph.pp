@@ -2,11 +2,13 @@
 #include <array>
 #include <chrono>
 #include <cinttypes>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <getopt.h>
+#include <malloc.h>
 #include <map>
 #include <queue>
 #include <set>
@@ -62,10 +64,12 @@ struct Options {
   int64_t ell_max = -1;
   int64_t target_p = -1;
   int64_t k_class = -1;
+  std::string k_list;
   bool sweep = false;
   bool sweep_only = false;
   bool orbits = false;
   bool critical = false;
+  bool shared = false;
   bool branches = false;
   int64_t e_level = -1;
   bool materialize = false;
@@ -195,6 +199,7 @@ bool ParseArgs(int argc, char** argv, Options* opt) {
       {"ells", required_argument, nullptr, 1018},
       {"materialize", no_argument, nullptr, 1019},
       {"critical", no_argument, nullptr, 1020},
+      {"shared", no_argument, nullptr, 1022},
       {"branches", no_argument, nullptr, 1021},
       {"sweep-only", no_argument, nullptr, 1015},
       {"help", no_argument, nullptr, 'h'},
@@ -231,7 +236,8 @@ bool ParseArgs(int argc, char** argv, Options* opt) {
         if (!ParseI64(optarg, &opt->target_p)) return false;
         break;
       case 1013:
-        if (!ParseI64(optarg, &opt->k_class)) return false;
+        opt->k_list = optarg;
+        if (!ParseI64(optarg, &opt->k_class)) opt->k_class = 0;
         break;
       case 1014: opt->sweep = true; break;
       case 1015:
@@ -247,6 +253,7 @@ bool ParseArgs(int argc, char** argv, Options* opt) {
       case 1018: opt->ells_list = optarg; break;
       case 1019: opt->materialize = true; break;
       case 1020: opt->critical = true; break;
+      case 1022: opt->shared = true; break;
       case 1021: opt->branches = true; break;
         break;
       case 'h': Usage(stdout); std::exit(0);
@@ -1738,6 +1745,33 @@ std::string SeedKey(uint64_t ell) {
 
 constexpr size_t kMonoidBound = 4000000;
 
+bool ParseKList(const std::string& spec, std::vector<int64_t>* out) {
+  size_t i = 0;
+  while (i < spec.size()) {
+    size_t j = spec.find(',', i);
+    if (j == std::string::npos) j = spec.size();
+    const std::string tok = spec.substr(i, j - i);
+    if (tok.empty()) return false;
+    const size_t dash = tok.find('-', 1);
+    int64_t lo = 0;
+    int64_t hi = 0;
+    if (dash == std::string::npos) {
+      if (!ParseI64(tok.c_str(), &lo)) return false;
+      hi = lo;
+    } else {
+      if (!ParseI64(tok.substr(0, dash).c_str(), &lo)) return false;
+      if (!ParseI64(tok.substr(dash + 1).c_str(), &hi)) return false;
+    }
+    if (lo < 1 || hi < lo || hi > 64) return false;
+    for (int64_t k = lo; k <= hi; ++k) out->push_back(k);
+    i = j + 1;
+  }
+  if (out->empty()) return false;
+  std::sort(out->begin(), out->end());
+  out->erase(std::unique(out->begin(), out->end()), out->end());
+  return true;
+}
+
 bool ParseEllList(const std::string& spec, std::vector<uint64_t>* out) {
   size_t i = 0;
   while (i < spec.size()) {
@@ -1747,7 +1781,7 @@ bool ParseEllList(const std::string& spec, std::vector<uint64_t>* out) {
     if (tok.empty()) return false;
     char* end = nullptr;
     const unsigned long long v = std::strtoull(tok.c_str(), &end, 10);
-    if (end == nullptr || *end != '\0' || v < 3 || v % 2 == 0) return false;
+    if (end == nullptr || *end != '\0' || !IsSmallPrime(v)) return false;
     out->push_back(static_cast<uint64_t>(v));
     i = j + 1;
   }
@@ -1760,6 +1794,39 @@ bool ParseEllList(const std::string& spec, std::vector<uint64_t>* out) {
 struct ClassStats {
   size_t entries = 0;
   size_t max_state = 0;
+};
+
+struct SharedClasses {
+  std::vector<std::string> key;
+  std::unordered_map<std::string, uint32_t> key_id;
+  std::vector<std::vector<uint32_t>> set;
+  std::unordered_map<std::string, uint32_t> set_id;
+  std::vector<uint32_t> node;
+  uint64_t mod = 0;
+  size_t max_state = 0;
+
+  uint32_t InternKey(std::string k) {
+    auto it = key_id.find(k);
+    if (it != key_id.end()) return it->second;
+    const uint32_t id = static_cast<uint32_t>(key.size());
+    key_id.emplace(k, id);
+    key.push_back(std::move(k));
+    return id;
+  }
+
+  uint32_t InternSet(std::vector<uint32_t> s) {
+    std::sort(s.begin(), s.end());
+    s.erase(std::unique(s.begin(), s.end()), s.end());
+    std::string img(reinterpret_cast<const char*>(s.data()),
+                    s.size() * sizeof(uint32_t));
+    auto it = set_id.find(img);
+    if (it != set_id.end()) return it->second;
+    const uint32_t id = static_cast<uint32_t>(set.size());
+    set_id.emplace(std::move(img), id);
+    max_state = std::max(max_state, s.size());
+    set.push_back(std::move(s));
+    return id;
+  }
 };
 
 struct SpectrumRow {
@@ -1793,6 +1860,213 @@ uint64_t PowMod(uint64_t base, int32_t n, uint64_t ell) {
     b = (b * b) % ell;
   }
   return r;
+}
+
+struct InEdge {
+  uint32_t parent;
+  int32_t n;
+};
+
+template <typename Fn>
+bool StreamQuery(duckdb::Connection* con, const std::string& sql, int columns,
+                 Fn row, std::string* error) {
+  auto result = con->SendQuery(sql);
+  if (result->HasError()) {
+    *error = result->GetError();
+    return false;
+  }
+  duckdb::ErrorData err;
+  while (true) {
+    duckdb::unique_ptr<duckdb::DataChunk> chunk;
+    if (!result->TryFetch(chunk, err)) {
+      *error = err.Message();
+      return false;
+    }
+    if (!chunk || chunk->size() == 0) break;
+    chunk->Flatten();
+    const int64_t* c0 = duckdb::FlatVector::GetData<int64_t>(chunk->data[0]);
+    const int32_t* c1 =
+        columns > 1 ? duckdb::FlatVector::GetData<int32_t>(chunk->data[1])
+                    : nullptr;
+    const int32_t* c2 =
+        columns > 2 ? duckdb::FlatVector::GetData<int32_t>(chunk->data[2])
+                    : nullptr;
+    for (duckdb::idx_t i = 0; i < chunk->size(); ++i)
+      row(c0[i], c1 != nullptr ? c1[i] : 0, c2 != nullptr ? c2[i] : 0);
+  }
+  return true;
+}
+
+bool BuildCompactGraph(const Options& opt, std::vector<int64_t>* nodes,
+                       std::vector<uint32_t>* off, std::vector<InEdge>* inedge,
+                       int64_t* rows, double* t_read, std::string* error) {
+  scan::ScanPlanRequest preq;
+  preq.select = {"p"};
+  preq.filter = iceberg::Expressions::LessThanOrEqual(
+      "p", iceberg::Literal::Long(opt.max_p));
+  std::vector<std::string> ppaths;
+  double t_plan = 0.0;
+  if (!PlanPaths(opt, "primes", preq, &ppaths, &t_plan, error)) return false;
+
+  scan::ScanPlanRequest ereq;
+  ereq.select = {"p", "m_k", "n_k"};
+  ereq.filter = iceberg::Expressions::LessThanOrEqual(
+      "p", iceberg::Literal::Long(opt.max_p));
+  std::vector<std::string> epaths;
+  if (!PlanPaths(opt, "partitions", ereq, &epaths, &t_plan, error)) return false;
+  if (ppaths.empty() || epaths.empty()) {
+    *error = "primes or partitions has no data files in window";
+    return false;
+  }
+
+  duckdb::DBConfig cfg;
+  cfg.SetOptionByName("threads", duckdb::Value::BIGINT(opt.threads));
+  duckdb::DuckDB db(nullptr, &cfg);
+  duckdb::Connection con(db);
+  const auto t0 = std::chrono::steady_clock::now();
+
+  const std::string psql = "SELECT p FROM read_parquet(" + QuoteList(ppaths) +
+                           ") WHERE p <= " + std::to_string(opt.max_p) +
+                           " ORDER BY p";
+  if (opt.max_p > 1000) {
+    const double x = static_cast<double>(opt.max_p);
+    nodes->reserve(static_cast<size_t>(1.15 * x / std::log(x)));
+  }
+  if (!StreamQuery(&con, psql, 1,
+                   [&](int64_t p, int32_t, int32_t) { nodes->push_back(p); },
+                   error))
+    return false;
+  if (!std::is_sorted(nodes->begin(), nodes->end()))
+    std::sort(nodes->begin(), nodes->end());
+
+  auto find = [&](int64_t v) {
+    auto it = std::lower_bound(nodes->begin(), nodes->end(), v);
+    return it != nodes->end() && *it == v
+               ? static_cast<uint32_t>(it - nodes->begin())
+               : UINT32_MAX;
+  };
+
+  const std::string esql = "SELECT p, m_k, n_k FROM read_parquet(" +
+                           QuoteList(epaths) +
+                           ") WHERE p <= " + std::to_string(opt.max_p);
+  off->assign(nodes->size() + 1, 0);
+  int64_t scanned = 0;
+  if (!StreamQuery(&con, esql, 3,
+                   [&](int64_t p, int32_t m, int32_t n) {
+                     ++scanned;
+                     int64_t q = 0;
+                     if (!SolveQ(p, m, n, &q)) return;
+                     if (q < 3 || q > opt.max_p || find(q) == UINT32_MAX)
+                       return;
+                     const uint32_t pi = find(p);
+                     if (pi == UINT32_MAX) return;
+                     ++(*off)[pi + 1];
+                   },
+                   error))
+    return false;
+  for (size_t i = 0; i < nodes->size(); ++i) (*off)[i + 1] += (*off)[i];
+  inedge->assign(off->back(), InEdge{0, 0});
+  std::vector<uint32_t> fill(off->begin(), off->end() - 1);
+  if (!StreamQuery(&con, esql, 3,
+                   [&](int64_t p, int32_t m, int32_t n) {
+                     int64_t q = 0;
+                     if (!SolveQ(p, m, n, &q)) return;
+                     if (q < 3 || q > opt.max_p) return;
+                     const uint32_t qi = find(q);
+                     if (qi == UINT32_MAX) return;
+                     const uint32_t pi = find(p);
+                     if (pi == UINT32_MAX) return;
+                     (*inedge)[fill[pi]++] = {qi, n};
+                   },
+                   error))
+    return false;
+  *rows = scanned;
+  *t_read = Seconds(t0);
+  return true;
+}
+
+SharedClasses SharedSweep(const std::vector<int64_t>& nodes,
+                          const std::vector<uint32_t>& off,
+                          const std::vector<InEdge>& inedge, uint64_t mod) {
+  SharedClasses sc;
+  sc.mod = mod;
+  sc.node.assign(nodes.size(), UINT32_MAX);
+  nmod_poly_t P, Q;
+  nmod_poly_init(P, mod);
+  nmod_poly_init(Q, mod);
+  std::vector<uint32_t> root_set(mod, UINT32_MAX);
+  auto seed_for = [&](int64_t v) {
+    const ulong r = static_cast<ulong>(
+        ((v % static_cast<int64_t>(mod)) + static_cast<int64_t>(mod)) %
+        static_cast<int64_t>(mod));
+    if (root_set[r] != UINT32_MAX) return root_set[r];
+    nmod_poly_zero(P);
+    nmod_poly_set_coeff_ui(P, 1, 1 % mod);
+    nmod_poly_set_coeff_ui(P, 0, (mod - r) % mod);
+    const uint32_t id = sc.InternSet({sc.InternKey(PolyKey(P))});
+    root_set[r] = id;
+    return id;
+  };
+
+  std::vector<uint32_t> acc;
+  std::unordered_map<uint64_t, uint32_t> memo;
+  for (size_t vi = 0; vi < nodes.size(); ++vi) {
+    const int64_t v = nodes[vi];
+    if (off[vi] == off[vi + 1]) {
+      sc.node[vi] = seed_for(v);
+      continue;
+    }
+    acc.clear();
+    bool all_one = true;
+    uint32_t only = UINT32_MAX;
+    for (uint32_t ei = off[vi]; ei < off[vi + 1]; ++ei) {
+      const InEdge& e = inedge[ei];
+      const uint32_t psid = sc.node[e.parent];
+      if (psid == UINT32_MAX) continue;
+      if (e.n == 1) {
+        if (only == UINT32_MAX)
+          only = psid;
+        else if (only != psid)
+          all_one = false;
+        const auto& s = sc.set[psid];
+        acc.insert(acc.end(), s.begin(), s.end());
+        continue;
+      }
+      all_one = false;
+      const int64_t qv = nodes[e.parent];
+      const ulong qm = static_cast<ulong>(
+          ((qv % static_cast<int64_t>(mod)) + static_cast<int64_t>(mod)) %
+          static_cast<int64_t>(mod));
+      ulong qn = 1 % mod;
+      for (int32_t i = 0; i < e.n; ++i) qn = (qn * qm) % mod;
+      for (const uint32_t cid : sc.set[psid]) {
+        const uint64_t mk = (static_cast<uint64_t>(cid) << 24) ^
+                            (static_cast<uint64_t>(e.n) << 40) ^ qm;
+        auto f = memo.find(mk);
+        if (f != memo.end()) {
+          acc.push_back(f->second);
+          continue;
+        }
+        KeyToPoly(P, sc.key[cid]);
+        nmod_poly_set_coeff_ui(P, 0,
+                               (nmod_poly_get_coeff_ui(P, 0) + qm) % mod);
+        nmod_poly_pow(Q, P, static_cast<ulong>(e.n));
+        nmod_poly_set_coeff_ui(
+            Q, 0, (nmod_poly_get_coeff_ui(Q, 0) + mod - qn) % mod);
+        const uint32_t nid = sc.InternKey(PolyKey(Q));
+        memo.emplace(mk, nid);
+        acc.push_back(nid);
+      }
+    }
+    if (acc.empty()) {
+      sc.node[vi] = seed_for(v);
+      continue;
+    }
+    sc.node[vi] = all_one && only != UINT32_MAX ? only : sc.InternSet(acc);
+  }
+  nmod_poly_clear(P);
+  nmod_poly_clear(Q);
+  return sc;
 }
 
 std::unordered_map<int64_t, std::vector<std::string>> ClassSweep(
@@ -1963,11 +2237,22 @@ std::string SegKeyModL(const std::map<int, GiNaC::ex>& hermite, uint64_t ell) {
 }
 
 int RunSpectraFamily(const Options& opt) {
-  if (opt.k_class < 1) {
+  std::vector<int64_t> ks;
+  if (opt.k_list.empty() || !ParseKList(opt.k_list, &ks)) {
     std::fprintf(stderr,
-                 "mode spectrum requires --p (single prime) or --k >= 1 "
-                 "(family)\n");
+                 "mode spectrum requires --p (single prime) or --k K (family); "
+                 "--k also takes a list or range, 2,3 or 2-6\n");
     return 2;
+  }
+  std::string k_in;
+  std::string k_label;
+  for (size_t i = 0; i < ks.size(); ++i) {
+    if (i) {
+      k_in += ",";
+      k_label += ",";
+    }
+    k_in += std::to_string(ks[i]);
+    k_label += std::to_string(ks[i]);
   }
   const bool drawing = opt.format == "dot";
   FILE* const rep = drawing ? stderr : stdout;
@@ -2000,37 +2285,48 @@ int RunSpectraFamily(const Options& opt) {
   duckdb::DuckDB db(nullptr, &cfg);
   duckdb::Connection con(db);
   auto t0 = std::chrono::steady_clock::now();
-  auto tres = con.Query(
-      "SELECT p FROM read_parquet(" + QuoteList(ppaths) + ") WHERE p >= " +
-      std::to_string(opt.min_p) + " AND p <= " + std::to_string(opt.max_p) +
-      " AND k = " + std::to_string(opt.k_class) + " ORDER BY p");
-  if (tres->HasError()) {
-    std::fprintf(stderr, "pp-graph: %s\n", tres->GetError().c_str());
-    return 1;
-  }
   std::vector<int64_t> targets;
-  for (auto& row : *tres) targets.push_back(row.GetValue<int64_t>(0));
+  std::vector<uint8_t> target_k;
+  {
+    std::string terr;
+    const std::string tsql =
+        "SELECT p, k FROM read_parquet(" + QuoteList(ppaths) + ") WHERE p >= " +
+        std::to_string(opt.min_p) + " AND p <= " + std::to_string(opt.max_p) +
+        " AND k IN (" + k_in + ")" +
+        (opt.shared && opt.sweep_only ? "" : " ORDER BY p");
+    if (!StreamQuery(&con, tsql, 2,
+                     [&](int64_t p, int32_t kv, int32_t) {
+                       targets.push_back(p);
+                       target_k.push_back(static_cast<uint8_t>(kv));
+                     },
+                     &terr)) {
+      std::fprintf(stderr, "pp-graph: %s\n", terr.c_str());
+      return 1;
+    }
+  }
   const double t_targets = Seconds(t0);
   if (targets.empty()) {
-    std::fprintf(rep, "pp-graph spectra  k=%" PRId64 "  window [%" PRId64
+    std::fprintf(rep, "pp-graph spectra  k=%s  window [%" PRId64
                 ", %" PRId64 "]: empty family\n",
-                opt.k_class, opt.min_p, opt.max_p);
+                k_label.c_str(), opt.min_p, opt.max_p);
     return 0;
   }
 
+  const bool streaming = opt.shared && opt.sweep_only;
   Options ropt = opt;
   ropt.min_p = 0;
-  ropt.max_p = targets.back();
+  ropt.max_p = streaming ? opt.max_p : targets.back();
   std::vector<Edge> edges;
   int64_t rows = 0;
   double t_plan = 0.0;
   double t_read = 0.0;
-  if (!ReadEdges(ropt, &edges, &rows, &t_plan, &t_read, &error)) {
+  if (!streaming && !ReadEdges(ropt, &edges, &rows, &t_plan, &t_read, &error)) {
     std::fprintf(stderr, "pp-graph: %s\n", error.c_str());
     return 1;
   }
   std::map<int64_t, std::vector<Edge>> in;
-  for (const auto& e : edges) in[e.p].push_back(e);
+  if (!streaming)
+    for (const auto& e : edges) in[e.p].push_back(e);
 
   std::vector<uint64_t> ells;
   if (!opt.ells_list.empty()) {
@@ -2070,12 +2366,12 @@ int RunSpectraFamily(const Options& opt) {
   size_t br_square = 0;
   std::vector<std::pair<std::vector<int64_t>, std::array<int64_t, 3>>> br_examples;
 
-  std::fprintf(rep, "pp-graph spectra  k=%" PRId64 "  window [%" PRId64 ", %" PRId64
+  std::fprintf(rep, "pp-graph spectra  k=%s  window [%" PRId64 ", %" PRId64
               "]  family %zu\n",
-              opt.k_class, opt.min_p, opt.max_p, targets.size());
+              k_label.c_str(), opt.min_p, opt.max_p, targets.size());
   std::fprintf(rep, "  edges read [0, %" PRId64 "]: %zu (%" PRId64
               " rows)  plan %.3fs  read %.3fs  targets %.3fs\n\n",
-              targets.back(), edges.size(), rows, t_plan, t_read, t_targets);
+              streaming ? opt.max_p : targets.back(), edges.size(), rows, t_plan, t_read, t_targets);
   if (!opt.sweep_only) {
   std::fprintf(rep, "  %-12s %-8s %-8s %-8s %-5s %-20s", "p", "cone", "roots",
               "words", "seg", "chains");
@@ -2253,6 +2549,145 @@ int RunSpectraFamily(const Options& opt) {
       node_set.insert(e.q);
       node_set.insert(e.p);
     }
+    if (opt.shared) {
+      if (opt.e_level < 1) {
+        std::fprintf(stderr, "--shared needs --e E >= 1\n");
+        return 2;
+      }
+      std::vector<int64_t> nodes;
+      std::vector<uint32_t> off;
+      std::vector<InEdge> inedge;
+      if (streaming) {
+        int64_t srows = 0;
+        double t_sread = 0.0;
+        if (!BuildCompactGraph(opt, &nodes, &off, &inedge, &srows, &t_sread,
+                               &error)) {
+          std::fprintf(stderr, "pp-graph: %s\n", error.c_str());
+          return 1;
+        }
+        std::fprintf(rep, "  streamed %" PRId64 " partition rows in %.1fs "
+                          "(edges never materialized)\n", srows, t_sread);
+      } else {
+        nodes.assign(node_set.begin(), node_set.end());
+        off.assign(nodes.size() + 1, 0);
+        auto index_of = [&](int64_t v) {
+          return static_cast<uint32_t>(
+              std::lower_bound(nodes.begin(), nodes.end(), v) - nodes.begin());
+        };
+        for (const auto& e : edges) ++off[index_of(e.p) + 1];
+        for (size_t i = 0; i < nodes.size(); ++i) off[i + 1] += off[i];
+        inedge.resize(edges.size());
+        std::vector<uint32_t> fill(off.begin(), off.end() - 1);
+        for (const auto& e : edges)
+          inedge[fill[index_of(e.p)]++] = {index_of(e.q), e.n};
+      }
+      node_set.clear();
+      {
+        std::vector<Edge> dead;
+        edges.swap(dead);
+      }
+      {
+        std::map<int64_t, std::vector<Edge>> dead;
+        in.swap(dead);
+      }
+      malloc_trim(0);
+      auto index_of = [&](int64_t v) {
+        return static_cast<uint32_t>(
+            std::lower_bound(nodes.begin(), nodes.end(), v) - nodes.begin());
+      };
+      std::vector<uint32_t> target_idx(targets.size());
+      for (size_t t = 0; t < targets.size(); ++t)
+        target_idx[t] = index_of(targets[t]);
+      const std::vector<uint8_t>& target_kc = target_k;
+      {
+        std::vector<int64_t> dead;
+        targets.swap(dead);
+      }
+      malloc_trim(0);
+      const size_t ntargets = target_idx.size();
+      std::fprintf(rep, "  compact graph: %zu nodes, %zu in-edges, %zu bytes\n",
+                   nodes.size(), inedge.size(),
+                   nodes.size() * sizeof(int64_t) + off.size() * sizeof(uint32_t) +
+                       inedge.size() * sizeof(InEdge));
+        std::fprintf(rep, "\nl-adic tower, shared sweep (state normalized by "
+                          "subtracting p from the constant term):\n");
+        for (const uint64_t ell : ells) {
+          uint64_t mod_e = 1;
+          for (int64_t e = 1; e <= opt.e_level; ++e) {
+            if (mod_e > (uint64_t{1} << 62) / ell) {
+              std::fprintf(rep, "  l=%-4" PRIu64 " e=%-2" PRId64 " skipped: l^e "
+                          "exceeds 62 bits\n", ell, e);
+              break;
+            }
+            mod_e *= ell;
+            t0 = std::chrono::steady_clock::now();
+            SharedClasses sc = SharedSweep(nodes, off, inedge, mod_e);
+            const double t_sh = Seconds(t0);
+            std::unordered_set<std::string> fam;
+            std::unordered_map<uint64_t, uint32_t> canon;
+            std::unordered_set<uint32_t> shapes;
+            std::map<int64_t, std::set<uint32_t>> shapes_by_k;
+            std::map<int64_t, size_t> primes_by_k;
+            std::unordered_map<std::string, uint32_t> abs_key;
+            std::unordered_map<std::string, uint32_t> abs_set;
+            for (size_t t = 0; t < ntargets; ++t) {
+              const int64_t p = nodes[target_idx[t]];
+              const uint32_t sid = sc.node[target_idx[t]];
+              if (sid == UINT32_MAX) continue;
+              const uint64_t r =
+                  static_cast<uint64_t>(p % static_cast<int64_t>(mod_e));
+              const uint64_t shape =
+                  (static_cast<uint64_t>(sid) << 32) | r;
+              uint32_t cid = 0;
+              auto cf = canon.find(shape);
+              if (cf != canon.end()) {
+                cid = cf->second;
+              } else {
+                std::vector<uint32_t> ids;
+                ids.reserve(sc.set[sid].size());
+                for (const uint32_t k : sc.set[sid]) {
+                  std::string key = sc.key[k];
+                  if (key.size() < sizeof(ulong))
+                    key.resize(sizeof(ulong), '\0');
+                  ulong c0;
+                  std::memcpy(&c0, key.data(), sizeof(ulong));
+                  c0 = (c0 + r) % mod_e;
+                  std::memcpy(key.data(), &c0, sizeof(ulong));
+                  auto ak = abs_key.emplace(
+                      key, static_cast<uint32_t>(abs_key.size()));
+                  if (ak.second) fam.insert(std::move(key));
+                  ids.push_back(ak.first->second);
+                }
+                std::sort(ids.begin(), ids.end());
+                ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+                std::string img(reinterpret_cast<const char*>(ids.data()),
+                                ids.size() * sizeof(uint32_t));
+                cid = abs_set
+                          .emplace(std::move(img),
+                                   static_cast<uint32_t>(abs_set.size()))
+                          .first->second;
+                canon.emplace(shape, cid);
+              }
+              shapes.insert(cid);
+              shapes_by_k[target_kc[t]].insert(cid);
+              ++primes_by_k[target_kc[t]];
+            }
+            std::fprintf(rep, "  l=%-4" PRIu64 " e=%-2" PRId64 " mod %-12" PRIu64
+                        " family classes %-8zu distinct per-prime sets %-6zu "
+                        "interned %zu classes / %zu sets  max |S| %zu  %.3fs\n",
+                        ell, e, mod_e, fam.size(), shapes.size(), sc.key.size(),
+                        sc.set.size(), sc.max_state, t_sh);
+            if (ks.size() > 1) {
+              std::fprintf(rep, "        by k (sets/primes):");
+              for (const auto& [kv, s] : shapes_by_k)
+                std::fprintf(rep, "  %" PRId64 ":%zu/%zu", kv, s.size(),
+                             primes_by_k[kv]);
+              std::fprintf(rep, "\n");
+            }
+          }
+        }
+        return 0;
+      }
     std::vector<size_t> word_at(ells.size());
     size_t words = 0;
     for (size_t i = 0; i < ells.size(); ++i) {
@@ -2587,6 +3022,7 @@ int RunSpectraFamily(const Options& opt) {
     if (cls_bad) return 1;
 
     if (opt.e_level > 1) {
+
       std::fprintf(rep, "\nl-adic tower (Z/l^e, coefficients as l-adic digits):\n");
       size_t tower_bad = 0;
       for (const uint64_t ell : ells) {
@@ -2613,7 +3049,10 @@ int RunSpectraFamily(const Options& opt) {
           size_t disagree = 0;
           std::map<std::string, int64_t> sigs;
           std::unordered_set<std::string> fam;
-          for (const int64_t p : targets) {
+          std::map<int64_t, std::set<std::string>> sigs_by_k;
+          std::map<int64_t, size_t> primes_by_k;
+          for (size_t t = 0; t < targets.size(); ++t) {
+            const int64_t p = targets[t];
             std::set<std::string> from_tower, from_native;
             if (auto f = tower.find(p); f != tower.end())
               for (const std::string& k : f->second)
@@ -2623,6 +3062,8 @@ int RunSpectraFamily(const Options& opt) {
             if (from_tower != from_native) ++disagree;
             std::string sig;
             for (const std::string& k : from_tower) sig += k;
+            sigs_by_k[target_k[t]].insert(sig);
+            ++primes_by_k[target_k[t]];
             ++sigs.emplace(std::move(sig), 0).first->second;
             fam.insert(from_tower.begin(), from_tower.end());
           }
@@ -2633,6 +3074,13 @@ int RunSpectraFamily(const Options& opt) {
                       ell, e, mod_e, fam.size(), sigs.size(),
                       targets.size() - disagree, targets.size(),
                       disagree ? "  (MISMATCH)" : "");
+          if (ks.size() > 1) {
+            std::fprintf(rep, "        by k (sets/primes):");
+            for (const auto& [kv, s] : sigs_by_k)
+              std::fprintf(rep, "  %" PRId64 ":%zu/%zu", kv, s.size(),
+                           primes_by_k[kv]);
+            std::fprintf(rep, "\n");
+          }
         }
       }
       if (tower_bad) return 1;
