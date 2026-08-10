@@ -12,7 +12,7 @@ CXX ?= /usr/bin/g++
 CPPFLAGS += -Iinclude -I$(PREFIX)/include
 CFLAGS += -std=c11 -D_POSIX_C_SOURCE=200809L -O3 -g -fPIC -Wall -Wextra -Wpedantic $(SANITIZE)
 CXXFLAGS += -std=c++23 -O3 -g -fPIC -Wall -Wextra -Wpedantic $(SANITIZE)
-LDFLAGS += -L$(PREFIX)/lib -Wl,-rpath,$(abspath $(PREFIX)/lib) $(SANITIZE)
+LDFLAGS += -L$(PREFIX)/lib -Wl,-rpath,$(abspath $(PREFIX)/lib) -rdynamic $(SANITIZE)
 EXE_LDFLAGS += -no-pie
 LDLIBS += $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --libs primecount primesieve gmp flint) -lpari -lm
 NOTCURSES_LDLIBS ?= $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --libs notcurses-core 2>/dev/null || PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --libs notcurses 2>/dev/null)
@@ -52,10 +52,15 @@ BUILD_DIR := build
 CORE_OBJ := $(BUILD_DIR)/core.o
 GENERATE_OBJ := $(BUILD_DIR)/generate.o
 CONFIG_OBJ := $(BUILD_DIR)/config.o
-EXAMPLE_CONFIG_LUA := ../scripts/lua/example.config.lua
-EXAMPLE_CONFIG_SRC := $(BUILD_DIR)/example_config.cc
-EXAMPLE_CONFIG_OBJ := $(BUILD_DIR)/example_config.o
-CONFIG_OBJS := $(CONFIG_OBJ) $(EXAMPLE_CONFIG_OBJ)
+EXAMPLE_CONFIG_LUA := $(BUILD_DIR)/example.config.lua
+CONFIG_GEN_OBJ := $(BUILD_DIR)/config_gen.o
+CONFIG_GEN := $(BUILD_DIR)/pp-config-gen
+CONFIG_OBJS := $(CONFIG_OBJ)
+LUA_RUN_DIR := $(BUILD_DIR)/lua
+LUA_TREE_SH := ../scripts/luarocks-tree.sh
+ROCKS_MANIFEST := ../scripts/lua/rocks.lua
+LUAROCKS_PRESET := ../scripts/lua/luarocks.preset.lua
+ROCKS_STAMP := $(LUA_RUN_DIR)/.rocks
 WRITER_OBJ := $(BUILD_DIR)/writer.o
 ALIGNED_WRITER_OBJ := $(BUILD_DIR)/aligned_writer.o
 SCHEMAS_OBJ := $(BUILD_DIR)/schemas.o
@@ -89,11 +94,12 @@ E2E_OBJ := $(BUILD_DIR)/e2e_test.o
 E2E_LIBOBJS := $(SESSION_OBJ) $(REST_SCAN_PLAN_OBJ) $(PLAN_STATUS_OBJ) $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(WRITER_OBJ) $(ALIGNED_WRITER_OBJ) $(SCHEMAS_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(PP_ICEBERG_REST_OBJ) $(PP_COMMIT_OBJ) $(PP_LMDB_STORE_OBJ) $(PARTITION_STATS_OBJ) $(LMDB_LIB)
 
 .DEFAULT_GOAL := all
-.PHONY: all clean test e2e build-deps install install-service
+.PHONY: all clean test e2e build-deps install install-service rocks
 
 CONFIGURE_FLAGS ?=
 
 PP_INSTALL_PATH ?= $(HOME)/.local/bin
+PP_LUA_PATH ?= $(abspath $(PP_INSTALL_PATH)/../share/pp/lua)
 
 CATALOGD_UNIT_NAME := primeparts-catalogd.service
 SYSTEMD_USER_DIR := $(HOME)/.local/share/systemd/user
@@ -109,12 +115,15 @@ INSTALL_BINS := \
 build-deps:
 	./configure $(CONFIGURE_FLAGS)
 
-install: all
-	mkdir -p "$(PP_INSTALL_PATH)"
+install: all $(EXAMPLE_CONFIG_LUA)
+	mkdir -p "$(PP_INSTALL_PATH)" "$(PP_LUA_PATH)/pp" "$(PP_LUA_PATH)/etc"
 	cp $(INSTALL_BINS) "$(PP_INSTALL_PATH)/"
-	@if [ ! -f "$(PP_INSTALL_PATH)/config.lua" ]; then \
-	  cp $(EXAMPLE_CONFIG_LUA) "$(PP_INSTALL_PATH)/config.lua"; \
-	  echo "seeded $(PP_INSTALL_PATH)/config.lua"; \
+	cp -r $(LUA_RUN_DIR)/rocks "$(PP_LUA_PATH)/"
+	cp $(LUAROCKS_PRESET) "$(PP_LUA_PATH)/etc/luarocks.preset.lua"
+	cp $(LUA_RUN_DIR)/etc/luarocks.lua "$(PP_LUA_PATH)/etc/luarocks.lua"
+	@if [ ! -f "$(PP_LUA_PATH)/pp/config.lua" ]; then \
+	  cp $(EXAMPLE_CONFIG_LUA) "$(PP_LUA_PATH)/pp/config.lua"; \
+	  echo "seeded $(PP_LUA_PATH)/pp/config.lua"; \
 	fi
 	@echo "installed $(words $(INSTALL_BINS)) binaries to $(PP_INSTALL_PATH)"
 
@@ -132,7 +141,8 @@ install-service: install
 	  exit 1; \
 	fi
 
-all: $(BUILD_DIR)/libprimeparts_core.so \
+all: $(ROCKS_STAMP) \
+     $(BUILD_DIR)/libprimeparts_core.so \
      $(BUILD_DIR)/primeparts-generate \
      $(BUILD_DIR)/pp \
      $(BUILD_DIR)/primeparts-catalogd \
@@ -152,13 +162,21 @@ $(GENERATE_OBJ): src/generate.cc include/primeparts/core.h include/primeparts/wr
 $(CONFIG_OBJ): src/config.cc include/primeparts/config.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(LUA_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(EXAMPLE_CONFIG_SRC): $(EXAMPLE_CONFIG_LUA) | $(BUILD_DIR)
-	@{ printf '#include "primeparts/config.h"\n\nnamespace primeparts::config {\nconst char kExampleConfig[] = R"PPCFG('; \
-	   cat $(EXAMPLE_CONFIG_LUA); \
-	   printf ')PPCFG";\n}\n'; } > $@
+rocks: $(ROCKS_STAMP)
 
-$(EXAMPLE_CONFIG_OBJ): $(EXAMPLE_CONFIG_SRC) include/primeparts/config.h | $(BUILD_DIR)
+$(ROCKS_STAMP): $(ROCKS_MANIFEST) $(LUAROCKS_PRESET) $(LUA_TREE_SH) | $(BUILD_DIR)
+	RUN_DIR=$(LUA_RUN_DIR) ROCKS_MANIFEST=$(ROCKS_MANIFEST) \
+	  PRESET_CONFIG=$(LUAROCKS_PRESET) $(LUA_TREE_SH)
+	@touch $@
+
+$(CONFIG_GEN_OBJ): src/config_gen.cc include/primeparts/config.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(CONFIG_GEN): $(CONFIG_GEN_OBJ) $(CONFIG_OBJ)
+	$(CXX) $^ $(LDFLAGS) $(LUA_LDLIBS) -o $@
+
+$(EXAMPLE_CONFIG_LUA): $(CONFIG_GEN)
+	$(CONFIG_GEN) > $@
 
 $(WRITER_OBJ): src/writer.cc include/primeparts/writer.h include/primeparts/schemas.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
@@ -318,16 +336,6 @@ $(SESSION_OBJ): src/client/session.cc include/primeparts/client/session.h includ
 
 GINAC_CPPFLAGS := $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --cflags ginac)
 GINAC_LDLIBS := $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --libs ginac)
-GRAPH_EXP_OBJ := $(BUILD_DIR)/pp_graph_exp.o
-
-$(GRAPH_EXP_OBJ): src/graph/pp_graph_exp.cc include/primeparts/catalog/rest_scan_plan.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/scan/scan_plan.h include/primeparts/scan/scan_planner.h include/primeparts/source_scan.h | $(BUILD_DIR)
-	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(GINAC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
-
-$(BUILD_DIR)/pp-graph-exp: $(GRAPH_EXP_OBJ) $(SESSION_OBJ) $(REST_SCAN_PLAN_OBJ) $(PLAN_STATUS_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
-	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(GINAC_LDLIBS) -lsqlite3 -pthread -o $@
-
-pp-graph-exp: $(BUILD_DIR)/pp-graph-exp
-.PHONY: pp-graph-exp
 
 PP_FIXTURE_OBJ := $(BUILD_DIR)/pp_fixture_warehouse.o
 

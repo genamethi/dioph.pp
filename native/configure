@@ -211,18 +211,43 @@ else
   exit 1
 fi
 
-if [ ! -x /usr/local/bin/lua ] || ! /usr/local/bin/lua -v 2>&1 | grep -q "Lua 5.5"; then
+LUA_RELEASE=5.5.1
+LUA_VERSION=5.5
+
+if [ ! -x /usr/local/bin/lua ] ||
+  ! /usr/local/bin/lua -v 2>&1 | grep -q "Lua $LUA_RELEASE"; then
   tmp=$(mktemp -d)
   cd "$tmp"
-  curl -L -R -O https://www.lua.org/ftp/lua-5.5.0.tar.gz
-  tar zxf lua-5.5.0.tar.gz
-  cd lua-5.5.0
+  curl -L -R -O "https://www.lua.org/ftp/lua-$LUA_RELEASE.tar.gz"
+  tar zxf "lua-$LUA_RELEASE.tar.gz"
+  cd "lua-$LUA_RELEASE"
   make all test
   $SUDO make install
   cd "$ROOT"
   rm -rf "$tmp"
 else
-  echo "lua 5.5 present"
+  echo "lua $LUA_RELEASE present"
+fi
+
+if [ ! -x /usr/local/bin/luarocks ]; then
+  tmp=$(mktemp -d)
+  cd "$tmp"
+  tag=$(curl -fsSL https://api.github.com/repos/luarocks/luarocks/releases/latest |
+    sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p')
+  [ -n "$tag" ] || {
+    echo "could not resolve latest luarocks release"
+    exit 1
+  }
+  curl -L -R -O "https://luarocks.org/releases/luarocks-$tag.tar.gz"
+  tar zxf "luarocks-$tag.tar.gz"
+  cd "luarocks-$tag"
+  ./configure --with-lua=/usr/local --lua-version="$LUA_VERSION"
+  make
+  $SUDO make install
+  cd "$ROOT"
+  rm -rf "$tmp"
+else
+  echo "luarocks $(/usr/local/bin/luarocks --version | head -1 | awk '{print $2}') present"
 fi
 
 httplib_ok=

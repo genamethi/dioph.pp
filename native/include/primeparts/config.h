@@ -1,8 +1,10 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace primeparts::config {
 
@@ -40,6 +42,16 @@ struct Graph {
   int64_t threads = 0;
   int64_t top = 0;
   int64_t max_p = 0;
+  int64_t e_level = 0;
+  int64_t he_n = 0;
+  int64_t ell_max = 0;
+  bool sweep = false;
+  bool sweep_only = false;
+  bool orbits = false;
+  bool materialize = false;
+  bool critical = false;
+  bool branches = false;
+  std::string ells;
   std::string mode;
   std::string format;
 };
@@ -55,6 +67,7 @@ struct Conf {
   fs::path path;
   bool touched = false;
   bool generated = false;
+  std::vector<std::string> defaulted;
   Core core;
   Generate generate;
   Catalogd catalogd;
@@ -64,11 +77,30 @@ struct Conf {
   Tui tui;
 };
 
-extern const char kExampleConfig[];
+struct Field {
+  enum Kind { kStr, kI64, kBool };
+  const char* section;
+  const char* key;
+  Kind kind;
+  std::string* (*str)(Conf&);
+  int64_t* (*num)(Conf&);
+  bool* (*flag)(Conf&);
+  const char* str_default;
+  int64_t num_default;
+  bool flag_default;
+  const char* const* allowed;
+};
+
+extern const Field kFields[];
+extern const std::size_t kFieldCount;
+
+std::string RenderExample();
 
 fs::path Resolve(const fs::path& requested, std::string* error);
 
 bool Load(const fs::path& requested, Conf* out, std::string* error);
+
+bool AppendDefaults(Conf* conf, std::string* error);
 
 void Announce(const Conf& conf);
 
