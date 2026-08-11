@@ -36,7 +36,7 @@
 #include "primeparts/config.h"
 #include "primeparts/partition_math.h"
 #include "primeparts/graph/hermite_modl.h"
-#include "primeparts/graph/pp_graph_store.h"
+#include "primeparts/graph/partition_scan.h"
 #include "primeparts/query/materialize.h"
 #include "primeparts/scan/scan_plan.h"
 
@@ -538,17 +538,6 @@ bool ReduceToBasis(std::vector<Generator>* gens, std::vector<int>* degrees) {
 
 bool ReadEdges(const Options& opt, std::vector<Edge>* out, int64_t* rows_scanned,
                double* t_plan, double* t_read, std::string* error) {
-  client::SessionOptions so;
-  so.rest_uri = opt.rest_uri;
-  so.warehouse = opt.warehouse;
-  so.ns = opt.ns_name;
-  so.scan_threads = static_cast<int>(opt.threads);
-  auto session = client::Session::Open(so, error);
-  if (!session) return false;
-
-  client::TableHandle partitions;
-  if (!session->LoadTable("partitions", &partitions, error)) return false;
-
   scan::ScanPlanRequest request;
   request.select = {"p", "m_k", "n_k"};
   request.filter = iceberg::Expressions::And(
@@ -557,11 +546,9 @@ bool ReadEdges(const Options& opt, std::vector<Edge>* out, int64_t* rows_scanned
       iceberg::Expressions::LessThanOrEqual("p",
                                             iceberg::Literal::Long(opt.max_p)));
 
-  auto t0 = std::chrono::steady_clock::now();
   std::vector<std::string> paths;
-  if (!session->PlanFiles(partitions, request, &paths, error)) return false;
-  *t_plan = Seconds(t0);
-
+  if (!PlanPaths(opt, "partitions", request, &paths, t_plan, error))
+    return false;
   if (paths.empty()) return true;
 
   duckdb::DBConfig cfg;
@@ -569,27 +556,17 @@ bool ReadEdges(const Options& opt, std::vector<Edge>* out, int64_t* rows_scanned
   duckdb::DuckDB db(nullptr, &cfg);
   duckdb::Connection con(db);
 
-  const std::string sql =
-      "SELECT p, m_k, n_k FROM read_parquet(" + QuoteList(paths) +
-      ") WHERE p >= " + std::to_string(opt.min_p) +
-      " AND p <= " + std::to_string(opt.max_p);
+  const std::string where = "p >= " + std::to_string(opt.min_p) +
+                            " AND p <= " + std::to_string(opt.max_p);
 
-  t0 = std::chrono::steady_clock::now();
-  auto result = con.Query(sql);
-  if (result->HasError()) {
-    *error = result->GetError();
+  const auto t0 = std::chrono::steady_clock::now();
+  if (!primeparts::graph::ScanPartitionEdges(
+          &con, paths, where, opt.min_p, opt.max_p,
+          [&](int64_t p, int32_t m, int32_t n, int64_t q) {
+            out->push_back(Edge{q, p, m, n});
+          },
+          rows_scanned, error))
     return false;
-  }
-  for (auto& chunk : *result) {
-    const int64_t p = chunk.GetValue<int64_t>(0);
-    const int32_t m = chunk.GetValue<int32_t>(1);
-    const int32_t n = chunk.GetValue<int32_t>(2);
-    ++*rows_scanned;
-    int64_t q = 0;
-    if (!SolveQ(p, m, n, &q)) continue;
-    if (q < opt.min_p || q > opt.max_p) continue;
-    out->push_back(Edge{q, p, m, n});
-  }
   *t_read = Seconds(t0);
   return true;
 }
@@ -1171,28 +1148,20 @@ int RunPaths(const Options& opt) {
 
   auto t0 = std::chrono::steady_clock::now();
   const int64_t n_floor = opt.he_n >= 2 ? opt.he_n : 2;
-  auto result = con.Query("SELECT p, m_k, n_k FROM read_parquet(" +
-                          QuoteList(paths) + ") WHERE n_k >= " +
-                          std::to_string(n_floor));
-  if (result->HasError()) {
-    std::fprintf(stderr, "pp-graph: %s\n", result->GetError().c_str());
+  std::vector<GpEdge> edges;
+  int64_t rows_seen = 0;
+  int64_t max_q = 0;
+  if (!primeparts::graph::ScanPartitionEdges(
+          &con, paths, "n_k >= " + std::to_string(n_floor), INT64_MIN, INT64_MAX,
+          [&](int64_t p, int32_t m, int32_t n, int64_t q) {
+            max_q = std::max(max_q, q);
+            edges.push_back(GpEdge{p, q, m, n});
+          },
+          &rows_seen, &error)) {
+    std::fprintf(stderr, "pp-graph: %s\n", error.c_str());
     return 1;
   }
-  std::vector<GpEdge> edges;
-  int64_t unsolved = 0;
-  int64_t max_q = 0;
-  for (auto& row : *result) {
-    const int64_t p = row.GetValue<int64_t>(0);
-    const int32_t m = row.GetValue<int32_t>(1);
-    const int32_t n = row.GetValue<int32_t>(2);
-    int64_t q = 0;
-    if (!SolveQ(p, m, n, &q)) {
-      ++unsolved;
-      continue;
-    }
-    max_q = std::max(max_q, q);
-    edges.push_back(GpEdge{p, q, m, n});
-  }
+  const int64_t unsolved = rows_seen - static_cast<int64_t>(edges.size());
   const double t_scan = Seconds(t0);
 
   scan::ScanPlanRequest preq;
@@ -1946,39 +1915,32 @@ bool BuildCompactGraph(const Options& opt, std::vector<int64_t>* nodes,
                : UINT32_MAX;
   };
 
-  const std::string esql = "SELECT p, m_k, n_k FROM read_parquet(" +
-                           QuoteList(epaths) +
-                           ") WHERE p <= " + std::to_string(opt.max_p);
+  const std::string ewhere = "p <= " + std::to_string(opt.max_p);
   off->assign(nodes->size() + 1, 0);
   int64_t scanned = 0;
-  if (!StreamQuery(&con, esql, 3,
-                   [&](int64_t p, int32_t m, int32_t n) {
-                     ++scanned;
-                     int64_t q = 0;
-                     if (!SolveQ(p, m, n, &q)) return;
-                     if (q < 3 || q > opt.max_p || find(q) == UINT32_MAX)
-                       return;
-                     const uint32_t pi = find(p);
-                     if (pi == UINT32_MAX) return;
-                     ++(*off)[pi + 1];
-                   },
-                   error))
+  if (!primeparts::graph::ScanPartitionEdges(
+          &con, epaths, ewhere, 3, opt.max_p,
+          [&](int64_t p, int32_t, int32_t, int64_t q) {
+            if (find(q) == UINT32_MAX) return;
+            const uint32_t pi = find(p);
+            if (pi == UINT32_MAX) return;
+            ++(*off)[pi + 1];
+          },
+          &scanned, error))
     return false;
   for (size_t i = 0; i < nodes->size(); ++i) (*off)[i + 1] += (*off)[i];
   inedge->assign(off->back(), InEdge{0, 0});
   std::vector<uint32_t> fill(off->begin(), off->end() - 1);
-  if (!StreamQuery(&con, esql, 3,
-                   [&](int64_t p, int32_t m, int32_t n) {
-                     int64_t q = 0;
-                     if (!SolveQ(p, m, n, &q)) return;
-                     if (q < 3 || q > opt.max_p) return;
-                     const uint32_t qi = find(q);
-                     if (qi == UINT32_MAX) return;
-                     const uint32_t pi = find(p);
-                     if (pi == UINT32_MAX) return;
-                     (*inedge)[fill[pi]++] = {qi, n};
-                   },
-                   error))
+  if (!primeparts::graph::ScanPartitionEdges(
+          &con, epaths, ewhere, 3, opt.max_p,
+          [&](int64_t p, int32_t, int32_t n, int64_t q) {
+            const uint32_t qi = find(q);
+            if (qi == UINT32_MAX) return;
+            const uint32_t pi = find(p);
+            if (pi == UINT32_MAX) return;
+            (*inedge)[fill[pi]++] = {qi, n};
+          },
+          nullptr, error))
     return false;
   *rows = scanned;
   *t_read = Seconds(t0);

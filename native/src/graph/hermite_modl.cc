@@ -8,6 +8,31 @@
 
 namespace primeparts::graph {
 
+GiNaC::ex He(int n, const GiNaC::symbol& x) {
+  GiNaC::ex a = 1;
+  GiNaC::ex b = x;
+  if (n == 0) return a;
+  for (int k = 1; k < n; ++k) {
+    GiNaC::ex c = GiNaC::expand(x * b - k * a);
+    a = b;
+    b = c;
+  }
+  return b;
+}
+
+std::map<int, GiNaC::ex> ToHermite(GiNaC::ex P, const GiNaC::symbol& x) {
+  std::map<int, GiNaC::ex> out;
+  P = GiNaC::expand(P);
+  while (!P.is_zero()) {
+    int d = P.degree(x);
+    GiNaC::ex c = P.lcoeff(x);
+    out[d] = c;
+    P = GiNaC::expand(P - c * He(d, x));
+    if (d == 0) break;
+  }
+  return out;
+}
+
 namespace {
 
 void BuildHermite(int n, uint64_t ell, nmod_poly_t out) {

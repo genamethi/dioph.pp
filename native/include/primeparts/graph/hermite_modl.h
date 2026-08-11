@@ -1,9 +1,16 @@
 #pragma once
 
+#include <ginac/ginac.h>
+
 #include <cstdint>
+#include <map>
 #include <vector>
 
 namespace primeparts::graph {
+
+GiNaC::ex He(int n, const GiNaC::symbol& x);
+
+std::map<int, GiNaC::ex> ToHermite(GiNaC::ex P, const GiNaC::symbol& x);
 
 struct HermiteRootsReport {
   uint64_t ell = 0;
