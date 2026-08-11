@@ -99,6 +99,9 @@ class QueryService {
 
   std::vector<PartitionTuple> LookupPartitions(int64_t p, std::string* error,
                                                const ScanControl& ctl = {});
+  std::vector<PartitionTuple> LookupPartitions(int64_t p, int32_t k,
+                                               std::string* error,
+                                               const ScanControl& ctl = {});
 
   std::vector<ScanHit> ScanByK(int32_t k, int64_t p_lo, int64_t p_hi,
                                int64_t limit, std::string* error,

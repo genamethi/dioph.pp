@@ -37,6 +37,7 @@
 #include "primeparts/partition_math.h"
 #include "primeparts/graph/hermite_modl.h"
 #include "primeparts/graph/partition_scan.h"
+#include "primeparts/parts_expand.h"
 #include "primeparts/query/materialize.h"
 #include "primeparts/scan/scan_plan.h"
 
@@ -47,7 +48,6 @@ namespace scan = primeparts::scan;
 namespace {
 
 using primeparts::IPow;
-using primeparts::SolveQ;
 
 struct Options {
   std::string config_path;
@@ -536,18 +536,34 @@ bool ReduceToBasis(std::vector<Generator>* gens, std::vector<int>* degrees) {
   return true;
 }
 
+bool PlanPartsPaths(const Options& opt, int64_t min_p, int64_t max_p,
+                    primeparts::graph::PartsPaths* out, double* t_plan,
+                    std::string* error) {
+  auto range = iceberg::Expressions::And(
+      iceberg::Expressions::GreaterThanOrEqual("p",
+                                               iceberg::Literal::Long(min_p)),
+      iceberg::Expressions::LessThanOrEqual("p",
+                                            iceberg::Literal::Long(max_p)));
+  scan::ScanPlanRequest freq;
+  freq.select = {"p", "hit_mask"};
+  freq.filter = range;
+  scan::ScanPlanRequest hreq;
+  hreq.select = {"p", "m_k", "n_k", "q_k"};
+  hreq.filter = range;
+  double t_flat = 0.0;
+  double t_higher = 0.0;
+  if (!PlanPaths(opt, "flat_parts", freq, &out->flat, &t_flat, error))
+    return false;
+  if (!PlanPaths(opt, "higher_parts", hreq, &out->higher, &t_higher, error))
+    return false;
+  if (t_plan) *t_plan = t_flat + t_higher;
+  return true;
+}
+
 bool ReadEdges(const Options& opt, std::vector<Edge>* out, int64_t* rows_scanned,
                double* t_plan, double* t_read, std::string* error) {
-  scan::ScanPlanRequest request;
-  request.select = {"p", "m_k", "n_k"};
-  request.filter = iceberg::Expressions::And(
-      iceberg::Expressions::GreaterThanOrEqual(
-          "p", iceberg::Literal::Long(opt.min_p)),
-      iceberg::Expressions::LessThanOrEqual("p",
-                                            iceberg::Literal::Long(opt.max_p)));
-
-  std::vector<std::string> paths;
-  if (!PlanPaths(opt, "partitions", request, &paths, t_plan, error))
+  primeparts::graph::PartsPaths paths;
+  if (!PlanPartsPaths(opt, opt.min_p, opt.max_p, &paths, t_plan, error))
     return false;
   if (paths.empty()) return true;
 
@@ -556,34 +572,46 @@ bool ReadEdges(const Options& opt, std::vector<Edge>* out, int64_t* rows_scanned
   duckdb::DuckDB db(nullptr, &cfg);
   duckdb::Connection con(db);
 
-  const std::string where = "p >= " + std::to_string(opt.min_p) +
-                            " AND p <= " + std::to_string(opt.max_p);
+  primeparts::graph::EdgeFilter filter;
+  filter.min_p = opt.min_p;
+  filter.max_p = opt.max_p;
+  filter.min_q = opt.min_p;
+  filter.max_q = opt.max_p;
 
   const auto t0 = std::chrono::steady_clock::now();
+  primeparts::graph::ScanCounts counts;
   if (!primeparts::graph::ScanPartitionEdges(
-          &con, paths, where, opt.min_p, opt.max_p,
+          &con, paths, filter,
           [&](int64_t p, int32_t m, int32_t n, int64_t q) {
             out->push_back(Edge{q, p, m, n});
           },
-          rows_scanned, error))
+          &counts, error))
     return false;
+  if (rows_scanned) *rows_scanned += counts.flat_rows + counts.higher_rows;
   *t_read = Seconds(t0);
   return true;
 }
 
 int RunBasis(const Options& opt) {
-  scan::ScanPlanRequest request;
-  request.select = {"m_k", "n_k"};
+  scan::ScanPlanRequest freq;
+  freq.select = {"hit_mask"};
+  scan::ScanPlanRequest hreq;
+  hreq.select = {"m_k", "n_k"};
 
-  std::vector<std::string> paths;
+  std::vector<std::string> fpaths;
+  std::vector<std::string> hpaths;
   double t_plan = 0.0;
+  double t_plan_h = 0.0;
   std::string error;
-  if (!PlanPaths(opt, "partitions", request, &paths, &t_plan, &error)) {
+  if (!PlanPaths(opt, "flat_parts", freq, &fpaths, &t_plan, &error) ||
+      !PlanPaths(opt, "higher_parts", hreq, &hpaths, &t_plan_h, &error)) {
     std::fprintf(stderr, "pp-graph: %s\n", error.c_str());
     return 1;
   }
-  if (paths.empty()) {
-    std::fprintf(stderr, "pp-graph: partitions has no data files\n");
+  t_plan += t_plan_h;
+  if (fpaths.empty() && hpaths.empty()) {
+    std::fprintf(stderr,
+                 "pp-graph: flat_parts and higher_parts have no data files\n");
     return 1;
   }
 
@@ -592,26 +620,64 @@ int RunBasis(const Options& opt) {
   duckdb::DuckDB db(nullptr, &cfg);
   duckdb::Connection con(db);
 
-  const std::string sql =
-      "SELECT m_k, n_k, count(*) AS occurrences FROM read_parquet(" +
-      QuoteList(paths) + ") GROUP BY m_k, n_k ORDER BY n_k, m_k";
-
   auto t0 = std::chrono::steady_clock::now();
-  auto result = con.Query(sql);
-  if (result->HasError()) {
-    std::fprintf(stderr, "pp-graph: %s\n", result->GetError().c_str());
-    return 1;
-  }
   std::vector<Generator> gens;
   int64_t total_edges = 0;
-  for (auto& row : *result) {
-    Generator g;
-    g.m = row.GetValue<int32_t>(0);
-    g.n = row.GetValue<int32_t>(1);
-    g.occurrences = row.GetValue<int64_t>(2);
-    total_edges += g.occurrences;
-    gens.push_back(std::move(g));
+
+  if (!fpaths.empty()) {
+    int64_t hist[64] = {0};
+    std::vector<uint64_t> masks;
+    masks.reserve(4096);
+    auto flat = con.Query("SELECT hit_mask FROM read_parquet(" +
+                          QuoteList(fpaths) + ")");
+    if (flat->HasError()) {
+      std::fprintf(stderr, "pp-graph: %s\n", flat->GetError().c_str());
+      return 1;
+    }
+    for (auto& row : *flat) {
+      masks.push_back(static_cast<uint64_t>(row.GetValue<int64_t>(0)));
+      if (masks.size() == masks.capacity()) {
+        primeparts::MaskHistogram(masks.data(),
+                                  static_cast<int64_t>(masks.size()), hist);
+        masks.clear();
+      }
+    }
+    if (!masks.empty()) {
+      primeparts::MaskHistogram(masks.data(),
+                                static_cast<int64_t>(masks.size()), hist);
+    }
+    for (int m = 0; m < 64; ++m) {
+      if (hist[m] == 0) continue;
+      Generator g;
+      g.m = m;
+      g.n = 1;
+      g.occurrences = hist[m];
+      total_edges += g.occurrences;
+      gens.push_back(std::move(g));
+    }
   }
+
+  if (!hpaths.empty()) {
+    auto higher = con.Query(
+        "SELECT m_k, n_k, count(*) AS occurrences FROM read_parquet(" +
+        QuoteList(hpaths) + ") GROUP BY m_k, n_k");
+    if (higher->HasError()) {
+      std::fprintf(stderr, "pp-graph: %s\n", higher->GetError().c_str());
+      return 1;
+    }
+    for (auto& row : *higher) {
+      Generator g;
+      g.m = row.GetValue<int32_t>(0);
+      g.n = row.GetValue<int32_t>(1);
+      g.occurrences = row.GetValue<int64_t>(2);
+      total_edges += g.occurrences;
+      gens.push_back(std::move(g));
+    }
+  }
+
+  std::sort(gens.begin(), gens.end(), [](const Generator& a, const Generator& b) {
+    return a.n != b.n ? a.n < b.n : a.m < b.m;
+  });
   const double t_scan = Seconds(t0);
 
   GiNaC::symbol x("x");
@@ -1128,16 +1194,15 @@ struct GpEdge {
 
 int RunPaths(const Options& opt) {
   std::string error;
-  scan::ScanPlanRequest request;
-  request.select = {"p", "m_k", "n_k"};
-  std::vector<std::string> paths;
+  primeparts::graph::PartsPaths paths;
   double t_plan = 0.0;
-  if (!PlanPaths(opt, "partitions", request, &paths, &t_plan, &error)) {
+  if (!PlanPartsPaths(opt, 0, opt.max_p, &paths, &t_plan, &error)) {
     std::fprintf(stderr, "pp-graph: %s\n", error.c_str());
     return 1;
   }
   if (paths.empty()) {
-    std::fprintf(stderr, "pp-graph: partitions has no data files\n");
+    std::fprintf(stderr,
+                 "pp-graph: flat_parts and higher_parts have no data files\n");
     return 1;
   }
 
@@ -1149,44 +1214,52 @@ int RunPaths(const Options& opt) {
   auto t0 = std::chrono::steady_clock::now();
   const int64_t n_floor = opt.he_n >= 2 ? opt.he_n : 2;
   std::vector<GpEdge> edges;
-  int64_t rows_seen = 0;
   int64_t max_q = 0;
-  if (!primeparts::graph::ScanPartitionEdges(
-          &con, paths, "n_k >= " + std::to_string(n_floor), INT64_MIN, INT64_MAX,
-          [&](int64_t p, int32_t m, int32_t n, int64_t q) {
-            max_q = std::max(max_q, q);
-            edges.push_back(GpEdge{p, q, m, n});
-          },
-          &rows_seen, &error)) {
-    std::fprintf(stderr, "pp-graph: %s\n", error.c_str());
-    return 1;
+  {
+    primeparts::graph::EdgeFilter filter;
+    filter.min_n = static_cast<int32_t>(n_floor);
+    primeparts::graph::ScanCounts counts;
+    if (!primeparts::graph::ScanPartitionEdges(
+            &con, paths, filter,
+            [&](int64_t p, int32_t m, int32_t n, int64_t q) {
+              max_q = std::max(max_q, q);
+              edges.push_back(GpEdge{p, q, m, n});
+            },
+            &counts, &error)) {
+      std::fprintf(stderr, "pp-graph: %s\n", error.c_str());
+      return 1;
+    }
   }
-  const int64_t unsolved = rows_seen - static_cast<int64_t>(edges.size());
   const double t_scan = Seconds(t0);
 
-  scan::ScanPlanRequest preq;
-  preq.select = {"p", "m_k", "n_k"};
-  preq.filter = iceberg::Expressions::LessThanOrEqual(
-      "p", iceberg::Literal::Long(max_q));
-  std::vector<std::string> ppaths;
+  std::vector<int64_t> want_q;
+  want_q.reserve(edges.size());
+  for (const auto& e : edges) want_q.push_back(e.q);
+  std::sort(want_q.begin(), want_q.end());
+  want_q.erase(std::unique(want_q.begin(), want_q.end()), want_q.end());
+
+  primeparts::graph::PartsPaths ppaths;
   double t_pplan = 0.0;
-  if (!PlanPaths(opt, "partitions", preq, &ppaths, &t_pplan, &error)) {
+  if (!PlanPartsPaths(opt, 0, max_q, &ppaths, &t_pplan, &error)) {
     std::fprintf(stderr, "pp-graph: %s\n", error.c_str());
     return 1;
   }
   std::unordered_map<int64_t, std::vector<std::pair<int32_t, int32_t>>> parents;
+  parents.reserve(want_q.size());
   t0 = std::chrono::steady_clock::now();
-  if (!ppaths.empty()) {
-    auto presult = con.Query("SELECT p, m_k, n_k FROM read_parquet(" +
-                             QuoteList(ppaths) + ") WHERE p <= " +
-                             std::to_string(max_q));
-    if (presult->HasError()) {
-      std::fprintf(stderr, "pp-graph: %s\n", presult->GetError().c_str());
+  if (!ppaths.empty() && !want_q.empty()) {
+    primeparts::graph::EdgeFilter pfilter;
+    pfilter.max_p = max_q;
+    pfilter.p_in = &want_q;
+    primeparts::graph::ScanCounts pcounts;
+    if (!primeparts::graph::ScanPartitionEdges(
+            &con, ppaths, pfilter,
+            [&](int64_t p, int32_t m, int32_t n, int64_t) {
+              parents[p].push_back({m, n});
+            },
+            &pcounts, &error)) {
+      std::fprintf(stderr, "pp-graph: %s\n", error.c_str());
       return 1;
-    }
-    for (auto& row : *presult) {
-      parents[row.GetValue<int64_t>(0)].push_back(
-          {row.GetValue<int32_t>(1), row.GetValue<int32_t>(2)});
     }
   }
   const double t_parent = Seconds(t0);
@@ -1270,8 +1343,7 @@ int RunPaths(const Options& opt) {
   const double t_eval = Seconds(t0);
 
   std::printf("pp-graph paths (n >= 2 grandparent evaluation)\n");
-  std::printf("  n>=2 edges                : %zu (unsolved %" PRId64 ")\n",
-              edges.size(), unsolved);
+  std::printf("  n>=2 edges                : %zu\n", edges.size());
   std::printf("  parentless (k(q)=0)       : %" PRId64 "\n", parentless);
   std::printf("  grandparent paths         : %" PRId64 "\n", path_count);
   std::printf("  reading A (parent gaps)   : evals=%" PRId64 " hits=%" PRId64
@@ -1877,14 +1949,10 @@ bool BuildCompactGraph(const Options& opt, std::vector<int64_t>* nodes,
   double t_plan = 0.0;
   if (!PlanPaths(opt, "primes", preq, &ppaths, &t_plan, error)) return false;
 
-  scan::ScanPlanRequest ereq;
-  ereq.select = {"p", "m_k", "n_k"};
-  ereq.filter = iceberg::Expressions::LessThanOrEqual(
-      "p", iceberg::Literal::Long(opt.max_p));
-  std::vector<std::string> epaths;
-  if (!PlanPaths(opt, "partitions", ereq, &epaths, &t_plan, error)) return false;
+  primeparts::graph::PartsPaths epaths;
+  if (!PlanPartsPaths(opt, 0, opt.max_p, &epaths, &t_plan, error)) return false;
   if (ppaths.empty() || epaths.empty()) {
-    *error = "primes or partitions has no data files in window";
+    *error = "primes, flat_parts or higher_parts has no data files in window";
     return false;
   }
 
@@ -1915,24 +1983,27 @@ bool BuildCompactGraph(const Options& opt, std::vector<int64_t>* nodes,
                : UINT32_MAX;
   };
 
-  const std::string ewhere = "p <= " + std::to_string(opt.max_p);
+  primeparts::graph::EdgeFilter efilter;
+  efilter.max_p = opt.max_p;
+  efilter.min_q = 3;
+  efilter.max_q = opt.max_p;
   off->assign(nodes->size() + 1, 0);
-  int64_t scanned = 0;
+  primeparts::graph::ScanCounts ecounts;
   if (!primeparts::graph::ScanPartitionEdges(
-          &con, epaths, ewhere, 3, opt.max_p,
+          &con, epaths, efilter,
           [&](int64_t p, int32_t, int32_t, int64_t q) {
             if (find(q) == UINT32_MAX) return;
             const uint32_t pi = find(p);
             if (pi == UINT32_MAX) return;
             ++(*off)[pi + 1];
           },
-          &scanned, error))
+          &ecounts, error))
     return false;
   for (size_t i = 0; i < nodes->size(); ++i) (*off)[i + 1] += (*off)[i];
   inedge->assign(off->back(), InEdge{0, 0});
   std::vector<uint32_t> fill(off->begin(), off->end() - 1);
   if (!primeparts::graph::ScanPartitionEdges(
-          &con, epaths, ewhere, 3, opt.max_p,
+          &con, epaths, efilter,
           [&](int64_t p, int32_t, int32_t n, int64_t q) {
             const uint32_t qi = find(q);
             if (qi == UINT32_MAX) return;
@@ -1942,7 +2013,7 @@ bool BuildCompactGraph(const Options& opt, std::vector<int64_t>* nodes,
           },
           nullptr, error))
     return false;
-  *rows = scanned;
+  *rows = ecounts.flat_rows + ecounts.higher_rows;
   *t_read = Seconds(t0);
   return true;
 }

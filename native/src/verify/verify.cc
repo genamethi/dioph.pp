@@ -1,6 +1,6 @@
 #include "primeparts/verify/verify.h"
 
-#include "primeparts/partition_math.h"
+#include "primeparts/parts_expand.h"
 
 #include "primeparts/common/thread_pool.h"
 #include "primeparts/core.h"
@@ -108,11 +108,70 @@ class PrimeRankCheck : public Check {
   CheckSpec spec_;
 };
 
-class PartitionCheck : public Check {
+class FlatPartsCheck : public Check {
  public:
-  PartitionCheck() {
-    spec_.table = "partitions";
-    spec_.select = {"p", "m_k", "n_k"};
+  FlatPartsCheck() {
+    spec_.table = "flat_parts";
+    spec_.select = {"p", "hit_mask"};
+  }
+  const CheckSpec& spec() const override { return spec_; }
+  std::unique_ptr<ShardState> NewShard() const override {
+    return std::make_unique<ShardState>();
+  }
+  bool Eval(const arrow::RecordBatch& batch, const std::string&, ShardState&,
+            CheckResult& out, int max_examples,
+            std::string* error) const override {
+    const int64_t* p = scan::BindInt64(batch, "p", error);
+    const int64_t* hm = scan::BindInt64(batch, "hit_mask", error);
+    if (!p || !hm) return false;
+    const int64_t n = batch.num_rows();
+
+    for (int64_t i = 0; i < n; ++i) {
+      ++out.rows_checked;
+      const uint64_t mask = static_cast<uint64_t>(hm[i]);
+      const int top = p[i] > 0 ? 63 - __builtin_clzll(
+                                          static_cast<uint64_t>(p[i]))
+                               : 0;
+      std::string d;
+      if (mask == 0) {
+        d = "empty hit_mask";
+      } else if ((mask & 1u) != 0) {
+        d = "bit 0 set; m starts at 1";
+      } else if ((mask >> 63) != 0) {
+        d = "bit 63 set; m is bounded by floor(log2 p)";
+      } else if ((mask >> (top + 1)) != 0) {
+        d = "hit_mask has a bit above floor(log2 p)=" + std::to_string(top);
+      } else {
+        primeparts::ForEachPart(p[i], mask, [&](int32_t m, int64_t q) {
+          if (!d.empty()) return;
+          if (q < 2) {
+            d = "m_k=" + std::to_string(m) + " gives q_k=" +
+                std::to_string(q);
+          } else if (!n_is_prime(static_cast<ulong>(q))) {
+            d = "q_k=" + std::to_string(q) + " not prime (m_k=" +
+                std::to_string(m) + ")";
+          }
+        });
+      }
+      if (!d.empty()) {
+        ++out.violations;
+        if (static_cast<int>(out.examples.size()) < max_examples) {
+          out.examples.push_back({p[i], std::move(d)});
+        }
+      }
+    }
+    return true;
+  }
+
+ private:
+  CheckSpec spec_;
+};
+
+class HigherPartsCheck : public Check {
+ public:
+  HigherPartsCheck() {
+    spec_.table = "higher_parts";
+    spec_.select = {"p", "m_k", "n_k", "q_k"};
   }
   const CheckSpec& spec() const override { return spec_; }
   std::unique_ptr<ShardState> NewShard() const override {
@@ -124,16 +183,16 @@ class PartitionCheck : public Check {
     const int64_t* p = scan::BindInt64(batch, "p", error);
     const int32_t* m_k = scan::BindInt32(batch, "m_k", error);
     const int32_t* n_k = scan::BindInt32(batch, "n_k", error);
-    if (!p || !m_k || !n_k) return false;
+    const int64_t* q_k = scan::BindInt64(batch, "q_k", error);
+    if (!p || !m_k || !n_k || !q_k) return false;
     const int64_t n = batch.num_rows();
 
     for (int64_t i = 0; i < n; ++i) {
       ++out.rows_checked;
       const int32_t m = m_k[i];
       const int32_t nn = n_k[i];
-      int64_t q = 0;
-      const bool solved = primeparts::SolveQ(p[i], m, nn, &q);
-      const bool not_allowed = m < 1 || m > 63 || nn < 1 || !solved || q < 2;
+      const int64_t q = q_k[i];
+      const bool not_allowed = m < 1 || m > 62 || nn < 2 || q < 2;
       const bool composite_q =
           !not_allowed && !n_is_prime(static_cast<ulong>(q));
       const bool unsatisfied =
@@ -147,8 +206,7 @@ class PartitionCheck : public Check {
           std::string d;
           if (not_allowed)
             d = "not allowed: m_k=" + std::to_string(m) +
-                " n_k=" + std::to_string(nn) +
-                (solved ? " q_k=" + std::to_string(q) : " q_k unsolvable");
+                " n_k=" + std::to_string(nn) + " q_k=" + std::to_string(q);
           else if (unsatisfied)
             d = "unsatisfied: p != 2^" + std::to_string(m) + " + " +
                 std::to_string(q) + "^" + std::to_string(nn);
@@ -183,7 +241,8 @@ std::shared_ptr<iceberg::Expression> BuildWindowFilter(const Window& w) {
 std::vector<std::unique_ptr<Check>> AllChecks() {
   std::vector<std::unique_ptr<Check>> checks;
   checks.push_back(std::make_unique<PrimeRankCheck>());
-  checks.push_back(std::make_unique<PartitionCheck>());
+  checks.push_back(std::make_unique<FlatPartsCheck>());
+  checks.push_back(std::make_unique<HigherPartsCheck>());
   return checks;
 }
 

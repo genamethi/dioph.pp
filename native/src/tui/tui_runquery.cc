@@ -230,7 +230,7 @@ void run_query_worker(App* a, Preset p) {
       out.push_back({r, "k", pi->k});  // k is dispatchable (-> by-k)
       std::snprintf(r, sizeof r, "prime_rank           %lld", (long long)pi->prime_rank);
       out.push_back({r, "", 0});
-      for (const auto& t : a->qs->LookupPartitions(pv, &err, ctl)) {
+      for (const auto& t : a->qs->LookupPartitions(pv, pi->k, &err, ctl)) {
         std::snprintf(r, sizeof r, "partition            2^%d + %lld^%d", t.m_k,
                       (long long)t.q_k, t.n_k);
         out.push_back({r, "q_k", t.q_k});  // q_k is a prime (-> lookup)

@@ -80,7 +80,7 @@ int q_pget(lua_State* L) {
   int64_t qv = opt_int(L, "q_k", 0, &fq);
   int64_t mv = opt_int(L, "m_k", 0, &fm);
   int64_t nv = opt_int(L, "n_k", 0, &fn);
-  auto parts = qs->LookupPartitions(p, &e);
+  auto parts = qs->LookupPartitions(p, info->k, &e);
 
   lua_newtable(L);
   lua_pushinteger(L, info->p); lua_setfield(L, -2, "p");

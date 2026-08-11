@@ -1,6 +1,6 @@
 #include "primeparts/query/query_service.h"
 
-#include "primeparts/partition_math.h"
+#include "primeparts/parts_expand.h"
 
 #include <algorithm>
 #include <atomic>
@@ -163,47 +163,99 @@ std::optional<PrimeInfo> QueryService::LookupPrime(int64_t p, std::string* error
 
 std::vector<PartitionTuple> QueryService::LookupPartitions(
     int64_t p, std::string* error, const ScanControl& ctl) {
-  std::vector<PartitionTuple> out;
-  fs::path meta = impl_->ResolveMeta("partitions", error);
-  if (meta.empty()) return out;
+  return LookupPartitions(p, -1, error, ctl);
+}
 
+std::vector<PartitionTuple> QueryService::LookupPartitions(
+    int64_t p, int32_t k, std::string* error, const ScanControl& ctl) {
+  std::vector<PartitionTuple> out;
   auto filter = iceberg::Expressions::Equal("p", iceberg::Literal::Long(p));
   std::string e;
-  auto reader = primeparts::SourceTableReader::OpenMetadata(
-      meta, {"p", "m_k", "n_k"}, filter, &e);
-  if (!reader) {
-    if (error) *error = "open partitions: " + e;
-    return out;
-  }
 
-  std::shared_ptr<arrow::RecordBatch> batch;
-  while (true) {
-    if (ctl.cancel && ctl.cancel->load()) return out;
-    if (!reader->Next(&batch, &e)) {
-      if (error) *error = "scan partitions: " + e;
+  uint64_t mask = 0;
+  {
+    fs::path meta = impl_->ResolveMeta("flat_parts", error);
+    if (meta.empty()) return out;
+    auto reader = primeparts::SourceTableReader::OpenMetadata(
+        meta, {"p", "hit_mask"}, filter, &e);
+    if (!reader) {
+      if (error) *error = "open flat_parts: " + e;
       return out;
     }
-    if (!batch) break;
-    const int64_t* pa = scan::BindInt64(*batch, "p", &e);
-    const int32_t* ma = scan::BindInt32(*batch, "m_k", &e);
-    const int32_t* na = scan::BindInt32(*batch, "n_k", &e);
-    if (!pa || !ma || !na) {
-      if (error) *error = "partitions batch: " + e;
-      return out;
-    }
-    for (int64_t i = 0; i < batch->num_rows(); ++i) {
-      if (pa[i] != p) continue;
-      int64_t q = 0;
-      if (!SolveQ(pa[i], ma[i], na[i], &q)) {
-        if (error)
-          *error = "partitions: no q_k for p=" + std::to_string(pa[i]) +
-                   " m_k=" + std::to_string(ma[i]) +
-                   " n_k=" + std::to_string(na[i]);
+    std::shared_ptr<arrow::RecordBatch> batch;
+    while (true) {
+      if (ctl.cancel && ctl.cancel->load()) return out;
+      if (!reader->Next(&batch, &e)) {
+        if (error) *error = "scan flat_parts: " + e;
         return out;
       }
-      out.push_back(PartitionTuple{.m_k = ma[i], .n_k = na[i], .q_k = q});
+      if (!batch) break;
+      const int64_t* pa = scan::BindInt64(*batch, "p", &e);
+      const int64_t* ha = scan::BindInt64(*batch, "hit_mask", &e);
+      if (!pa || !ha) {
+        if (error) *error = "flat_parts batch: " + e;
+        return out;
+      }
+      for (int64_t i = 0; i < batch->num_rows(); ++i) {
+        if (pa[i] == p) mask = static_cast<uint64_t>(ha[i]);
+      }
     }
   }
+  ForEachPart(p, mask, [&](int32_t m, int64_t q) {
+    out.push_back(PartitionTuple{.m_k = m, .n_k = 1, .q_k = q});
+  });
+
+  const int32_t expected = k >= 0 ? k - MaskCount(mask) : -1;
+  if (expected == 0) return out;
+
+  const size_t flat_rows = out.size();
+  {
+    fs::path meta = impl_->ResolveMeta("higher_parts", error);
+    if (meta.empty()) return out;
+    auto reader = primeparts::SourceTableReader::OpenMetadata(
+        meta, {"p", "m_k", "n_k", "q_k"}, filter, &e);
+    if (!reader) {
+      if (error) *error = "open higher_parts: " + e;
+      return out;
+    }
+    std::shared_ptr<arrow::RecordBatch> batch;
+    while (true) {
+      if (ctl.cancel && ctl.cancel->load()) return out;
+      if (!reader->Next(&batch, &e)) {
+        if (error) *error = "scan higher_parts: " + e;
+        return out;
+      }
+      if (!batch) break;
+      const int64_t* pa = scan::BindInt64(*batch, "p", &e);
+      const int32_t* ma = scan::BindInt32(*batch, "m_k", &e);
+      const int32_t* na = scan::BindInt32(*batch, "n_k", &e);
+      const int64_t* qa = scan::BindInt64(*batch, "q_k", &e);
+      if (!pa || !ma || !na || !qa) {
+        if (error) *error = "higher_parts batch: " + e;
+        return out;
+      }
+      for (int64_t i = 0; i < batch->num_rows(); ++i) {
+        if (pa[i] != p) continue;
+        out.push_back(PartitionTuple{.m_k = ma[i], .n_k = na[i], .q_k = qa[i]});
+      }
+    }
+  }
+
+  if (expected >= 0 &&
+      static_cast<size_t>(expected) != out.size() - flat_rows) {
+    if (error) {
+      *error = "parts: p=" + std::to_string(p) + " k=" + std::to_string(k) +
+               " implies " + std::to_string(expected) +
+               " higher_parts rows but found " +
+               std::to_string(out.size() - flat_rows);
+    }
+    return {};
+  }
+
+  std::sort(out.begin(), out.end(),
+            [](const PartitionTuple& a, const PartitionTuple& b) {
+              return a.m_k < b.m_k;
+            });
   return out;
 }
 
@@ -462,7 +514,7 @@ TableRows QueryService::ReadTable(const std::string& table,
 const std::vector<std::string>& QueryService::SchemaFields() {
   if (impl_->schema_loaded) return impl_->schema_fields;
   std::vector<std::string>& out = impl_->schema_fields;
-  for (const char* tbl : {"primes", "partitions"}) {
+  for (const char* tbl : {"primes", "flat_parts", "higher_parts"}) {
     auto t = impl_->catalog->LoadTable(
         iceberg::TableIdentifier{.ns = impl_->ns, .name = tbl});
     if (!t.has_value()) continue;

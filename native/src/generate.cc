@@ -937,7 +937,7 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
     ResumeState resume;
     if (catalog &&
         !LoadAlignedResume(catalog, options.ns,
-                           {"primes", "partitions"}, "primes",
+                           {"primes", "flat_parts", "higher_parts"}, "primes",
                            primeparts::BucketFields{"p_bucket_version",
                                                     "p_bucket"},
                            policy.bucket_version, &resume, &error)) {
