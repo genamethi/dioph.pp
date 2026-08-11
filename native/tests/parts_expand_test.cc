@@ -111,14 +111,14 @@ class PartsExpandTest : public ::testing::Test {
   static void TearDownTestSuite() { pp_shutdown(); }
 };
 
-TEST_F(PartsExpandTest, EmptyMaskExpandsToNothing) {
+TEST_F(PartsExpandTest, EmptyMaskExpandsEmpty) {
   int32_t m[64];
   int64_t q[64];
   EXPECT_EQ(ExpandMask(101, 0, m, q), 0);
   EXPECT_EQ(MaskCount(0), 0);
 }
 
-TEST_F(PartsExpandTest, BitZeroExpandsToPMinusOne) {
+TEST_F(PartsExpandTest, BitZeroGivesPMinusOne) {
   int32_t m[64];
   int64_t q[64];
   ASSERT_EQ(ExpandMask(101, 1, m, q), 1);
@@ -126,7 +126,7 @@ TEST_F(PartsExpandTest, BitZeroExpandsToPMinusOne) {
   EXPECT_EQ(q[0], 100);
 }
 
-TEST_F(PartsExpandTest, BitSixtyThreeDoesNotShiftIntoTheSignBitAsSigned) {
+TEST_F(PartsExpandTest, BitSixtyThreeAvoidsSignedShiftUb) {
   int32_t m[64];
   int64_t q[64];
   const uint64_t mask = uint64_t{1} << 63;
@@ -136,7 +136,7 @@ TEST_F(PartsExpandTest, BitSixtyThreeDoesNotShiftIntoTheSignBitAsSigned) {
   EXPECT_EQ(PartQ(0, 63), INT64_MIN);
 }
 
-TEST_F(PartsExpandTest, FullMaskYieldsAscendingBitsAcrossAllSixtyFour) {
+TEST_F(PartsExpandTest, FullMaskYieldsAllBitsAscending) {
   int32_t m[64];
   int64_t q[64];
   ASSERT_EQ(ExpandMask(12345, ~uint64_t{0}, m, q), 64);
@@ -144,7 +144,7 @@ TEST_F(PartsExpandTest, FullMaskYieldsAscendingBitsAcrossAllSixtyFour) {
   for (int i = 1; i < 64; ++i) EXPECT_LT(m[i - 1], m[i]);
 }
 
-TEST_F(PartsExpandTest, OffsetsAreTheExclusiveScanOfPopcounts) {
+TEST_F(PartsExpandTest, OffsetsAreExclusiveScanOfPopcounts) {
   std::vector<uint64_t> masks{0, 1, 0b1010, ~uint64_t{0}, 0b100, 0};
   std::vector<int64_t> got(masks.size() + 1);
   MaskOffsets(masks.data(), static_cast<int64_t>(masks.size()), got.data());
@@ -231,7 +231,7 @@ TEST_F(PartsExpandTest, Avx2AgreesWithScalarOnRandomMasks) {
   EXPECT_EQ(qa, qb);
 }
 
-TEST_F(PartsExpandTest, FoldMatchesTheKnownTuplesForElevenAndTwentyNine) {
+TEST_F(PartsExpandTest, FoldMatchesKnownTuples) {
   pp_batch_result r;
   pp_batch_result_init(&r);
   ASSERT_EQ(pp_process_rank_batch(1, 10, &r), PP_OK);

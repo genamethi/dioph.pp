@@ -184,7 +184,7 @@ TEST_F(WriterTest, WritesFileWithDescriptorAndBounds) {
   EXPECT_EQ(file.data_file->lower_bounds.at(2).size(), 4u);
 }
 
-TEST_F(WriterTest, MaterializesPartitionColumnsAbsentFromTheInputBatch) {
+TEST_F(WriterTest, MaterializesAbsentPartitionColumns) {
   std::string error;
   auto schema = primeparts::PrimesSchema();
   auto spec_r = primeparts::BucketPartitionSpec(*schema, &error);
