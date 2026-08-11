@@ -14,7 +14,8 @@ class SortOrder;
 namespace primeparts {
 
 std::shared_ptr<iceberg::Schema> PrimesSchema();
-std::shared_ptr<iceberg::Schema> PartitionsSchema();
+std::shared_ptr<iceberg::Schema> FlatPartsSchema();
+std::shared_ptr<iceberg::Schema> HigherPartsSchema();
 
 std::shared_ptr<iceberg::PartitionSpec> BucketPartitionSpec(
     const iceberg::Schema& schema, std::string* error);

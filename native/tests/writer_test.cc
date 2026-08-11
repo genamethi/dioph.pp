@@ -2,6 +2,8 @@
 #include "primeparts/writer.h"
 
 #include <arrow/api.h>
+#include <arrow/io/file.h>
+#include <parquet/arrow/reader.h>
 #include <gtest/gtest.h>
 
 #include <filesystem>
@@ -182,9 +184,65 @@ TEST_F(WriterTest, WritesFileWithDescriptorAndBounds) {
   EXPECT_EQ(file.data_file->lower_bounds.at(2).size(), 4u);
 }
 
+TEST_F(WriterTest, MaterializesPartitionColumnsAbsentFromTheInputBatch) {
+  std::string error;
+  auto schema = primeparts::PrimesSchema();
+  auto spec_r = primeparts::BucketPartitionSpec(*schema, &error);
+  ASSERT_NE(spec_r, nullptr) << error;
+
+  auto writer = primeparts::BucketParquetWriter::Make(
+      BaseConfig(out_, schema, spec_r), &error);
+  ASSERT_NE(writer, nullptr) << error;
+
+  auto arrow_schema =
+      primeparts::IcebergToArrowSchemaWithFieldIds(*schema, &error, spec_r.get());
+  ASSERT_NE(arrow_schema, nullptr) << error;
+  ASSERT_EQ(arrow_schema->num_fields(), 5);
+  ASSERT_NE(arrow_schema->GetFieldByName("p_bucket_version"), nullptr);
+  ASSERT_NE(arrow_schema->GetFieldByName("p_bucket"), nullptr);
+
+  arrow::Int64Builder p;
+  arrow::Int32Builder k;
+  arrow::Int64Builder prime_rank;
+  for (int64_t value : {3, 5, 7}) EXPECT_TRUE(p.Append(value).ok());
+  for (int32_t value : {2, 1, 3}) EXPECT_TRUE(k.Append(value).ok());
+  for (int64_t value : {0, 1, 2}) EXPECT_TRUE(prime_rank.Append(value).ok());
+  auto partial = arrow::RecordBatch::Make(
+      arrow::schema({arrow_schema->field(0), arrow_schema->field(1),
+                     arrow_schema->field(2)}),
+      3, {FinishOrDie(p), FinishOrDie(k), FinishOrDie(prime_rank)});
+
+  ASSERT_TRUE(writer->Write(*partial, &error)) << error;
+  std::vector<primeparts::WrittenFile> files;
+  ASSERT_TRUE(writer->Close(&files, &error)) << error;
+  ASSERT_EQ(files.size(), 1u);
+
+  auto in = arrow::io::ReadableFile::Open(files.front().path.string());
+  ASSERT_TRUE(in.ok()) << in.status().ToString();
+  auto reader_r =
+      parquet::arrow::OpenFile(in.ValueOrDie(), arrow::default_memory_pool());
+  ASSERT_TRUE(reader_r.ok()) << reader_r.status().ToString();
+  auto reader = reader_r.MoveValueUnsafe();
+  auto table_r = reader->ReadTable();
+  ASSERT_TRUE(table_r.ok()) << table_r.status().ToString();
+  auto table = table_r.MoveValueUnsafe();
+  ASSERT_EQ(table->num_rows(), 3);
+  ASSERT_NE(table->GetColumnByName("p_bucket_version"), nullptr);
+  ASSERT_NE(table->GetColumnByName("p_bucket"), nullptr);
+
+  auto version = std::static_pointer_cast<arrow::Int32Array>(
+      table->GetColumnByName("p_bucket_version")->chunk(0));
+  auto bucket = std::static_pointer_cast<arrow::Int32Array>(
+      table->GetColumnByName("p_bucket")->chunk(0));
+  for (int64_t i = 0; i < 3; ++i) {
+    EXPECT_EQ(version->Value(i), 1);
+    EXPECT_EQ(bucket->Value(i), 2);
+  }
+}
+
 TEST_F(WriterTest, AscendingSortOrder) {
   std::string error;
-  auto parts = primeparts::PartitionsSchema();
+  auto parts = primeparts::HigherPartsSchema();
   auto order = primeparts::AscendingSortOrder(*parts, {"p", "m_k"}, &error);
   ASSERT_NE(order, nullptr) << error;
   auto fields = order->fields();

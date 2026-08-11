@@ -17,7 +17,9 @@
 #include <string>
 #include <system_error>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
+#include <variant>
 
 #include "iceberg/expression/literal.h"
 #include "iceberg/manifest/manifest_entry.h"
@@ -178,19 +180,10 @@ bool BuildDataFile(const WriterConfig& config,
 std::shared_ptr<arrow::Schema> IcebergToArrowSchemaWithFieldIds(
     const iceberg::Schema& schema, std::string* error,
     const iceberg::PartitionSpec* partition_spec) {
-  std::unordered_set<int32_t> skip_source_ids;
-  if (partition_spec) {
-    for (const auto& pf : partition_spec->fields()) {
-      if (pf.transform() &&
-          pf.transform()->transform_type() == iceberg::TransformType::kIdentity) {
-        skip_source_ids.insert(pf.source_id());
-      }
-    }
-  }
+  (void)partition_spec;
   arrow::FieldVector fields;
   fields.reserve(schema.fields().size());
   for (const auto& f : schema.fields()) {
-    if (skip_source_ids.count(f.field_id())) continue;
     std::shared_ptr<arrow::DataType> at;
     auto tid = f.type()->type_id();
     if (tid == iceberg::TypeId::kLong) {
@@ -231,6 +224,7 @@ struct BucketParquetWriter::Impl {
       current_bounds;
 
   std::vector<WrittenFile> done;
+  std::unordered_map<std::string, int64_t> partition_constants;
 
   bool OpenIfNeeded(std::string* error);
   bool CloseCurrent(std::string* error);
@@ -284,8 +278,8 @@ bool BucketParquetWriter::Impl::OpenIfNeeded(std::string* error) {
 bool BucketParquetWriter::Impl::CutRowGroup(int64_t* flushed_bytes,
                                             std::string* error) {
   if (!writer) {
-    if (error) *error = "CutRowGroup with no open row group";
-    return false;
+    if (flushed_bytes) *flushed_bytes = 0;
+    return true;
   }
   auto start_r = sink->Tell();
   if (!start_r.ok()) {
@@ -379,6 +373,44 @@ std::unique_ptr<BucketParquetWriter> BucketParquetWriter::Make(
       *config.schema, error, impl->partition_spec.get());
   if (!impl->arrow_schema) return nullptr;
 
+  {
+    const auto& pfs = impl->partition_spec->fields();
+    for (size_t i = 0; i < pfs.size(); ++i) {
+      if (!pfs[i].transform() ||
+          pfs[i].transform()->transform_type() !=
+              iceberg::TransformType::kIdentity) {
+        continue;
+      }
+      auto at = config.partition_values->ValueAt(i);
+      if (!at.has_value()) {
+        if (error) {
+          *error = "partition value " + std::to_string(i) + " missing for " +
+                   config.table_name;
+        }
+        return nullptr;
+      }
+      const auto& v = at.value().get().value();
+      int64_t as_int = 0;
+      if (const auto* v32 = std::get_if<int32_t>(&v)) {
+        as_int = *v32;
+      } else if (const auto* v64 = std::get_if<int64_t>(&v)) {
+        as_int = *v64;
+      } else {
+        if (error) {
+          *error = "partition value " + std::to_string(i) +
+                   " is not an integer for " + config.table_name;
+        }
+        return nullptr;
+      }
+      for (const auto& f : config.schema->fields()) {
+        if (f.field_id() == pfs[i].source_id()) {
+          impl->partition_constants.emplace(std::string(f.name()), as_int);
+          break;
+        }
+      }
+    }
+  }
+
   for (const auto& sc : config.stat_columns) {
     ResolvedStatColumn rs;
     rs.sorted = sc.sorted;
@@ -447,10 +479,26 @@ bool BucketParquetWriter::Write(const arrow::RecordBatch& batch,
   for (const auto& f : impl_->arrow_schema->fields()) {
     auto col = batch.GetColumnByName(f->name());
     if (!col) {
-      if (error) {
-        *error = "input batch missing column: " + f->name();
+      auto pv = impl_->partition_constants.find(f->name());
+      if (pv == impl_->partition_constants.end()) {
+        if (error) {
+          *error = "input batch missing column: " + f->name();
+        }
+        return false;
       }
-      return false;
+      auto scalar = arrow::MakeScalar(f->type(), pv->second);
+      if (!scalar.ok()) {
+        if (error) *error = scalar.status().ToString();
+        return false;
+      }
+      auto arr = arrow::MakeArrayFromScalar(*scalar.ValueOrDie(),
+                                            batch.num_rows());
+      if (!arr.ok()) {
+        if (error) *error = arr.status().ToString();
+        return false;
+      }
+      projected.push_back(arr.MoveValueUnsafe());
+      continue;
     }
     projected.push_back(std::move(col));
   }

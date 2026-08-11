@@ -39,13 +39,24 @@ std::shared_ptr<iceberg::Schema> PrimesSchema() {
       0);
 }
 
-std::shared_ptr<iceberg::Schema> PartitionsSchema() {
+std::shared_ptr<iceberg::Schema> FlatPartsSchema() {
+  return std::make_shared<iceberg::Schema>(
+      std::vector<iceberg::SchemaField>{
+          iceberg::SchemaField::MakeRequired(1, "p",                iceberg::int64()),
+          iceberg::SchemaField::MakeRequired(2, "hit_mask",         iceberg::int64()),
+          iceberg::SchemaField::MakeRequired(3, "p_bucket_version", iceberg::int32()),
+          iceberg::SchemaField::MakeRequired(4, "p_bucket",         iceberg::int32()),
+      },
+      0);
+}
+
+std::shared_ptr<iceberg::Schema> HigherPartsSchema() {
   return std::make_shared<iceberg::Schema>(
       std::vector<iceberg::SchemaField>{
           iceberg::SchemaField::MakeRequired(1, "p",                iceberg::int64()),
           iceberg::SchemaField::MakeRequired(2, "m_k",              iceberg::int32()),
           iceberg::SchemaField::MakeRequired(3, "n_k",              iceberg::int32()),
-          iceberg::SchemaField::MakeRequired(4, "prime_rank",       iceberg::int64()),
+          iceberg::SchemaField::MakeRequired(4, "q_k",              iceberg::int64()),
           iceberg::SchemaField::MakeRequired(5, "p_bucket_version", iceberg::int32()),
           iceberg::SchemaField::MakeRequired(6, "p_bucket",         iceberg::int32()),
       },

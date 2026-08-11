@@ -56,7 +56,8 @@ using primeparts::BucketPartitionSpec;
 using primeparts::CommitPlan;
 using primeparts::AscendingSortOrder;
 using primeparts::LoadAlignedResume;
-using primeparts::PartitionsSchema;
+using primeparts::FlatPartsSchema;
+using primeparts::HigherPartsSchema;
 using primeparts::PrimesSchema;
 using primeparts::ResumeState;
 using primeparts::ShapePolicy;
@@ -122,7 +123,8 @@ struct BatchHolder {
 struct FileGroup {
   std::vector<BatchHolder> batches;
   int64_t prime_rows = 0;
-  int64_t partitions_rows = 0;
+  int64_t flat_parts_rows = 0;
+  int64_t higher_parts_rows = 0;
   int64_t first_p = 0;
   int64_t last_p = 0;
   int64_t start_idx = 0;
@@ -364,18 +366,6 @@ std::shared_ptr<arrow::Array> dense_int64_range(int64_t start, int64_t length) {
   return int64_array(values.data(), length);
 }
 
-std::shared_ptr<arrow::Array> partitions_rank_array(const pp_batch_result& batch,
-                                                    int64_t rank_start) {
-  std::vector<int64_t> ranks;
-  ranks.reserve(batch.partition_count);
-  for (size_t i = 0; i < batch.prime_count; ++i) {
-    int64_t rank_i = rank_start + static_cast<int64_t>(i);
-    int32_t kk = batch.prime_k[i];
-    for (int32_t j = 0; j < kk; ++j) ranks.push_back(rank_i);
-  }
-  return int64_array(ranks.data(), static_cast<int64_t>(batch.partition_count));
-}
-
 std::shared_ptr<arrow::RecordBatch> make_primes_batch(const pp_batch_result& batch,
                                                       int64_t rank_start) {
   auto schema = arrow::schema({
@@ -391,21 +381,69 @@ std::shared_ptr<arrow::RecordBatch> make_primes_batch(const pp_batch_result& bat
        dense_int64_range(rank_start, rows)});
 }
 
-std::shared_ptr<arrow::RecordBatch> make_partitions_batch(const pp_batch_result& batch,
-                                                          int64_t rank_start) {
-  auto schema = arrow::schema({
-      arrow::field("p",          arrow::int64()),
-      arrow::field("m_k",        arrow::int32()),
-      arrow::field("n_k",        arrow::int32()),
-      arrow::field("prime_rank", arrow::int64()),
+struct PartsBatches {
+  std::shared_ptr<arrow::RecordBatch> flat;
+  std::shared_ptr<arrow::RecordBatch> higher;
+  int64_t flat_rows = 0;
+  int64_t higher_rows = 0;
+};
+
+PartsBatches make_parts_batches(const pp_batch_result& batch) {
+  std::vector<int64_t> flat_p;
+  std::vector<int64_t> flat_mask;
+  std::vector<int64_t> hi_p;
+  std::vector<int32_t> hi_m;
+  std::vector<int32_t> hi_n;
+  std::vector<int64_t> hi_q;
+  flat_p.reserve(batch.prime_count);
+  flat_mask.reserve(batch.prime_count);
+
+  size_t i = 0;
+  while (i < batch.partition_count) {
+    const int64_t p = batch.partition_p[i];
+    uint64_t mask = 0;
+    while (i < batch.partition_count && batch.partition_p[i] == p) {
+      if (batch.partition_n[i] == 1) {
+        mask |= uint64_t{1} << batch.partition_m[i];
+      } else {
+        hi_p.push_back(p);
+        hi_m.push_back(batch.partition_m[i]);
+        hi_n.push_back(batch.partition_n[i]);
+        hi_q.push_back(batch.partition_q[i]);
+      }
+      ++i;
+    }
+    if (mask != 0) {
+      flat_p.push_back(p);
+      flat_mask.push_back(static_cast<int64_t>(mask));
+    }
+  }
+
+  auto flat_schema = arrow::schema({
+      arrow::field("p",        arrow::int64()),
+      arrow::field("hit_mask", arrow::int64()),
   });
-  int64_t rows = static_cast<int64_t>(batch.partition_count);
-  return arrow::RecordBatch::Make(
-      schema, rows,
-      {int64_array(batch.partition_p, rows),
-       int32_array(batch.partition_m, rows),
-       int32_array(batch.partition_n, rows),
-       partitions_rank_array(batch, rank_start)});
+  auto higher_schema = arrow::schema({
+      arrow::field("p",   arrow::int64()),
+      arrow::field("m_k", arrow::int32()),
+      arrow::field("n_k", arrow::int32()),
+      arrow::field("q_k", arrow::int64()),
+  });
+
+  PartsBatches out;
+  out.flat_rows = static_cast<int64_t>(flat_p.size());
+  out.higher_rows = static_cast<int64_t>(hi_p.size());
+  out.flat = arrow::RecordBatch::Make(
+      flat_schema, out.flat_rows,
+      {int64_array(flat_p.data(), out.flat_rows),
+       int64_array(flat_mask.data(), out.flat_rows)});
+  out.higher = arrow::RecordBatch::Make(
+      higher_schema, out.higher_rows,
+      {int64_array(hi_p.data(), out.higher_rows),
+       int32_array(hi_m.data(), out.higher_rows),
+       int32_array(hi_n.data(), out.higher_rows),
+       int64_array(hi_q.data(), out.higher_rows)});
+  return out;
 }
 
 bool materialize_group(int64_t* next_idx, int64_t end_idx, const Options& options,
@@ -474,7 +512,11 @@ bool materialize_group(int64_t* next_idx, int64_t end_idx, const Options& option
       group->last_p = holder.batch.last_p;
     }
     group->prime_rows += static_cast<int64_t>(holder.batch.prime_count);
-    group->partitions_rows += static_cast<int64_t>(holder.batch.partition_count);
+    {
+      const auto parts = make_parts_batches(holder.batch);
+      group->flat_parts_rows += parts.flat_rows;
+      group->higher_parts_rows += parts.higher_rows;
+    }
     group->processed_count += holder.batch.processed_count;
   }
 
@@ -568,25 +610,36 @@ bool parse_args(int argc, char** argv, Options* options) {
   return resolve_rank_start(options);
 }
 
+struct TableDecl {
+  std::string name;
+  std::shared_ptr<iceberg::Schema> schema;
+  std::shared_ptr<iceberg::PartitionSpec> spec;
+  std::vector<std::string> sort_columns;
+};
+
 bool commit_plan(const Options& options,
                  const std::shared_ptr<iceberg::Catalog>& catalog,
                  const CommitPlan& plan, const ShapePolicy& policy,
-                 const std::shared_ptr<iceberg::Schema>& p_schema,
-                 const std::shared_ptr<iceberg::Schema>& d_schema,
-                 const std::shared_ptr<iceberg::PartitionSpec>& p_spec,
-                 const std::shared_ptr<iceberg::PartitionSpec>& d_spec,
-                 std::string* error) {
+                 const std::vector<TableDecl>& decls, std::string* error) {
   std::vector<primeparts::catalog::TableCommitSpec> specs;
   for (const auto& tf : plan.tables) {
+    const TableDecl* decl = nullptr;
+    for (const auto& d : decls) {
+      if (d.name == tf.name) {
+        decl = &d;
+        break;
+      }
+    }
+    if (!decl) {
+      *error = "commit plan names unknown table " + tf.name;
+      return false;
+    }
     primeparts::catalog::TableCommitSpec spec;
     spec.table_name = tf.name;
-    spec.schema = tf.name == "primes" ? p_schema : d_schema;
-    spec.spec = tf.name == "primes" ? p_spec : d_spec;
-    spec.declare.sort_order = AscendingSortOrder(
-        *spec.schema,
-        tf.name == "primes" ? std::vector<std::string>{"p"}
-                            : std::vector<std::string>{"p", "m_k"},
-        error);
+    spec.schema = decl->schema;
+    spec.spec = decl->spec;
+    spec.declare.sort_order =
+        AscendingSortOrder(*spec.schema, decl->sort_columns, error);
     if (!spec.declare.sort_order) return false;
     spec.declare.properties = policy.AsTableProperties();
     spec.declare.properties["pp.buckets.self-contained"] = "true";
@@ -811,10 +864,12 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
     fs::create_directories(options.warehouse);
 
     auto p_schema = PrimesSchema();
-    auto d_schema = PartitionsSchema();
+    auto f_schema = FlatPartsSchema();
+    auto h_schema = HigherPartsSchema();
     auto p_spec = BucketPartitionSpec(*p_schema, &error);
-    auto d_spec = BucketPartitionSpec(*d_schema, &error);
-    if (!p_spec || !d_spec) {
+    auto f_spec = BucketPartitionSpec(*f_schema, &error);
+    auto h_spec = BucketPartitionSpec(*h_schema, &error);
+    if (!p_spec || !f_spec || !h_spec) {
       set_last_error("build partition spec: " + error);
       log_line(callbacks, "%s", g_last_error.c_str());
       pp_shutdown();
@@ -838,11 +893,14 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
     if (catalog) {
       std::unordered_map<std::string, std::string> p_properties;
       bool p_adopted = false;
-      bool d_adopted = false;
+      bool f_adopted = false;
+      bool h_adopted = false;
       if (!adopt_table(catalog, options.ns, "primes", &p_schema, &p_spec,
                        &p_properties, &p_adopted, &error) ||
-          !adopt_table(catalog, options.ns, "partitions", &d_schema, &d_spec,
-                       nullptr, &d_adopted, &error)) {
+          !adopt_table(catalog, options.ns, "flat_parts", &f_schema, &f_spec,
+                       nullptr, &f_adopted, &error) ||
+          !adopt_table(catalog, options.ns, "higher_parts", &h_schema, &h_spec,
+                       nullptr, &h_adopted, &error)) {
         set_last_error("adopt table: " + error);
         log_line(callbacks, "%s", g_last_error.c_str());
         pp_shutdown();
@@ -889,14 +947,24 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
       return 1;
     }
 
+    const std::vector<TableDecl> decls{
+        TableDecl{"primes", p_schema, p_spec, {"p"}},
+        TableDecl{"flat_parts", f_schema, f_spec, {"p"}},
+        TableDecl{"higher_parts", h_schema, h_spec, {"p", "m_k"}},
+    };
+
     std::vector<BoundTable> tables;
     tables.push_back(BoundTable{"primes", p_schema, p_spec,
                                 {"p", "prime_rank"},
                                 {{"p", true}, {"prime_rank", true}},
                                 true, nullptr});
-    tables.push_back(BoundTable{"partitions", d_schema, d_spec,
-                                {"p", "prime_rank"},
-                                {{"p", true}, {"prime_rank", true}},
+    tables.push_back(BoundTable{"flat_parts", f_schema, f_spec,
+                                {"p"},
+                                {{"p", true}},
+                                false, nullptr});
+    tables.push_back(BoundTable{"higher_parts", h_schema, h_spec,
+                                {"p"},
+                                {{"p", true}},
                                 false, nullptr});
     auto writer = AlignedBucketWriter::Make(options.warehouse, options.ns,
                                             std::move(tables), AtomKey{"p"},
@@ -912,7 +980,8 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
     int64_t end_idx = start_idx + options.count;
     int64_t prime_rank_cursor = prime_rank_start;
     int64_t total_primes = 0;
-    int64_t total_partitions = 0;
+    int64_t total_flat_parts = 0;
+    int64_t total_higher_parts = 0;
     int64_t first_p = 0;
     int64_t last_p = 0;
     bool stop_requested = false;
@@ -958,8 +1027,8 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
           if (holder.batch.prime_count == 0) continue;
           int64_t rank = job.rank_starts[i];
           auto pb = make_primes_batch(holder.batch, rank);
-          auto db = make_partitions_batch(holder.batch, rank);
-          if (!pb || !db) {
+          auto parts = make_parts_batches(holder.batch);
+          if (!pb || !parts.flat || !parts.higher) {
             std::lock_guard<std::mutex> guard(q_mu);
             writer_failed = true;
             writer_error = "build record batch failed";
@@ -967,7 +1036,7 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
             return;
           }
           std::string werr;
-          if (!writer->Append({pb, db}, &werr)) {
+          if (!writer->Append({pb, parts.flat, parts.higher}, &werr)) {
             std::lock_guard<std::mutex> guard(q_mu);
             writer_failed = true;
             writer_error = "append failed: " + werr;
@@ -1016,7 +1085,8 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
       }
 
       total_primes += group.prime_rows;
-      total_partitions += group.partitions_rows;
+      total_flat_parts += group.flat_parts_rows;
+      total_higher_parts += group.higher_parts_rows;
       prime_rank_cursor += group.prime_rows;
       groups_done++;
       progress.update(groups_done, total_primes);
@@ -1070,7 +1140,7 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
     }
 
     if (!options.temp) {
-      if (!commit_plan(options, catalog, plan, policy, p_schema, d_schema, p_spec, d_spec,
+      if (!commit_plan(options, catalog, plan, policy, decls,
                        &error)) {
         set_last_error("commit: " + error);
         log_line(callbacks, "%s", g_last_error.c_str());
@@ -1088,7 +1158,8 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
         elapsed_s > 0.0 ? static_cast<double>(total_primes) / elapsed_s : 0.0;
     if (out) {
       out->prime_rows = total_primes;
-      out->partitions_rows = total_partitions;
+      out->flat_parts_rows = total_flat_parts;
+      out->higher_parts_rows = total_higher_parts;
       out->files_written = files_written;
       out->bytes_written = bytes_written;
       out->first_p = first_p;
@@ -1187,7 +1258,8 @@ int main(int argc, char** argv) {
             << "\"start_idx\":" << out.start_idx << ","
             << "\"count\":" << out.count << ","
             << "\"prime_rows\":" << out.prime_rows << ","
-            << "\"partitions_rows\":" << out.partitions_rows << ","
+            << "\"flat_parts_rows\":" << out.flat_parts_rows << ","
+            << "\"higher_parts_rows\":" << out.higher_parts_rows << ","
             << "\"files_written\":" << out.files_written << ","
             << "\"bytes_written\":" << out.bytes_written << ","
             << "\"first_p\":" << out.first_p << ","

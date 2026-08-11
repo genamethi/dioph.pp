@@ -30,7 +30,8 @@ typedef struct {
   int64_t start_idx;
   int64_t count;
   int64_t prime_rows;
-  int64_t partitions_rows;
+  int64_t flat_parts_rows;
+  int64_t higher_parts_rows;
   int64_t files_written;
   int64_t bytes_written;
   int64_t first_p;

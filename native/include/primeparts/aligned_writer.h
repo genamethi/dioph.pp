@@ -46,8 +46,8 @@ struct BoundTable {
 struct ShapePolicy {
   int64_t file_target_bytes = 1LL << 30;
   int rgs_per_file = 4;
-  int64_t bucket_target_bytes = 32LL << 30;
-  int32_t bucket_version = 2;
+  int64_t bucket_target_bytes = 4LL << 30;
+  int32_t bucket_version = 3;
   double ref_bytes_per_row_prior = 1.1;
   int64_t rg_target_bytes() const {
     return rgs_per_file > 0 ? file_target_bytes / rgs_per_file : file_target_bytes;
