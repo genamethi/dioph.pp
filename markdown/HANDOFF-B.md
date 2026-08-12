@@ -245,6 +245,41 @@ Roughly in dependency order. Each is a starting point, not a spec.
    bounds, which wants bounded conductor and an interval. We have the conductor
    bounds; we do not have the interval. I do not know how to close it.
 
+   **The covering side is the same function.** `l | p - 2^m` is periodic in `m`
+   with period `ord_l(2)`, so one prime covers a residue class of exponents, and
+   a covering system built from such classes forces `p ≡ 2^{a_i} mod l_i` on each
+   — which is exactly the condition that makes the local factor at `l_i` vanish.
+   **A covering system is a construction of primes where the singular series is
+   zero.** Romanov's positive lower density for the representable integers, and
+   Erdos's arithmetic progression avoiding the form entirely by covering
+   congruences, are that function being positive and being zero. Do not
+   rediscover either bound. Work already exists here that builds order-capped
+   covers from primes with small `ord_l(2)` and measures how much they bleed onto
+   representable primes; the primitive prime factors of `2^d - 1` are the
+   material, since they are exactly the primes entering at order `d`.
+
+   One structural fact from that direction worth carrying: if `l` divides both
+   `p - 2^{m_a}` and `p - 2^{m_b}` then `l | 2^{|m_a - m_b|} - 1`. **The pairwise
+   differences of a prime's hit positions are Mersenne indices**, and the
+   primitive factors of those Mersennes are precisely the primes that can cover
+   two of its exponents at once. The exponent set is the obvious invariant of a
+   hit mask; the difference multiset is the covering-relevant one.
+
+   The Eisenstein-versus-cuspidal split you may be reaching for is available here
+   without a modular object: it is the circle method's own. Major arcs give the
+   singular series, explicit and local; minor arcs are the fluctuation. That is
+   the decomposition, and `c` against the residual scatter already is it.
+
+   *What is measured.* Restricted to primes, 10769840447 of the first
+   60032000000 have no `n = 1` representation, and 10889 of those still have an
+   `n >= 2` one. The mean of `k` is flat near 1.883 across nine decades, because
+   `log_2 p` more exponents cancels `1/ln p` less likely — which is why this is a
+   density question at all. But the zero rate is still climbing, 13.15 percent at
+   `1e4` to 17.98 at `1.6e12`, so **that figure is a running value and not a
+   density.** A fixed mean with a rising zero rate is the `m`-trials becoming
+   more heterogeneous, not drift; the untested consequence is that the variance
+   of `k` grows across decades while the mean holds.
+
 3. **Characterize which degree sets occur.**
 
    By level one a prime's class is its set of realisable degrees, a subset of
@@ -298,24 +333,8 @@ Roughly in dependency order. Each is a starting point, not a spec.
 
    Composite degrees route through `n = 1` edges, so what the degree spectrum
    depends on is which `n >= 2` endpoints reach which. That is a reachability
-   question on the largest object here and it is where the cost sits.
-
-   Know what you are walking into. The `n = 1` condition is de Polignac's —
-   odd numbers never of the form `2^m + prime`. Romanov proved the representable
-   integers have positive lower density; Erdos gave an arithmetic progression of
-   odd numbers avoiding the form entirely, by covering congruences, so the
-   density is strictly between and the exact value is open. Do not spend a day
-   rediscovering either bound.
-
-   What is ours and is measured: restricted to primes, 10769840447 of the first
-   60032000000 have no `n = 1` representation, and 10889 of those still have an
-   `n >= 2` one. The mean of `k` is flat near 1.883 across nine decades, because
-   `log_2 p` more exponents cancels `1/ln p` less likely — which is why this is a
-   density question at all. But the zero rate is still climbing, 13.15 percent at
-   `1e4` to 17.98 at `1.6e12`, so **that figure is a running value and not a
-   density.** A fixed mean with a rising zero rate is the `m`-trials becoming
-   more heterogeneous, not drift; the untested consequence is that the variance
-   of `k` grows across decades while the mean holds.
+   question on the largest object here and it is where the cost sits. It is also
+   the same arithmetic as direction 2, from the other side.
 
 8. **Read the chain off the Hermite vector, with the premise corrected.**
 
