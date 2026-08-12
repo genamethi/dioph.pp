@@ -388,6 +388,24 @@ struct PartsBatches {
   int64_t higher_rows = 0;
 };
 
+void count_parts_rows(const pp_batch_result& batch, int64_t* flat_rows,
+                      int64_t* higher_rows) {
+  size_t i = 0;
+  while (i < batch.partition_count) {
+    const int64_t p = batch.partition_p[i];
+    bool any_flat = false;
+    while (i < batch.partition_count && batch.partition_p[i] == p) {
+      if (batch.partition_n[i] == 1) {
+        any_flat = true;
+      } else {
+        ++*higher_rows;
+      }
+      ++i;
+    }
+    if (any_flat) ++*flat_rows;
+  }
+}
+
 PartsBatches make_parts_batches(const pp_batch_result& batch) {
   std::vector<int64_t> flat_p;
   std::vector<int64_t> flat_mask;
@@ -512,11 +530,8 @@ bool materialize_group(int64_t* next_idx, int64_t end_idx, const Options& option
       group->last_p = holder.batch.last_p;
     }
     group->prime_rows += static_cast<int64_t>(holder.batch.prime_count);
-    {
-      const auto parts = make_parts_batches(holder.batch);
-      group->flat_parts_rows += parts.flat_rows;
-      group->higher_parts_rows += parts.higher_rows;
-    }
+    count_parts_rows(holder.batch, &group->flat_parts_rows,
+                     &group->higher_parts_rows);
     group->processed_count += holder.batch.processed_count;
   }
 
