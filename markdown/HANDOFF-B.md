@@ -225,17 +225,25 @@ Roughly in dependency order. Each is a starting point, not a spec.
 
 2. **The partition function, weighted.**
 
-   `k(p)` is the thing I actually care about and nothing here says anything
-   about its distribution. The Chebyshev weighting above is the first form in
-   which the strata come out clean, and the residual constant is a singular
-   series from a restricted von Mangoldt convolution. Compute those local
-   factors. They are `n`-dependent and the mechanism is stated; what is missing
-   is the product.
+   Three separable pieces, and they are not equally hard.
 
-   Then: the fiber product's point count is the correlation of two chains'
-   fiber counts over a finite field. That is an analogue of `k`, not `k` — a sum
-   over field points, not over primes. Closing that gap is the interesting part
-   and I do not know how to do it.
+   *Computable.* The singular series constant. The mechanism is settled — the
+   Chebyshev-weighted `k(p)` is `log 2 * sum_m Lambda(p - 2^m)`, an additive
+   convolution of von Mangoldt with one argument restricted to powers of two, and
+   its local factors are `n`-dependent for the reason stated above. What is
+   missing is the product over `l`. That is an elementary convergent product,
+   not a theorem. Measured, the constant is near 3.
+
+   *Not computable by us.* An asymptotic for `count(n)`. Binary additive with
+   primes on both sides, so Goldbach-class regardless of how thin the set of
+   `2^m` is. Do not attempt a proof; do check the constant against the counts.
+
+   *Open, and the interesting one.* The fiber product's point count is the
+   correlation of two chains' fiber counts over a finite field — an analogue of
+   `k`, a sum over field points rather than over primes. The standard route from
+   one to the other is a Vaughan or Heath-Brown decomposition with bilinear
+   bounds, which wants bounded conductor and an interval. We have the conductor
+   bounds; we do not have the interval. I do not know how to close it.
 
 3. **Characterize which degree sets occur.**
 
@@ -254,32 +262,60 @@ Roughly in dependency order. Each is a starting point, not a spec.
    level 4 while `k = 1` does not separate at all. Give the level at which a
    given `k` separates.
 
-5. **The monodromy group.**
+5. **The monodromy group. Apply the known theory; do not rederive it.**
 
-   The uncollapsed presentation gives the containment in the iterated wreath
-   product for free. The group itself is not computed anywhere, and orbits of
+   Galois groups of polynomial compositions are studied — Ritt's decomposition
+   theorems, and the literature on which wreath subgroups actually occur for
+   composed maps. Computing the group of a specific polynomial is a solved
+   algorithm and there are libraries for it. The uncollapsed presentation gives
+   the wreath containment for free; what is wanted is the group, per prime,
+   using the existing machinery.
+
+   What is genuinely ours is the reporting: I would like to see a prime's
+   monodromy drawn. Tables are not giving me a view of it. Orbits of
    translations acting on reductions of the maps are not a partial step toward
-   it — that is a degree-one statement and the structure lives at all degrees.
-   I would like to see a prime's monodromy drawn; tables are not giving me a
-   view of it.
+   this — that is a degree-one statement and the structure lives at all degrees.
 
-6. **Kummer decomposition on the graded presentation.**
+6. **Kummer decomposition on the graded presentation. A check, not a discovery.**
 
-   Per layer, with `n | q - 1`, verify that summing the characters reproduces
-   the fiber counts exactly. This is a falsifiable check against a quantity that
-   can already be computed two ways, and it is the concrete content of the
-   claim that the graded form is where the decomposition lives. Note that
-   characteristic two degenerates it — every character is trivial or the sign —
-   so this wants an odd base.
+   The theory is textbook. What is worth doing is verifying our layers against
+   it: per layer, sum the characters and confirm it reproduces the fiber counts
+   exactly. That is falsifiable against a quantity computable two ways, and it is
+   the concrete content of the claim that the graded form is where the
+   decomposition lives.
+
+   The field is determined rather than searched for. Decomposition needs
+   `n | q - 1`, and with `q = 2^d` that is `n | 2^d - 1`, so `d` must be a
+   multiple of the multiplicative order of 2 modulo `n` and the smallest usable
+   field is `F_{2^{ord}}`. The primitive prime factors of `2^d - 1` are exactly
+   the primes entering at order `d`, and the tree already computes them for the
+   Hermite root work — same arithmetic, different consumer.
+
+   Characteristic two degenerates the character side entirely: every additive
+   character is trivial or the sign. This wants an odd base.
 
 7. **Reachability in the flat layer.**
 
    Composite degrees route through `n = 1` edges, so what the degree spectrum
-   actually depends on is which `n >= 2` endpoints reach which. That is a
-   reachability question on the largest object here and it is where the cost
-   sits. It is also de Polignac's problem in disguise — odd numbers never of the
-   form `2^m + prime`, killed by covering congruences — so I expect this to be
-   the hard half and the graded layer to be the tractable one.
+   depends on is which `n >= 2` endpoints reach which. That is a reachability
+   question on the largest object here and it is where the cost sits.
+
+   Know what you are walking into. The `n = 1` condition is de Polignac's —
+   odd numbers never of the form `2^m + prime`. Romanov proved the representable
+   integers have positive lower density; Erdos gave an arithmetic progression of
+   odd numbers avoiding the form entirely, by covering congruences, so the
+   density is strictly between and the exact value is open. Do not spend a day
+   rediscovering either bound.
+
+   What is ours and is measured: restricted to primes, 10769840447 of the first
+   60032000000 have no `n = 1` representation, and 10889 of those still have an
+   `n >= 2` one. The mean of `k` is flat near 1.883 across nine decades, because
+   `log_2 p` more exponents cancels `1/ln p` less likely — which is why this is a
+   density question at all. But the zero rate is still climbing, 13.15 percent at
+   `1e4` to 17.98 at `1.6e12`, so **that figure is a running value and not a
+   density.** A fixed mean with a rising zero rate is the `m`-trials becoming
+   more heterogeneous, not drift; the untested consequence is that the variance
+   of `k` grows across decades while the mean holds.
 
 8. **Read the chain off the Hermite vector, with the premise corrected.**
 
