@@ -407,14 +407,16 @@ void count_parts_rows(const pp_batch_result& batch, int64_t* flat_rows,
 }
 
 PartsBatches make_parts_batches(const pp_batch_result& batch) {
-  std::vector<int64_t> flat_p;
-  std::vector<int64_t> flat_mask;
-  std::vector<int64_t> hi_p;
-  std::vector<int32_t> hi_m;
-  std::vector<int32_t> hi_n;
-  std::vector<int64_t> hi_q;
-  flat_p.reserve(batch.prime_count);
-  flat_mask.reserve(batch.prime_count);
+  arrow::Int64Builder flat_p;
+  arrow::Int64Builder flat_mask;
+  arrow::Int64Builder hi_p;
+  arrow::Int32Builder hi_m;
+  arrow::Int32Builder hi_n;
+  arrow::Int64Builder hi_q;
+  if (!flat_p.Reserve(static_cast<int64_t>(batch.prime_count)).ok() ||
+      !flat_mask.Reserve(static_cast<int64_t>(batch.prime_count)).ok()) {
+    return PartsBatches{};
+  }
 
   size_t i = 0;
   while (i < batch.partition_count) {
@@ -424,16 +426,18 @@ PartsBatches make_parts_batches(const pp_batch_result& batch) {
       if (batch.partition_n[i] == 1) {
         mask |= uint64_t{1} << batch.partition_m[i];
       } else {
-        hi_p.push_back(p);
-        hi_m.push_back(batch.partition_m[i]);
-        hi_n.push_back(batch.partition_n[i]);
-        hi_q.push_back(batch.partition_q[i]);
+        if (!hi_p.Append(p).ok() ||
+            !hi_m.Append(batch.partition_m[i]).ok() ||
+            !hi_n.Append(batch.partition_n[i]).ok() ||
+            !hi_q.Append(batch.partition_q[i]).ok()) {
+          return PartsBatches{};
+        }
       }
       ++i;
     }
     if (mask != 0) {
-      flat_p.push_back(p);
-      flat_mask.push_back(static_cast<int64_t>(mask));
+      flat_p.UnsafeAppend(p);
+      flat_mask.UnsafeAppend(static_cast<int64_t>(mask));
     }
   }
 
@@ -449,18 +453,19 @@ PartsBatches make_parts_batches(const pp_batch_result& batch) {
   });
 
   PartsBatches out;
-  out.flat_rows = static_cast<int64_t>(flat_p.size());
-  out.higher_rows = static_cast<int64_t>(hi_p.size());
-  out.flat = arrow::RecordBatch::Make(
-      flat_schema, out.flat_rows,
-      {int64_array(flat_p.data(), out.flat_rows),
-       int64_array(flat_mask.data(), out.flat_rows)});
+  out.flat_rows = flat_p.length();
+  out.higher_rows = hi_p.length();
+  std::shared_ptr<arrow::Array> fp, fm, hp, hm, hn, hq;
+  if (!flat_p.Finish(&fp).ok() || !flat_mask.Finish(&fm).ok() ||
+      !hi_p.Finish(&hp).ok() || !hi_m.Finish(&hm).ok() ||
+      !hi_n.Finish(&hn).ok() || !hi_q.Finish(&hq).ok()) {
+    return PartsBatches{};
+  }
+  out.flat = arrow::RecordBatch::Make(flat_schema, out.flat_rows,
+                                      {std::move(fp), std::move(fm)});
   out.higher = arrow::RecordBatch::Make(
       higher_schema, out.higher_rows,
-      {int64_array(hi_p.data(), out.higher_rows),
-       int32_array(hi_m.data(), out.higher_rows),
-       int32_array(hi_n.data(), out.higher_rows),
-       int64_array(hi_q.data(), out.higher_rows)});
+      {std::move(hp), std::move(hm), std::move(hn), std::move(hq)});
   return out;
 }
 

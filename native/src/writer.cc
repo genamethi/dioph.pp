@@ -257,9 +257,11 @@ bool BucketParquetWriter::Impl::OpenIfNeeded(std::string* error) {
     return false;
   }
   sink = sink_r.ValueOrDie();
+  auto arrow_props = parquet::ArrowWriterProperties::Builder()
+                         .set_use_threads(config.arrow_use_threads)
+                         ->build();
   auto fw_r = parquet::arrow::FileWriter::Open(
-      *arrow_schema, arrow::default_memory_pool(), sink, props,
-      parquet::default_arrow_writer_properties());
+      *arrow_schema, arrow::default_memory_pool(), sink, props, arrow_props);
   if (!fw_r.ok()) {
     if (error) *error = fw_r.status().ToString();
     sink.reset();

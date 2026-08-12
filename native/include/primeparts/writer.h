@@ -62,6 +62,7 @@ struct WriterConfig {
   int64_t data_pagesize = 1 << 20;
   int64_t max_row_group_rows = 240'000'000;
   bool simple_filename = false;
+  bool arrow_use_threads = true;
 };
 
 std::shared_ptr<arrow::Schema> IcebergToArrowSchemaWithFieldIds(
