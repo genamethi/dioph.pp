@@ -45,8 +45,8 @@ tower `Z/2^e` above it, and `q mod 2^e` exposes exactly the exponents `m' < e`,
 so **level `e` resolves the exponents below `e`**. Item 4's tower with `l = 2`
 is therefore the object that recovers what level one drops, and `ZeroConst`
 deleting the constant term is deleting precisely the datum being recovered.
-Definitions, the operator `T_{q,n}(S) = (S+q)^n - q^n`, the Kummer and Lucas
-filters on its coefficients, and the measured tables are in
+Definitions, the operator `T_{q,n}(S) = (S+q)^n - q^n`, and the Kummer and Lucas
+filters on its coefficients are in
 `markdown/math/notation.md`.
 
 In the code the single letter `l` plays the base role and only the base role.
@@ -152,13 +152,13 @@ Fold every even-degree monomial down, *adding* into the coefficient already at
 degree `j` — cancellation there can drop the degree further than folding alone.
 `Swan_inf = deg P_red`.
 
-Over `k = F_2` this never blocks, because `F_2` is perfect. With E4
+Over `k = F_2` this never blocks, because `F_2` is perfect. With notation §3.4
 (`P ≡ x^N mod 2`), `L_psi(x^N) ~ L_psi(x^{N_odd})`, so
 `dim H^1_c = N_odd - 1`, zero exactly when `N` is a power of two. That is the
 collapse flagged above, made exact: not total, but down to the odd part.
 
 *Where the formal base variable earns its place.* Promote 2 to an indeterminate
-`t`; D4 already writes `A_0` and each `c_i` as a sum of powers of two. Over
+`t`; notation §2.4 already writes `A_0` and each `c_i` as a sum of powers of two. Over
 `k = F_2(t)`, `[k : k^2] = 2` with `k^2 = F_2(t^2)`, so `t^m` is a square iff
 `m` is even, and the fold blocks at the first even-degree term whose
 `t`-coefficient has odd valuation. Imperfection is doing the work and `F_2`
@@ -213,7 +213,7 @@ forced.
 Nothing in the code builds a sheaf, a trace function, a pullback or a
 pushforward. `--critical` carries each node's set of critical values mod `l`
 through the ascending sweep using a precomputed per-`(l, c, n)` transition
-table, which is the nearest existing object either way. By D4 only the `n >= 2`
+table, which is the nearest existing object either way. By notation §2.4 only the `n >= 2`
 blocks have critical points, so that pass reads `higher_parts` alone.
 
 **B2. Whether a bounded-conductor family exists.**
@@ -239,7 +239,7 @@ P_red`, so
 *Pushforward.* `P_*Q_ell` has rank `N`. Its separable part has degree `N_odd`,
 and ramification indices there divide `N_odd`, which is odd, so characteristic 2
 never divides them: **tame, no Swan conductor**. The singularities are the
-critical values, and by D4 only the `n >= 2` blocks have critical points, one
+critical values, and by notation §2.4 only the `n >= 2` blocks have critical points, one
 each, so `#sing <= k + 1` with `k <= log_2 N`. Hence
 
     c(P_*Q_ell) <= N + log_2 N + 2
@@ -292,7 +292,7 @@ implemented to point cancellation at.
 
 Stated in the same register as the rest: these are exact questions with exact
 answers, and a fitted growth law is not an answer to any of them. Definitions
-and the measured tables behind each are in `markdown/math/notation.md`.
+and the definitions behind each are in `markdown/math/notation.md`.
 
 **B'1. Which degree sets occur.** By A1 a prime's level-one state is its set of
 realizable chain degrees, a subset of `[1, D]` with `D = floor(log_3 p_max)`.
@@ -335,7 +335,7 @@ applies verbatim, and without it neither runs past about 1e7.
 | `HermiteEvalModL`, `HermiteRootsModL` (`:1279`, `:1323`, `:1395`) | roots of `He_n` mod `l`, feeding the congruence refinement |
 | `MaterializeColumns` (`:751`, `:3156`) | `<ns>.spectra` with `p, root, degree, chains, skeleton, hermite` |
 | `PolyKey` / `KeyToPoly` / `SeedKey` (`:1757`-`:1782`), `nmod_poly` throughout | coefficient vectors over `F_l` as the state datum; replaced the hand-rolled `MulL`/`PowL`, removing the degree-32 and `l < 256` caps |
-| `flat_parts` / `higher_parts` (`schemas.cc:42`, `:53`), `parts_expand.h` | the bigrading made physical. By D4 an `n = 1` edge contributes no degree, so `hit_mask` is the translation layer and `higher_parts` carries the entire `y`-graded structure — 147,103 rows for the whole warehouse |
+| `flat_parts` / `higher_parts` (`schemas.cc:42`, `:53`), `parts_expand.h` | the bigrading made physical. By notation §2.4 an `n = 1` edge contributes no degree, so `hit_mask` is the translation layer and `higher_parts` carries the entire `y`-graded structure — 147,103 rows for the whole warehouse |
 | `higher_sweep.c`, `pp_higher_sweep` | the `n >= 2` edges enumerated directly from `n <= log_5(hi)` rather than discovered by testing every `p - 2^m`. Makes the graded layer computable without the flat table |
 | `config.h` `kFields` table, `config_gen.cc`, `Conf::defaulted` | one declaration drives flags, config keys and the generated `example.config.lua`; a missing key now defaults instead of being fatal. This is what item 1's N.B. asks for when it says moduli and ranges should be parameters |
 | `--ells` / `ParseEllList` (`:1745`), used at `:779` | replaced the hardcoded ten-element modulus list in mode `hasse` |
@@ -367,7 +367,7 @@ exponent. `ZeroConst` and `S` agree only on the sub-question of what a twist by
 
 | Code | Object |
 |---|---|
-| `SharedSweep` (`:2021`) | `S = P - p` as the carried state: invariant along `n = 1` edges, `S_p = (S_q + q)^n - q^n` on `n >= 2`. The normalization item 3 should have asked for. E1 and B1' are the same fact from two sides: `n = 1` edges carry no `y`-degree, which is why `S` is constant along them |
+| `SharedSweep` (`:2021`) | `S = P - p` as the carried state: invariant along `n = 1` edges, `S_p = (S_q + q)^n - q^n` on `n >= 2`. The normalization item 3 should have asked for. notation §3.1 and B1' are the same fact from two sides: `n = 1` edges carry no `y`-degree, which is why `S` is constant along them |
 | `ZeroConst` (`:2201`) | the polynomial with its constant term zeroed. Read as the translation quotient it is item 3's orbit representative; read against A1 it discards the exponents and is the wrong normalization for the tower |
 | ambient BFS (`:2968`) | the monoid `M_l` generated by the reductions of the edges actually present, closed under the generator action from the seed `x` |
 | `realized` (`:2903`), `misses` | which orbits the queried family attains and which of the ambient it does not |
@@ -430,7 +430,7 @@ exponent. `ZeroConst` and `S` agree only on the sub-question of what a twist by
    report at `:2842` states that `l` ramifies for `p` iff some critical value of
    a chain into `p` is congruent to `p` mod `l`. Checked on one case
    (`p = 137`) and not in general. B1 now says what the pass *should* compute:
-   critical values as elements of `F_2[t]`, which by D4 depend only on the
+   critical values as elements of `F_2[t]`, which by notation §2.4 depend only on the
    `n >= 2` blocks and so read `higher_parts` alone.
 
 8. **`root` as a column in `spectra`**. If the initial translation only shifts
