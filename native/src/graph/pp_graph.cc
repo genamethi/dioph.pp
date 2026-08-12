@@ -36,6 +36,7 @@
 #include "primeparts/config.h"
 #include "primeparts/partition_math.h"
 #include "primeparts/graph/hermite_modl.h"
+#include "primeparts/graph/chain_forms.h"
 #include "primeparts/graph/partition_scan.h"
 #include "primeparts/parts_expand.h"
 #include "primeparts/query/materialize.h"
@@ -683,14 +684,8 @@ int RunBasis(const Options& opt) {
   GiNaC::symbol x("x");
   t0 = std::chrono::steady_clock::now();
   for (auto& g : gens) {
-    bool ov = false;
-    const int64_t c = IPow(2, g.m, &ov);
-    if (ov) {
-      std::fprintf(stderr, "pp-graph: 2^%d overflows int64\n", g.m);
-      return 1;
-    }
     const GiNaC::ex poly =
-        GiNaC::pow(x, g.n) + GiNaC::numeric(static_cast<long>(c));
+        GiNaC::pow(x, g.n) + GiNaC::pow(primeparts::graph::TSymbol(), g.m);
     g.hermite = primeparts::graph::ToHermite(poly, x);
   }
   std::vector<int> degrees;

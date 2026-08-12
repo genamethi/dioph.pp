@@ -24,6 +24,31 @@ struct Word {
   std::vector<Step> steps;
 };
 
+struct Block {
+  int32_t n = 2;
+  GiNaC::ex c;
+};
+
+struct Folded {
+  int64_t root = 0;
+  int64_t target = 0;
+  GiNaC::ex a0;
+  std::vector<Block> blocks;
+};
+
+enum class Lift {
+  kFaithful,
+  kCanonical,
+};
+
+Folded Fold(const Word& w, Lift lift);
+
+GiNaC::ex Composed(const Folded& f, const GiNaC::symbol& x);
+
+std::vector<GiNaC::ex> Graded(const Folded& f, const GiNaC::symbol& x);
+
+int64_t Degree(const Folded& f);
+
 int64_t Degree(const Word& w);
 
 std::vector<GiNaC::symbol> ChainSymbols(const Word& w);

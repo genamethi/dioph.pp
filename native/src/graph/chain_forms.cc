@@ -44,6 +44,94 @@ GiNaC::ex EvalAtTwo(const GiNaC::ex& e) {
   return GiNaC::expand(e.subs(TSymbol() == 2));
 }
 
+namespace {
+
+GiNaC::ex RunTerm(int32_t m, Lift lift, uint64_t* accumulated) {
+  if (lift == Lift::kFaithful) {
+    return GiNaC::pow(TSymbol(), m);
+  }
+  *accumulated += uint64_t{1} << m;
+  return 0;
+}
+
+GiNaC::ex FlushRun(Lift lift, uint64_t* accumulated) {
+  if (lift == Lift::kFaithful || *accumulated == 0) {
+    return 0;
+  }
+  const GiNaC::ex out = MaskToT(*accumulated);
+  *accumulated = 0;
+  return out;
+}
+
+}  // namespace
+
+Folded Fold(const Word& w, Lift lift) {
+  Folded f;
+  f.root = w.root;
+  f.target = w.target;
+  f.a0 = 0;
+  uint64_t run = 0;
+
+  for (const Step& s : w.steps) {
+    if (s.n == 1) {
+      const GiNaC::ex term = RunTerm(s.m, lift, &run);
+      if (f.blocks.empty()) {
+        f.a0 += term;
+      } else {
+        f.blocks.back().c += term;
+      }
+      continue;
+    }
+    const GiNaC::ex carried = FlushRun(lift, &run);
+    if (f.blocks.empty()) {
+      f.a0 += carried;
+    } else {
+      f.blocks.back().c += carried;
+    }
+    Block b;
+    b.n = s.n;
+    b.c = GiNaC::pow(TSymbol(), s.m);
+    f.blocks.push_back(std::move(b));
+  }
+
+  const GiNaC::ex tail = FlushRun(lift, &run);
+  if (f.blocks.empty()) {
+    f.a0 += tail;
+  } else {
+    f.blocks.back().c += tail;
+  }
+
+  f.a0 = GiNaC::expand(f.a0);
+  for (Block& b : f.blocks) {
+    b.c = GiNaC::expand(b.c);
+  }
+  return f;
+}
+
+std::vector<GiNaC::ex> Graded(const Folded& f, const GiNaC::symbol& x) {
+  std::vector<GiNaC::ex> levels;
+  levels.reserve(f.blocks.size() + 1);
+  GiNaC::ex p = GiNaC::expand(x + f.a0);
+  levels.push_back(p);
+  for (const Block& b : f.blocks) {
+    p = GiNaC::expand(GiNaC::pow(p, b.n) + b.c);
+    levels.push_back(p);
+  }
+  return levels;
+}
+
+GiNaC::ex Composed(const Folded& f, const GiNaC::symbol& x) {
+  return Graded(f, x).back();
+}
+
+int64_t Degree(const Folded& f) {
+  int64_t d = 1;
+  for (const Block& b : f.blocks) {
+    d *= b.n;
+  }
+  return d;
+}
+
 int64_t Degree(const Word& w) {
   int64_t d = 1;
   for (const Step& s : w.steps) {

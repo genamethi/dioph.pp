@@ -11,7 +11,11 @@ namespace {
 using primeparts::graph::ChainSymbols;
 using primeparts::graph::ClosesAtTwo;
 using primeparts::graph::Composed;
+using primeparts::graph::Block;
 using primeparts::graph::Degree;
+using primeparts::graph::Fold;
+using primeparts::graph::Folded;
+using primeparts::graph::Lift;
 using primeparts::graph::EvalAtTwo;
 using primeparts::graph::FiberProduct;
 using primeparts::graph::Graded;
@@ -150,6 +154,54 @@ TEST(ChainFormsTest, FiberProductVanishesOnAgreeingRoots) {
   at.append(y == 3);
   at.append(yp == 5);
   EXPECT_TRUE(GiNaC::expand(EvalAtTwo(c).subs(at)).is_zero());
+}
+
+TEST(ChainFormsTest, FaithfulFoldReproducesTheStepPolynomial) {
+  const GiNaC::symbol x("x");
+  for (const Word& w : {Chain(11, 29, {{1, 1}, {4, 1}}),
+                        Chain(3, 29, {{2, 2}, {4, 1}}),
+                        Chain(3, 0, {{1, 1}, {2, 1}, {3, 3}, {5, 1}, {2, 2}})}) {
+    const Folded f = Fold(w, Lift::kFaithful);
+    EXPECT_TRUE(GiNaC::expand(Composed(f, x) - Composed(w, x)).is_zero());
+    EXPECT_EQ(Degree(f), Degree(w));
+  }
+}
+
+TEST(ChainFormsTest, FoldCollapsesRunsIntoBlockConstants) {
+  const Word w = Chain(3, 29, {{2, 2}, {4, 1}});
+  const Folded f = Fold(w, Lift::kFaithful);
+  const GiNaC::ex t = TSymbol();
+
+  EXPECT_TRUE(f.a0.is_zero());
+  ASSERT_EQ(f.blocks.size(), 1u);
+  EXPECT_EQ(f.blocks[0].n, 2);
+  EXPECT_TRUE(GiNaC::expand(f.blocks[0].c - (GiNaC::pow(t, 2) + GiNaC::pow(t, 4)))
+                  .is_zero());
+}
+
+TEST(ChainFormsTest, LiftsAgreeAtTwoAndDifferFormallyOnRepeatedExponents) {
+  const GiNaC::symbol x("x");
+  const Word w = Chain(0, 0, {{3, 1}, {3, 1}, {1, 2}});
+
+  const Folded faithful = Fold(w, Lift::kFaithful);
+  const Folded canonical = Fold(w, Lift::kCanonical);
+
+  EXPECT_TRUE(GiNaC::expand(faithful.a0 - 2 * GiNaC::pow(TSymbol(), 3)).is_zero());
+  EXPECT_TRUE(GiNaC::expand(canonical.a0 - GiNaC::pow(TSymbol(), 4)).is_zero());
+
+  EXPECT_TRUE(GiNaC::expand(EvalAtTwo(Composed(faithful, x)) -
+                            EvalAtTwo(Composed(canonical, x)))
+                  .is_zero());
+  EXPECT_FALSE(
+      GiNaC::expand(Composed(faithful, x) - Composed(canonical, x)).is_zero());
+}
+
+TEST(ChainFormsTest, CanonicalLiftKeepsConstantsBinary) {
+  const Word w = Chain(0, 0, {{3, 1}, {3, 1}, {1, 2}});
+  const Folded canonical = Fold(w, Lift::kCanonical);
+  uint64_t mask = 0;
+  ASSERT_TRUE(TToMask(canonical.a0, &mask));
+  EXPECT_EQ(mask, uint64_t{1} << 4);
 }
 
 TEST(ChainFormsTest, DegreeIsTheProductOfExponents) {
