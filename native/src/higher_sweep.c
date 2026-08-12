@@ -152,6 +152,9 @@ int pp_higher_sweep(pp_higher_table *table, uint64_t lo, uint64_t hi)
 
 void pp_higher_seek(pp_higher_table *table, uint64_t p)
 {
+    if (table->cursor > 0 && (uint64_t)table->hits[table->cursor - 1].p > p) {
+        table->cursor = 0;
+    }
     while (table->cursor < table->count && (uint64_t)table->hits[table->cursor].p < p) {
         table->cursor++;
     }

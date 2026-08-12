@@ -97,9 +97,7 @@ Roughly in dependency order. Each is a starting point, not a spec.
    or accept that in-process planning is the real path for them. `generate` is
    already a REST client on both resume reads, so the producer's REST-ness is
    not the gap; what it does not use is the *spec* planning routes.
-3. ~~**Settle configuration.**~~ done
-
-4. **One runner, one declared config.** Three parts of one thread.
+3. **One runner, one declared config.** Three parts of one thread.
 
    (a) Too many binaries with their own entry points. Prefer two interfaces:
    TUI and CLI. A runner is the front door; per-binary entry points may stay
@@ -139,19 +137,3 @@ Roughly in dependency order. Each is a starting point, not a spec.
 3. **Views** —
    `https://raw.githubusercontent.com/apache/iceberg/refs/heads/main/format/view-spec.md`
 4. **Janitor** for killed-run `.pp-staging` debris.
-6. ~~**Compute `q_k` Dynamically**~~ done
-7. **Screening candidates before `pp_is_prime_power_u64`.** Set B in
-   `process_prime` hands every `q = p - 2^m` to FLINT. A screen over small
-   bases resolves most of them without it: one base dividing `q` means `q` is a
-   prime power only if it is a power of that base, two means it cannot be one.
-   Carrying `p mod b` and `2^m mod b` makes the per-`m` test a comparison and
-   the step a shift plus conditional subtract, so no division is involved.
-   Measured 25% off a rank-1..1e6 / 5e7 / 1e9 workload at 6 bases, with the
-   width having a clear optimum since the screen costs `O(max_m * N)` per prime
-   while base `b` only rejects a further `1/b`.
-
-   Not taken, because it presumes FLINT's `n_is_prime` does not already do this
-   better internally, and that was never checked. Before building it, read what
-   `n_is_prime` actually does and compare against how Sage wraps the same
-   libraries — `src/sage/rings/integer.pyx`, `is_prime_power` around :5306 and
-   the perfect-power path near :5437.

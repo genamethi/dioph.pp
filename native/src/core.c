@@ -12,6 +12,8 @@
 #include <primecount.h>
 #include <primesieve.h>
 
+#include "primeparts/higher_sweep.h"
+
 const char *pp_status_message(int status)
 {
     switch (status) {
@@ -404,7 +406,7 @@ static int power_of_three_exponent(uint64_t q, int32_t *exponent)
     return 0;
 }
 
-static int process_prime(pp_batch_result *result, uint64_t p)
+static int process_prime(pp_batch_result *result, pp_higher_table *higher, uint64_t p)
 {
     int max_m;
     int m;
@@ -421,6 +423,7 @@ static int process_prime(pp_batch_result *result, uint64_t p)
     killed_parity = (p % 3 == 2);
     partition_start = result->partition_count;
     power = 2;
+    pp_higher_seek(higher, p);
 
     for (m = 1; m <= max_m; m++) {
         uint64_t q_candidate = p - power;
@@ -434,9 +437,14 @@ static int process_prime(pp_batch_result *result, uint64_t p)
                     base = 3;
                 }
             } else {
-                status = pp_is_prime_power_u64(q_candidate, &base, &exponent);
-                if (status != PP_OK) {
-                    return status;
+                const pp_higher_hit *hit = pp_higher_take(higher, p, (int32_t)m);
+
+                if (hit != NULL) {
+                    base = (uint64_t)hit->q;
+                    exponent = hit->n;
+                } else if (n_is_prime((ulong)q_candidate)) {
+                    base = q_candidate;
+                    exponent = 1;
                 }
             }
             if (exponent > 0) {
@@ -452,11 +460,10 @@ static int process_prime(pp_batch_result *result, uint64_t p)
     return write_prime(result, p, (int32_t)(result->partition_count - partition_start));
 }
 
-static int count_prime(uint64_t p, int64_t *partition_count)
+static int count_prime(pp_higher_table *higher, uint64_t p, int64_t *partition_count)
 {
     int max_m;
     int m;
-    int status;
     int killed_parity;
     int64_t local_partitions = 0;
     uint64_t power;
@@ -468,22 +475,23 @@ static int count_prime(uint64_t p, int64_t *partition_count)
     max_m = floor_log2_u64(p);
     killed_parity = (p % 3 == 2);
     power = 2;
+    pp_higher_seek(higher, p);
 
     for (m = 1; m <= max_m; m++) {
         uint64_t q_candidate = p - power;
-        uint64_t base = 0;
         int32_t exponent = 0;
 
         if (q_candidate >= 2) {
             if ((m & 1) == killed_parity) {
                 /* Set A: 3 | q_candidate; a prime power here can only be 3^n. */
-                if (power_of_three_exponent(q_candidate, &exponent)) {
-                    base = 3;
-                }
+                power_of_three_exponent(q_candidate, &exponent);
             } else {
-                status = pp_is_prime_power_u64(q_candidate, &base, &exponent);
-                if (status != PP_OK) {
-                    return status;
+                const pp_higher_hit *hit = pp_higher_take(higher, p, (int32_t)m);
+
+                if (hit != NULL) {
+                    exponent = hit->n;
+                } else if (n_is_prime((ulong)q_candidate)) {
+                    exponent = 1;
                 }
             }
             if (exponent > 0) {
@@ -524,6 +532,9 @@ static int prepare_result(pp_batch_result *out, int64_t start_idx, int64_t reque
 
 int pp_process_prime_array(const uint64_t *primes, size_t count, pp_batch_result *out)
 {
+    pp_higher_table higher;
+    uint64_t lo;
+    uint64_t hi;
     size_t i;
     int status;
 
@@ -538,13 +549,36 @@ int pp_process_prime_array(const uint64_t *primes, size_t count, pp_batch_result
     if (status != PP_OK) {
         return status;
     }
+    if (count == 0) {
+        return PP_OK;
+    }
+
+    lo = primes[0];
+    hi = primes[0];
+    for (i = 1; i < count; i++) {
+        if (primes[i] < lo) {
+            lo = primes[i];
+        }
+        if (primes[i] > hi) {
+            hi = primes[i];
+        }
+    }
+
+    pp_higher_table_init(&higher);
+    status = pp_higher_sweep(&higher, lo, hi);
+    if (status != PP_OK) {
+        pp_higher_table_clear(&higher);
+        return status;
+    }
 
     for (i = 0; i < count; i++) {
-        status = process_prime(out, primes[i]);
+        status = process_prime(out, &higher, primes[i]);
         if (status != PP_OK) {
+            pp_higher_table_clear(&higher);
             return status;
         }
     }
+    pp_higher_table_clear(&higher);
     return PP_OK;
 }
 
@@ -554,6 +588,7 @@ int pp_process_rank_batch(int64_t start_idx, int64_t count, pp_batch_result *out
     int64_t end_prime;
     int status;
     primesieve_iterator it;
+    pp_higher_table higher;
 
     if (out == NULL || start_idx <= 0 || count < 0) {
         return PP_ERR_INVALID_ARGUMENT;
@@ -581,24 +616,34 @@ int pp_process_rank_batch(int64_t start_idx, int64_t count, pp_batch_result *out
         return status;
     }
 
+    pp_higher_table_init(&higher);
+    status = pp_higher_sweep(&higher, (uint64_t)first_prime, (uint64_t)end_prime - 1);
+    if (status != PP_OK) {
+        pp_higher_table_clear(&higher);
+        return status;
+    }
+
     primesieve_init(&it);
     primesieve_jump_to(&it, (uint64_t)first_prime, (uint64_t)end_prime);
     while (out->processed_count < count) {
         uint64_t p = primesieve_next_prime(&it);
         if (p == PRIMESIEVE_ERROR || it.is_error) {
             primesieve_free_iterator(&it);
+            pp_higher_table_clear(&higher);
             return PP_ERR_LIBRARY;
         }
         if (p >= (uint64_t)end_prime) {
             break;
         }
-        status = process_prime(out, p);
+        status = process_prime(out, &higher, p);
         if (status != PP_OK) {
             primesieve_free_iterator(&it);
+            pp_higher_table_clear(&higher);
             return status;
         }
     }
     primesieve_free_iterator(&it);
+    pp_higher_table_clear(&higher);
 
     if (out->processed_count != count) {
         return PP_ERR_LIBRARY;
@@ -612,6 +657,7 @@ int pp_count_rank_batch(int64_t start_idx, int64_t count, pp_count_result *out)
     int64_t end_prime;
     int status;
     primesieve_iterator it;
+    pp_higher_table higher;
 
     if (out == NULL || start_idx <= 0 || count < 0) {
         return PP_ERR_INVALID_ARGUMENT;
@@ -637,25 +683,35 @@ int pp_count_rank_batch(int64_t start_idx, int64_t count, pp_count_result *out)
         return PP_ERR_LIBRARY;
     }
 
+    pp_higher_table_init(&higher);
+    status = pp_higher_sweep(&higher, (uint64_t)first_prime, (uint64_t)end_prime - 1);
+    if (status != PP_OK) {
+        pp_higher_table_clear(&higher);
+        return status;
+    }
+
     primesieve_init(&it);
     primesieve_jump_to(&it, (uint64_t)first_prime, (uint64_t)end_prime);
     while (out->processed_count < count) {
         uint64_t p = primesieve_next_prime(&it);
         if (p == PRIMESIEVE_ERROR || it.is_error) {
             primesieve_free_iterator(&it);
+            pp_higher_table_clear(&higher);
             return PP_ERR_LIBRARY;
         }
         if (p >= (uint64_t)end_prime) {
             break;
         }
-        status = count_prime(p, &out->partition_count);
+        status = count_prime(&higher, p, &out->partition_count);
         if (status != PP_OK) {
             primesieve_free_iterator(&it);
+            pp_higher_table_clear(&higher);
             return status;
         }
         out->processed_count++;
     }
     primesieve_free_iterator(&it);
+    pp_higher_table_clear(&higher);
 
     if (out->processed_count != count) {
         return PP_ERR_LIBRARY;
