@@ -533,8 +533,6 @@ static int prepare_result(pp_batch_result *out, int64_t start_idx, int64_t reque
 int pp_process_prime_array(const uint64_t *primes, size_t count, pp_batch_result *out)
 {
     pp_higher_table higher;
-    uint64_t lo;
-    uint64_t hi;
     size_t i;
     int status;
 
@@ -553,25 +551,13 @@ int pp_process_prime_array(const uint64_t *primes, size_t count, pp_batch_result
         return PP_OK;
     }
 
-    lo = primes[0];
-    hi = primes[0];
-    for (i = 1; i < count; i++) {
-        if (primes[i] < lo) {
-            lo = primes[i];
-        }
-        if (primes[i] > hi) {
-            hi = primes[i];
-        }
-    }
-
     pp_higher_table_init(&higher);
-    status = pp_higher_sweep(&higher, lo, hi);
-    if (status != PP_OK) {
-        pp_higher_table_clear(&higher);
-        return status;
-    }
-
     for (i = 0; i < count; i++) {
+        status = pp_higher_sweep(&higher, primes[i], primes[i]);
+        if (status != PP_OK) {
+            pp_higher_table_clear(&higher);
+            return status;
+        }
         status = process_prime(out, &higher, primes[i]);
         if (status != PP_OK) {
             pp_higher_table_clear(&higher);
