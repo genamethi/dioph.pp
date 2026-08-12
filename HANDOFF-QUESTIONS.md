@@ -11,7 +11,7 @@ what is known to be wrong or off-goal. Implementation is the reader's call
 throughout.
 
 Code references are `native/src/graph/pp_graph.cc` unless noted, and are line
-numbers as of `d77040b` on `tui-query`. They rot on the first edit to that file;
+numbers as of `ed38b6d` on `tui-query`. They rot on the first edit to that file;
 `git log -L` or a grep for the named symbol is the reliable way back to one that
 has moved. The items being discussed live on `eval-analysis-engine`, which has
 no `native/src/graph/` at all, so the prose and the code it refers to are never
@@ -69,12 +69,21 @@ Under the pushforward reading in B1 this is the Galois group of the Galois
 closure of the chain polynomial, so item 3's monodromy and the Galois structure
 of a chain are one question.
 
+By B1' the uncollapsed `y`-variety supplies the block structure on the fiber for
+free, so the containment in the iterated wreath product of the `Z/n_i` is given
+rather than proved. Two distinct representations are in play and should not be
+conflated: the geometric monodromy `pi_1^{et}(U) -> GL(V)`, which for `P_*Q_ell`
+is the rank-`N` permutation representation and for `L_psi(P)` is a rank-1
+character; and the arithmetic action of `Gal(Fbar_q/F_q)` on `H^1_c`, whose
+Frobenius trace *is* the exponential sum. The first constrains, the second
+produces numbers.
+
 The code already contains the acknowledgment of this gap without acting on it.
-`FaithfulDegree` (`:1884`) computes the smallest `d` with `l^d > D` for the
+`FaithfulDegree` (`:2191`) computes the smallest `d` with `l^d > D` for the
 degree bound `D` in play and prints it as "faithful on `GF(l^d)`-points"
-(`:2560`), but every computation in the tree evaluates at `d = 1`. Item 3's
+(`:3030`), but every computation in the tree evaluates at `d = 1`. Item 3's
 request for a drawing is a request to draw the monodromy object, not the orbit
-digraph currently emitted at `:2538`.
+digraph currently emitted.
 
 **A3. Item 4's tower over `Z/2^e` is the object, and it is not a stand-in for
 `rho mod ell^e`.**
@@ -102,46 +111,110 @@ million primes.
 
 ## B. Open
 
-**B1. Which construction attaches a sheaf to a chain.**
+**B1. Which construction attaches a sheaf to a chain.** Settled: they are not
+alternatives.
 
-Items 1 through 4 produce polynomial maps. A map is not a sheaf and carries no
-trace function, so nothing attaches directly. Two constructions are available
-and they give different objects.
+`pi^* -| pi_*`, and for `pi = P` the projection formula gives
 
-*Pullback.* A map `P` and a base sheaf give `P^*L_psi` or `P^*L_chi`, rank 1,
-trace function `psi(P(x))`. In characteristic 2, Artin-Schreier reduction
-identifies `L_psi(f^2)` with `L_psi(f)`, so pulling back along an even-exponent
-edge may collapse. Whether that kills the construction or is the content of it
-is not clear either way. Note that at level one there is nothing left to pull
-back along: `P ≡ x^N` by A1, so the whole family degenerates to the `N`-th power
-map and the question is really what `P^*` means over `Z/2^e` for `e > 1`.
+    pi_*(pi^* L_psi)  ~  L_psi (x) pi_* Q_ell
+    H^*_c(A^1_x, P^* L_psi)  ~  H^*_c(A^1_p, L_psi (x) P_* Q_ell)
 
-*Pushforward.* `P_*Q_ell` has rank `deg P = prod n_i`, is lisse wherever `P` is
-etale, and its trace function at `x` is `#P^{-1}(x)(F_q)`, the number of points
-in the fiber. Those three are standard for any finite `P`; the stalk is the
-permutation representation on the geometric fiber, so the Frobenius trace counts
-rational points of the fiber.
+which at trace level is `sum_x psi(P(x)) = sum_p psi(p) * #P^{-1}(p)`. The
+pullback computation upstairs and the twisted pushforward downstairs are one
+computation. An earlier pass here framed them as competing readings; that was
+wrong, and so was a later claim that they are orthogonal to the choice of what
+happens to the base 2.
 
-Two further statements are standard only for *separable* `P`: that the branch
-locus is the set of critical values, and that the monodromy of the permutation
-representation is the Galois group of the Galois closure. Over `F_2` an
-even-exponent edge is inseparable, `x -> x^2` being Frobenius with identically
-vanishing derivative, so neither can be assumed here. That is the same fault
-line as the Artin-Schreier collapse above, reached from the other side, and it
-is the thing to settle first.
+Which one carries cohomology is *not* symmetric:
 
-If those two do survive in some form, the pushforward reading is the one to
-build on. The fiber count is the `k` structure the project already measures; the
-branch locus of a composite of unicritical maps would be its postcritical set,
-making `--critical` (`:2331`) a computation of the singular locus rather than
-something analogous to it; and A2's monodromy and the Galois-group question
-become the same question asked twice. What remains after that is where the
-pullback still has a role.
+- `P_* Q_ell` alone. `P` is finite, so `P_*` is exact and
+  `H^i_c(A^1_p, P_*Q_ell) = H^i_c(A^1_x, Q_ell)`. The source is the affine line.
+  **There is no cohomology there.** Its content — rank `N`, fiber counts,
+  monodromy — is pointwise.
+- `P^*L_psi = L_psi(P)`. Lisse of rank 1 on `A^1` and nontrivial, so
+  `H^0_c = H^2_c = 0` and `dim H^1_c = deg P_red - 1`, with `P_red` the
+  Artin-Schreier reduction below. One nontrivial group, and the Weil bound
+  `|sum_x psi(P(x))| <= (deg P_red - 1) sqrt(q)`.
+
+So the earlier recommendation to build on the pushforward is backwards for
+cohomology and right for monodromy. Both are needed; the projection formula is
+how they combine.
+
+*Artin-Schreier, exactly.* `℘(z) = z^p - z` is additive with kernel `F_p`, and
+`℘ : A^1 -> A^1` is finite etale Galois with group `F_p`, so
+`℘_* Q_ell = (+)_psi L_psi`. Then `L_psi(f) ~ L_psi(g)` iff
+`f - g ∈ ℘(k[x])`, because `Tr_{F_q/F_p}` kills `℘`. In characteristic 2,
+`℘(c x^j) = c^2 x^{2j} + c x^j`, so
+
+    L_psi(a x^{2j})  ~  L_psi(a^{1/2} x^j)     when a is a square in k
+
+Fold every even-degree monomial down, *adding* into the coefficient already at
+degree `j` — cancellation there can drop the degree further than folding alone.
+`Swan_inf = deg P_red`.
+
+Over `k = F_2` this never blocks, because `F_2` is perfect. With E4
+(`P ≡ x^N mod 2`), `L_psi(x^N) ~ L_psi(x^{N_odd})`, so
+`dim H^1_c = N_odd - 1`, zero exactly when `N` is a power of two. That is the
+collapse flagged above, made exact: not total, but down to the odd part.
+
+*Where the formal base variable earns its place.* Promote 2 to an indeterminate
+`t`; D4 already writes `A_0` and each `c_i` as a sum of powers of two. Over
+`k = F_2(t)`, `[k : k^2] = 2` with `k^2 = F_2(t^2)`, so `t^m` is a square iff
+`m` is even, and the fold blocks at the first even-degree term whose
+`t`-coefficient has odd valuation. Imperfection is doing the work and `F_2`
+cannot supply it. This is why the stand-in is needed on the `L_psi` side and not
+on the `P_*` side: `P_*Q_ell` has rank `N` and fiber-count traces regardless of
+what happens to 2; only the *additive* character cares, because `℘` is precisely
+what additive characters cannot see.
+
+*The obstruction is generic-only.* Every finite field is perfect, so specializing
+`t` to any closed point of the `t`-line restores squares and unfolds the
+reduction. The blocked degree is a statement about the generic fiber over
+`F_2(t)` and about no closed fiber; excising `t = 0` does not fix this, because
+the issue is every `t`. The setting that keeps both is the surface
+
+    A^1_t x A^1_x -> A^1_p,   (t, x) |-> P(t, x)
+
+over `F_q`: generic fiber over `F_q(t)` imperfect, constant field finite so
+Frobenius acts. Closed points of the `t`-line are places of `F_2(t)` with residue
+field `F_{2^d}` and Frobenius elements, and their traces assemble into an
+L-function. Untested lead: `F_q[t]/(t^e)`, the `t`-side analogue of the `Z/2^e`
+tower, non-reduced and so keeping squares constrained at finite level.
+
+**B1'. The variety picture is the fiber; the useful variety is a fiber product.**
+
+For a fixed word the `y`-variety
+`V = {(y_0..y_j) : y_{i+1} = y_i^{n_i} + t^{m_i}}` is the *graph* of the
+composition — each equation solves the next coordinate from the previous — so
+`V ~ A^2` via `(t, y_0)`. As a variety it is affine space and carries nothing.
+
+Imposing the target makes it the pushforward's fiber: `V ∩ {y_j = p}` is
+zero-dimensional of length `N` and is exactly the geometric fiber of `pi`, the
+stalk of `P_*Q_ell`. That is the precise sense in which the two pictures line up.
+
+What the variety has and the composed polynomial does not is the **tower
+filtration on that fiber** — blocks of size `n_j` inside blocks of size
+`n_j n_{j-1}`, and so on. That imprimitivity system is why the monodromy lands in
+the iterated wreath product of the `Z/n_i` rather than in `S_N`. From the
+composed `P` that is a decomposability theorem to prove; from the variety it is
+given. It is the reason to keep the uncollapsed presentation.
+
+The variety that is *not* a graph is the fiber product of two chains over the
+target line:
+
+    C = V x_{A^1_p} V' = { (y, y') : P(y) = P'(y') }   in A^2
+
+a plane curve, generally singular, of positive genus: `C -> A^1_y` is `N':1`,
+branched where `P(y)` meets a critical value of `P'`, so on the order of `k' N`
+branch points. This is where cohomology of a *curve*, rather than of `A^1`,
+becomes available, and it is the first object here with an `H^1` that is not
+forced.
 
 Nothing in the code builds a sheaf, a trace function, a pullback or a
 pushforward. `--critical` carries each node's set of critical values mod `l`
 through the ascending sweep using a precomputed per-`(l, c, n)` transition
-table (`:2333`), which is the nearest existing object either way.
+table, which is the nearest existing object either way. By D4 only the `n >= 2`
+blocks have critical points, so that pass reads `higher_parts` alone.
 
 **B2. Whether a bounded-conductor family exists.**
 
@@ -156,21 +229,32 @@ go trivial past a short depth, and items 1 through 4 would have to be asking for
 something else. This decides whether the approach produces results or only
 vocabulary.
 
-One candidate answer to test, not to assume: under the pushforward reading the
-rank is `prod n_i`, and conductor is at least rank, so a bounded conductor would
-mean a fixed chain with `q = 2^d` growing. That would agree with A1's statement
-that the growing family is the degree-`d` points. Both halves of that need
-checking, the conductor bound against the paper's definition and the agreement
-against what the chain data actually contains, before it counts as an answer.
+Both conductors are now computable rather than conjectural.
 
-What the rank does is now exact rather than a worry. `N = prod n_i` and a chain
-into `p` from a root `q_0 >= 3` has `p > q_0^N`, so `N <= floor(log_3 p)`. That
-bound is attained and every value below it occurs: at `e = 1` the class count
-equals `floor(log_3 p_max)` in all seven windows measured from 1e5 to 1e10, and
-the largest level-one state set has exactly that many elements. So rank does not
-grow with the window except logarithmically, and it does not depend on `d` at
-all — but the family it is uniform over is a fixed chain, which is not the
-family items 1 through 4 range over. That tension is the real content of B2.
+*Pullback.* `L_psi(P)` is rank 1, singular only at infinity, `Swan_inf = deg
+P_red`, so
+
+    c(L_psi(P)) = 1 + 1 + deg P_red = deg P_red + 2 <= N + 2
+
+*Pushforward.* `P_*Q_ell` has rank `N`. Its separable part has degree `N_odd`,
+and ramification indices there divide `N_odd`, which is odd, so characteristic 2
+never divides them: **tame, no Swan conductor**. The singularities are the
+critical values, and by D4 only the `n >= 2` blocks have critical points, one
+each, so `#sing <= k + 1` with `k <= log_2 N`. Hence
+
+    c(P_*Q_ell) <= N + log_2 N + 2
+
+What the rank does is exact rather than a worry. `N = prod n_i` and a chain into
+`p` from a root `q_0 >= 3` has `p > q_0^N`, so `N <= floor(log_3 p)`. That bound
+is attained and every value below it occurs: at `e = 1` the class count equals
+`floor(log_3 p_max)` in all seven windows measured from 1e5 to 1e10, and the
+largest level-one state set has exactly that many elements.
+
+So both conductors are bounded for a fixed chain and **independent of `d`**:
+constant-field growth `q = 2^d` does not move them, which is exactly the family
+FKMS's bounds are stated over. Both grow like `log_3 p` over the family items 1
+through 4 range over. That is B2's tension with numbers attached rather than a
+worry — the bounds are usable in `d` and go trivial in chain depth.
 
 Nothing computes a conductor, a rank, or a Swan conductor. Degree is available
 from the word layout in `ComputeSpectrumCore` (`:1474`) and is used as a
@@ -182,16 +266,27 @@ singularities and not the conductor.
 
 The paper is organised around sums of trace functions: over `F_q` (§4), short
 intervals (§7), primes (§9), bilinear (§10). Items 1 through 4 ask for structure
-and never name a sum.
+and never name a sum. Two now have a shape.
 
-Work out what the sum is and what a bound on it would establish. `k(p)` is a
-count over `m <= log_2 p` of an arithmetic condition, not a sum over
-`F_q`-points, so if `k` is the target then producing the trace-function sum it
-corresponds to is itself the work.
+*The Weil sum.* `sum_{x in F_q} psi(P(x))`, bounded by
+`(deg P_red - 1) sqrt(q)` from B1. Over `F_2` with 2 evaluated, `deg P_red =
+N_odd` and the bound is identical for every chain of the same odd degree — the
+vacuity A1 records, a statement about the base rather than about the chains.
+Non-vacuous only under the formal `t` of B1 or an odd base.
 
-Every output in the tree is a count or a set size (`Family census`, `:2224`;
-orbit report, `:2560`). No signed quantity is summed anywhere, so there is
-nothing to point cancellation at yet.
+*The correlation sum, which is the one that touches `k`.* With
+`t(p) = #P^{-1}(p)` and `t'(p) = #P'^{-1}(p)` the fiber counts of two chains,
+
+    sum_{p in F_q} t(p) t'(p) = #C(F_q)
+
+for the fiber product `C` of B1'. Weil for a curve gives `q + O(g sqrt(q))`.
+`k(p)` counts the ways `p` is expressed, so this is its two-chain correlation
+and the first sum here whose cancellation would say something about `k`. Moving
+from a sum over `F_q` to a sum over primes (§9) is a separate step, not done.
+
+Every output in the tree is a count or a set size (`Family census`, `:2553`;
+orbit report). No signed quantity is summed anywhere, so there is still nothing
+implemented to point cancellation at.
 
 ## B'. Next direction
 
@@ -230,16 +325,18 @@ applies verbatim, and without it neither runs past about 1e7.
 
 | Code | Object |
 |---|---|
-| `ReadEdges` (`:532`), `SolveQ` | the generator set `{sigma_{m,n} : x -> x^n + 2^m}` realized by the queried window; `q` recovered algebraically from `(p, m_k, n_k)` |
-| `RunHasse` (`:2717`), `EmitDot` (`:1118`) | the prime poset, cover relation, Dilworth width, minimum chain decomposition; DOT with Mirsky levels as `rank=same` |
-| `RunCompose` (`:921`), DOT at `:1021` | the composite/ancestor structure with edge labels `(m, n)` |
-| `EmitConeDot` (`:1841`), reached from `:1601` | the ancestral cone of a single target; roots boxed, target highlighted, `n >= 2` edges thickened |
-| DOT at `:868` | the congruence-refinement poset over `l`, from mode `hasse` |
-| `ToHermite` (`:644`, `:1078`, `:1581`), `hermite_modl.cc` | `He_i` decomposition of a chain polynomial; `hermite_basis` table written at `:702` |
-| `SegKey` (`:1940`), `SegKeyModL` (`:1951`) | the `He_i` support of a chain, exact and mod `l`; this is the grouping key item 1's third bullet asks for |
-| `HermiteEvalModL`, `HermiteRootsModL` (`:1230`, `:1274`, `:1347`) | roots of `He_n` mod `l`, feeding the congruence refinement |
-| `MaterializeColumns` (`:2640`) | `<ns>.spectra` with `p, root, degree, chains, skeleton, hermite` |
-| `PolyKey` / `KeyToPoly` / `SeedKey` (`:1699`-`:1735`), `nmod_poly` throughout | coefficient vectors over `F_l` as the state datum; replaced the hand-rolled `MulL`/`PowL`, removing the degree-32 and `l < 256` caps |
+| `ReadEdges` (`:563`), `ScanPartitionEdges` (`graph/partition_scan.cc`) | the generator set `{sigma_{m,n} : x -> x^n + 2^m}` realized by the queried window. `SolveQ` is **gone**: `flat_parts` gives `q = p - 2^m` by subtraction and `higher_parts` stores `q_k`, so no root extraction remains on any read path |
+| `RunHasse` (`:796`), `EmitDot` (`:1168`), DOT at `:1171` | the prime poset, cover relation, Dilworth width, minimum chain decomposition; DOT with Mirsky levels as `rank=same` |
+| `RunCompose` (`:965`), DOT at `:1079` | the composite/ancestor structure with edge labels `(m, n)` |
+| `EmitConeDot` (`:2149`), DOT at `:2169`, reached from `:1650` | the ancestral cone of a single target; roots boxed, target highlighted, `n >= 2` edges thickened |
+| DOT at `:919` | the congruence-refinement poset over `l`, from mode `hasse` |
+| `ToHermite` (`:694`, `:1128`, `:1629`, `:2472`), `hermite_modl.cc` | `He_i` decomposition of a chain polynomial |
+| `SegKey` (`:2247`), `SegKeyModL` (`:2258`) | the `He_i` support of a chain, exact and mod `l`; this is the grouping key item 1's third bullet asks for |
+| `HermiteEvalModL`, `HermiteRootsModL` (`:1279`, `:1323`, `:1395`) | roots of `He_n` mod `l`, feeding the congruence refinement |
+| `MaterializeColumns` (`:751`, `:3156`) | `<ns>.spectra` with `p, root, degree, chains, skeleton, hermite` |
+| `PolyKey` / `KeyToPoly` / `SeedKey` (`:1757`-`:1782`), `nmod_poly` throughout | coefficient vectors over `F_l` as the state datum; replaced the hand-rolled `MulL`/`PowL`, removing the degree-32 and `l < 256` caps |
+| `flat_parts` / `higher_parts` (`schemas.cc:42`, `:53`), `parts_expand.h` | the bigrading made physical. By D4 an `n = 1` edge contributes no degree, so `hit_mask` is the translation layer and `higher_parts` carries the entire `y`-graded structure — 147,103 rows for the whole warehouse |
+| `higher_sweep.c`, `pp_higher_sweep` | the `n >= 2` edges enumerated directly from `n <= log_5(hi)` rather than discovered by testing every `p - 2^m`. Makes the graded layer computable without the flat table |
 | `config.h` `kFields` table, `config_gen.cc`, `Conf::defaulted` | one declaration drives flags, config keys and the generated `example.config.lua`; a missing key now defaults instead of being fatal. This is what item 1's N.B. asks for when it says moduli and ranges should be parameters |
 | `--ells` / `ParseEllList` (`:1745`), used at `:779` | replaced the hardcoded ten-element modulus list in mode `hasse` |
 | `pp_catalogd.cc` `/v1/config`, `pp_iceberg_rest.cc` `AdvertisedWarehouse` | warehouse advertisement and a read/write mismatch guard; infrastructure, no mathematical content |
@@ -249,10 +346,11 @@ applies verbatim, and without it neither runs past about 1e7.
 
 | Code | Object |
 |---|---|
-| `ComputeSpectrumCore` (`:1387`) | item 2's spectrum for one target: ancestor cone, admissible `n >= 2` segment sequences, canonical words with multiplicities. The definition executed literally |
-| `SpectrumRow` (`:1737`), family mode `--k` | the spectrum of a whole family `{p : k(p) = K}` off one shared edge read |
-| `ClassSweep` (`:1798`) | the same class sets by a single ascending pass; `p = 2^m + q^n > q` makes ascending order topological, so each node's state is built from its parents' |
-| `--sweep` agreement check (`:2425`) | the sweep against the per-target walk. The only evidence the fast path computes the definition and not something adjacent |
+| `ComputeSpectrumCore` (`:1435`), called at `:1589`, `:2418` | item 2's spectrum for one target: ancestor cone, admissible `n >= 2` segment sequences, canonical words with multiplicities. The definition executed literally |
+| `SpectrumRow` (`:1873`), family mode `--k` | the spectrum of a whole family `{p : k(p) = K}` off one shared edge read |
+| `ClassSweep` (`:1882`) | the same class sets by a single ascending pass; `p = 2^m + q^n > q` makes ascending order topological, so each node's state is built from its parents' |
+| `BuildCompactGraph` (`:1941`) | the streaming CSR build that replaced the in-memory edge map; what makes 1e10 reachable |
+| `--sweep` agreement check | the sweep against the per-target walk. The only evidence the fast path computes the definition and not something adjacent |
 
 ### C3. Item 3, the monoid and its orbits
 
@@ -269,59 +367,59 @@ exponent. `ZeroConst` and `S` agree only on the sub-question of what a twist by
 
 | Code | Object |
 |---|---|
-| `SharedSweep` (`65bd8bb`) | `S = P - p` as the carried state: invariant along `n = 1` edges, `S_p = (S_q + q)^n - q^n` on `n >= 2`. The normalization item 3 should have asked for |
-| `ZeroConst` (`:1894`) | the polynomial with its constant term zeroed. Read as the translation quotient it is item 3's orbit representative; read against A1 it discards the exponents and is the wrong normalization for the tower |
-| ambient BFS (`:2459`-`:2490`) | the monoid `M_l` generated by the reductions of the edges actually present, closed under the generator action from the seed `x` |
-| `realized` / `missed` (`:2435`, `:2501`) | which orbits the queried family attains and which of the ambient it does not |
-| `signatures` (`:2451`) | the per-prime realized set, counted by distinct signature. This is the per-prime reading item 3 asks for |
-| orbit DOT (`:2538`) | the quotient as a digraph: nodes are orbits labelled by `PolyLabel` (`:1907`), realized ones filled, complement dashed, `rank=same` by degree, arcs the generator action |
-| `FaithfulDegree` (`:1884`) | the `d` at which `GF(l^d)`-points separate maps of the degree in play; reported, never used |
+| `SharedSweep` (`:2021`) | `S = P - p` as the carried state: invariant along `n = 1` edges, `S_p = (S_q + q)^n - q^n` on `n >= 2`. The normalization item 3 should have asked for. E1 and B1' are the same fact from two sides: `n = 1` edges carry no `y`-degree, which is why `S` is constant along them |
+| `ZeroConst` (`:2201`) | the polynomial with its constant term zeroed. Read as the translation quotient it is item 3's orbit representative; read against A1 it discards the exponents and is the wrong normalization for the tower |
+| ambient BFS (`:2968`) | the monoid `M_l` generated by the reductions of the edges actually present, closed under the generator action from the seed `x` |
+| `realized` (`:2903`), `misses` | which orbits the queried family attains and which of the ambient it does not |
+| `signatures` (`:2918`) | the per-prime realized set, counted by distinct signature. This is the per-prime reading item 3 asks for |
+| orbit DOT (`:3006`) | the quotient as a digraph: nodes are orbits labelled by `PolyLabel` (`:2217`), realized ones filled, complement dashed, `rank=same` by degree, arcs the generator action |
+| `FaithfulDegree` (`:2191`) | the `d` at which `GF(l^d)`-points separate maps of the degree in play; reported (`:3030`), never used |
 
 ### C4. Item 4, the tower
 
 | Code | Object |
 |---|---|
-| `ClassSweep(mod = l^e)` (`:2609`) | the class sets over `Z/l^e`, keyed by the absolute polynomial |
-| `TruncKey` (`:1925`) and the `e`-loop (`:2607`) | levels compared by truncating the top-level answer to each lower modulus; a mismatch is a hard failure |
-| per-`e` family-class and per-prime-set counts (`:2628`) | the stratification question as item 4 poses it: whether the realized set changes only at isolated `p` |
-| `--shared` (`65bd8bb`) | the same counts off `S = P - p`, interned and shared between primes; `--ells 2` now reaches the base. Agrees with `ClassSweep` at `l = 2, 3, 5, 7` on every level checked, and is what makes 1e10 reachable |
+| `ClassSweep(mod = l^e)` (`:3077`) | the class sets over `Z/l^e`, keyed by the absolute polynomial |
+| `TruncKey` (`:2232`) and the `e`-loop (`:3081`) | levels compared by truncating the top-level answer to each lower modulus; a mismatch is a hard failure |
+| per-`e` family-class and per-prime-set counts | the stratification question as item 4 poses it: whether the realized set changes only at isolated `p` |
+| `--shared` (`:2657`) | the same counts off `S = P - p`, interned and shared between primes; `--ells 2` now reaches the base. Agrees with `ClassSweep` at `l = 2, 3, 5, 7` on every level checked, and is what makes 1e10 reachable |
 | `--k` taking a list or range (`65bd8bb`) | the stratification read per `k` off one sweep, since the sweep is over nodes and `k` only selects which nodes are reported |
 
 ### C5. Known wrong or off-goal
 
 1. **The ambient monoid is not the ambient monoid, and may not be wanted.** The
-   BFS at `:2478` skips any image whose degree exceeds `max_degree`, and
-   `max_degree` is taken from the *realized* classes at `:2437`. So the set the
-   complement is measured against is a degree-truncated monoid whose truncation
-   level is set by the same data being measured. `misses` at `:2503` is
-   therefore not the count of unreached ambient orbits. The composition monoid
-   in `F_l[x]` is infinite because degrees strictly grow; making it finite this
-   way is the shortcut that produces a finite answer rather than the target one.
-   Per C3 the prior question is whether the monoid is an object worth computing
-   at all.
+   BFS at `:2968` skips any image whose degree exceeds `max_degree`, and
+   `max_degree` is taken from the *realized* classes. So the set the complement
+   is measured against is a degree-truncated monoid whose truncation level is set
+   by the same data being measured. `misses` is therefore not the count of
+   unreached ambient orbits. The composition monoid in `F_l[x]` is infinite
+   because degrees strictly grow; making it finite this way is the shortcut that
+   produces a finite answer rather than the target one. Per C3 the prior question
+   is whether the monoid is an object worth computing at all.
 
-2. **`--branches` computes the wrong constant.** At `:2115` the fold starts
+2. **`--branches` computes the wrong constant.** The fold starts
    `zero = w[1]`, the initial translation `A_0`. The criterion for the even
    quartic applies in the depressed variable, where the fold starts at `0`. The
    two agree only when `A_0 = 0`. Every number this flag has printed is on the
    shifted quantity.
 
 3. **`--branches` runs inside the per-target walk.** It sits in the
-   `ComputeSpectrumCore` loop, not the sweep, so it inherits the path that does
-   not scale. The fold has the shape and cost of the `--critical` pass and
-   belongs there.
+   `ComputeSpectrumCore` loop (`:1435`), not the sweep, so it inherits the path
+   that does not scale. The fold has the shape and cost of the `--critical` pass
+   and belongs there.
 
-4. **`kCap = 400000`** at `:956` and `:1441` truncates the compose BFS and the
-   admissible-sequence enumeration. `SpectrumCore::capped` sets a flag and
-   carries on, so a truncated answer is reported as an answer. `kMonoidBound`
-   (`:1739`) does report and skip rather than truncate silently.
+4. **`kCap = 400000`** at `:1006` and `:1489` truncates the compose BFS and the
+   admissible-sequence enumeration. `SpectrumCore::capped` (`:1431`) sets a flag
+   and carries on, so a truncated answer is reported as an answer.
+   `kMonoidBound = 4000000` (`:1787`) does report and skip rather than truncate
+   silently.
 
-5. **The odd-only modulus filter excludes the base.** Partly fixed in
-   `65bd8bb`: `ParseEllList` no longer rejects 2, so `--ells 2 --e E` reaches
-   the base and produces the tables quoted in A1 and A3. `IsSmallPrime` always
+5. **The odd-only modulus filter excludes the base.** Partly fixed:
+   `ParseEllList` (`:1816`) no longer rejects 2, so `--ells 2 --e E` reaches the
+   base and produces the tables quoted in A1 and A3. `IsSmallPrime` always
    accepted 2. Still open: the `ell = 3; ell += 2` loops driven by `--ell-max`
-   at `:788`, `:1346`, `:1676`, `:2044` skip it, so anything reached only
-   through `--ell-max` still never sees the base.
+   at `:1392` and `:1722` skip it, so anything reached only through `--ell-max`
+   still never sees the base.
 
 6. **`FaithfulDegree` reports a gap it does not close.** It prints the `d` at
    which the degree-bounded maps become separated by `GF(l^d)`-points, and every
@@ -329,23 +427,26 @@ exponent. `ZeroConst` and `S` agree only on the sub-question of what a twist by
    between item 3 as implemented and item 3 as it should be.
 
 7. **`--critical`'s ramification criterion is asserted, not established.** The
-   report at `:2352` states that `l` ramifies for `p` iff some critical value of
+   report at `:2842` states that `l` ramifies for `p` iff some critical value of
    a chain into `p` is congruent to `p` mod `l`. Checked on one case
-   (`p = 137`) and not in general.
+   (`p = 137`) and not in general. B1 now says what the pass *should* compute:
+   critical values as elements of `F_2[t]`, which by D4 depend only on the
+   `n >= 2` blocks and so read `higher_parts` alone.
 
-8. **`root` as a column in `spectra`** (`:2657`). If the initial translation
-   only shifts the variable, `root` is redundant against the edge sequence for
-   anything Galois-theoretic. Not verified either way; it is stored as a key
-   today.
+8. **`root` as a column in `spectra`**. If the initial translation only shifts
+   the variable, `root` is redundant against the edge sequence for anything
+   Galois-theoretic. Not verified either way; it is stored as a key today.
 
 9. **`--format dot` for the spectrum family is only wired to the orbit space.**
-   `:1974` refuses the format without `--orbits` and `:2046` refuses more than
-   one modulus. The other family outputs have no drawing.
+   The format is refused without `--orbits`, and refused for more than one
+   modulus. The other family outputs have no drawing.
 
 10. **No sheaf-side quantity exists anywhere in the tree.** No trace function, no
-    conductor, no rank, no monodromy group. B1 through B3 are entirely
-    unimplemented, and by A2 item 3's current implementation is not a partial
-    step toward the object it should produce.
+    conductor, no rank, no monodromy group, no fiber product. B1 through B3 now
+    have definite objects attached — `deg P_red`, the two conductor bounds, the
+    correlation sum on `C` — and none of the three is implemented. By A2 item
+    3's current implementation is not a partial step toward the object it should
+    produce.
 
 11. **`--critical` and the orbit pass still carry absolute per-node sets.** Both
     predate the normalization in A1 and neither runs much past 1e7. `--shared`
@@ -356,3 +457,12 @@ exponent. `ZeroConst` and `S` agree only on the sub-question of what a twist by
     returns the degree and nothing else. It is worth running only as the base of
     a tower or as the degree-spectrum readout of B'1; a single `e = 1` sweep at
     `l = 2` reported on its own says only `floor(log_3 p_max)`.
+
+13. **The cheapest sheaf-side computation available is `deg P_red`.** It is the
+    Artin-Schreier fold of B1 run on a chain word: fold even-degree monomials
+    down, halving the exponent and square-rooting the coefficient, accumulating
+    into the target degree, until blocked. Over `Z[t]` nothing blocks except by
+    cancellation; over `F_2` nothing blocks at all and the answer is `N_odd`;
+    over `F_2(t)` it blocks on odd `t`-valuation. The three answers for the same
+    word are the sharpest available test of whether the formal base variable is
+    doing what B1 claims, and the input is a word, not a warehouse.
