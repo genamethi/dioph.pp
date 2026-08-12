@@ -89,8 +89,8 @@ TEST_SUITE_BIN := $(BUILD_DIR)/primeparts-tests
 TEST_SUITE_OBJS := $(BUILD_DIR)/core_test.o $(BUILD_DIR)/writer_test.o \
                    $(BUILD_DIR)/scan_planner_test.o $(BUILD_DIR)/partition_stats_test.o \
                    $(BUILD_DIR)/plan_store_test.o $(BUILD_DIR)/parts_expand_test.o \
-                   $(BUILD_DIR)/higher_sweep_test.o
-TEST_SUITE_LIBOBJS := $(WRITER_OBJ) $(SCHEMAS_OBJ) $(SCAN_OBJS) $(PARTITION_STATS_OBJ) $(PLAN_STORE_OBJ) $(PLAN_STATUS_OBJ) $(CORE_OBJ) $(PARTS_EXPAND_OBJ) $(HIGHER_SWEEP_OBJ)
+                   $(BUILD_DIR)/higher_sweep_test.o $(BUILD_DIR)/chain_forms_test.o
+TEST_SUITE_LIBOBJS := $(WRITER_OBJ) $(SCHEMAS_OBJ) $(SCAN_OBJS) $(PARTITION_STATS_OBJ) $(PLAN_STORE_OBJ) $(PLAN_STATUS_OBJ) $(CORE_OBJ) $(PARTS_EXPAND_OBJ) $(HIGHER_SWEEP_OBJ) $(BUILD_DIR)/chain_forms.o $(BUILD_DIR)/hermite_modl.o
 
 E2E_BIN := $(BUILD_DIR)/primeparts-e2e
 E2E_OBJ := $(BUILD_DIR)/e2e_test.o
@@ -315,7 +315,7 @@ $(BUILD_DIR)/pp: $(BUILD_DIR)/pp_main.o $(CONFIG_OBJS) $(BUILD_DIR)/lua_query_mo
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(LUA_LDLIBS) -lsqlite3 -pthread -o $@
 
 $(BUILD_DIR)/%_test.o: tests/%_test.cc | $(BUILD_DIR)
-	$(CXX) $(GTEST_CPPFLAGS) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+	$(CXX) $(GTEST_CPPFLAGS) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(GINAC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(TEST_SUITE_BIN): $(TEST_SUITE_OBJS) $(TEST_SUITE_LIBOBJS)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(ICEBERG_LDLIBS) $(GINAC_LDLIBS) $(GTEST_LDLIBS) -pthread -o $@
@@ -359,6 +359,11 @@ PP_GRAPH_OBJ := $(BUILD_DIR)/pp_graph.o
 HERMITE_MODL_OBJ := $(BUILD_DIR)/hermite_modl.o
 
 $(HERMITE_MODL_OBJ): src/graph/hermite_modl.cc include/primeparts/graph/hermite_modl.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(GINAC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+CHAIN_FORMS_OBJ := $(BUILD_DIR)/chain_forms.o
+
+$(CHAIN_FORMS_OBJ): src/graph/chain_forms.cc include/primeparts/graph/chain_forms.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(GINAC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 PARTITION_SCAN_OBJ := $(BUILD_DIR)/partition_scan.o
