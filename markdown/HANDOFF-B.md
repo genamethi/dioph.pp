@@ -336,18 +336,57 @@ Roughly in dependency order. Each is a starting point, not a spec.
    question on the largest object here and it is where the cost sits. It is also
    the same arithmetic as direction 2, from the other side.
 
-8. **Read the chain off the Hermite vector, with the premise corrected.**
+8. **What the Hermite basis is actually for.**
 
-   The claim that the coefficients above index `N - N_1` are those of `x^N`, and
-   that `c_i` first appears at `N - N_i` with linear coefficient `(N/N_i) c_i`,
-   is **false** whenever `A_0` is nonzero: `(x + A_0)^N` already differs from
-   `x^N` one index down. Every example that appeared to support it had
-   `A_0 = 0`.
+   Two things that are settled, and they point opposite ways.
 
-   What survives is one edge: `x^n + 2^m` puts its whole exponent in `He_0` and
-   every other coefficient depends on `n` alone. Whether composition turns that
-   into a depth filtration is open and is the question. The support is cheap to
-   group by; the linear readout it was supposed to rest on does not exist.
+   *The depth filtration is not a Hermite fact.* The claim that coefficients
+   above index `N - N_1` are those of `x^N`, and that `c_i` first appears at
+   `N - N_i` with linear coefficient `(N/N_i) c_i`, is a statement about
+   `deg(P - x^N)` in monomials, transported. Both bases are triangular with unit
+   diagonal, so agreement above an index is basis-independent. It is also false
+   whenever `A_0` is nonzero, since `(x + A_0)^N` contributes `N A_0 x^{N-1}` and
+   the filtration collapses at `N - 1`. Every example that appeared to support it
+   had `A_0 = 0`. Drop this framing; it was a degree statement in costume.
+
+   *The basis and the Lucas filter are the same combinatorics.* In
+
+       x^n = sum_j C(n, 2j) (2j-1)!! He_{n-2j}
+
+   the double factorial `1 * 3 * 5 * ... * (2j-1)` is a product of odd numbers,
+   hence odd. So modulo 2 it drops out entirely and the surviving terms are
+   exactly those with `2j` a submask of `n` — the same Lucas condition that
+   governs the edge operator's coefficients. Checked: `n = 8` gives support
+   `{8, 0}` against the vector `1, 28, 210, 420, 59081`, odd only at the ends;
+   `n = 6` gives `{6, 4, 2, 0}` against `1, 15, 45, 15`, odd throughout.
+
+   **Consequence: the support question is vacuous mod 2.** Every chain polynomial
+   is `x^N` there, so its Hermite support is a function of `N` alone. Ask it in
+   characteristic zero or over `Z/2^e`.
+
+   *What is open, and it is the one thing the basis buys.* Triangular is not
+   diagonal, so a polynomial can have a zero monomial coefficient and a nonzero
+   Hermite one: `x^8 + c` has monomial support `{8, 0}` and Hermite support
+   `{8, 6, 4, 2, 0}`. Grouping primes by Hermite support is a genuinely different
+   equivalence relation, not a relabelling. Whether it determines the skeleton is
+   the question.
+
+   *Unknown utility, real structure.* Multiplication has explicit constants,
+
+       He_a * He_b = sum_k k! C(a,k) C(b,k) He_{a+b-2k}
+
+   which count perfect matchings. Composition here is `P -> P^n + c`, so it is an
+   iterated linearisation with combinatorial coefficients rather than an opaque
+   expansion, and the 2-adic valuation of `k! C(a,k) C(b,k)` is a Kummer question
+   again.
+
+   One caution against over-reading the basis. `He_n` is `x^n` with the Gaussian
+   moments subtracted, and it is an Appell sequence, so translations act by a
+   triangular binomial matrix. That is why the binomial expansions come out as
+   obvious combinations. But monomials are Appell too and translations act the
+   same way on them, so nothing is gained on the translation half of an edge.
+   What Hermite has that monomials do not is the centering, the orthogonality,
+   and the linearisation rule above.
 
 ## Lower priority leftovers
 
