@@ -68,6 +68,7 @@ PARTS_EXPAND_OBJ := $(BUILD_DIR)/parts_expand.o
 HIGHER_SWEEP_OBJ := $(BUILD_DIR)/higher_sweep.o
 FLAT_CONE_OBJ := $(BUILD_DIR)/flat_cone.o
 POINT_COUNT_OBJ := $(BUILD_DIR)/point_count.o
+AS_FOLD_OBJ := $(BUILD_DIR)/as_fold.o
 SOURCE_SCAN_OBJ := $(BUILD_DIR)/source_scan.o
 TABLE_TRAITS_OBJ := $(BUILD_DIR)/table_traits.o
 SCAN_PLANNER_OBJ := $(BUILD_DIR)/scan_planner.o
@@ -92,8 +93,8 @@ TEST_SUITE_OBJS := $(BUILD_DIR)/core_test.o $(BUILD_DIR)/writer_test.o \
                    $(BUILD_DIR)/scan_planner_test.o $(BUILD_DIR)/partition_stats_test.o \
                    $(BUILD_DIR)/plan_store_test.o $(BUILD_DIR)/parts_expand_test.o \
                    $(BUILD_DIR)/higher_sweep_test.o $(BUILD_DIR)/chain_forms_test.o \
-                   $(BUILD_DIR)/flat_cone_test.o $(BUILD_DIR)/point_count_test.o
-TEST_SUITE_LIBOBJS := $(WRITER_OBJ) $(SCHEMAS_OBJ) $(SCAN_OBJS) $(PARTITION_STATS_OBJ) $(PLAN_STORE_OBJ) $(PLAN_STATUS_OBJ) $(CORE_OBJ) $(PARTS_EXPAND_OBJ) $(HIGHER_SWEEP_OBJ) $(BUILD_DIR)/chain_forms.o $(BUILD_DIR)/hermite_modl.o $(FLAT_CONE_OBJ) $(POINT_COUNT_OBJ)
+                   $(BUILD_DIR)/flat_cone_test.o $(BUILD_DIR)/point_count_test.o $(BUILD_DIR)/as_fold_test.o
+TEST_SUITE_LIBOBJS := $(WRITER_OBJ) $(SCHEMAS_OBJ) $(SCAN_OBJS) $(PARTITION_STATS_OBJ) $(PLAN_STORE_OBJ) $(PLAN_STATUS_OBJ) $(CORE_OBJ) $(PARTS_EXPAND_OBJ) $(HIGHER_SWEEP_OBJ) $(BUILD_DIR)/chain_forms.o $(BUILD_DIR)/hermite_modl.o $(FLAT_CONE_OBJ) $(POINT_COUNT_OBJ) $(AS_FOLD_OBJ)
 
 E2E_BIN := $(BUILD_DIR)/primeparts-e2e
 E2E_OBJ := $(BUILD_DIR)/e2e_test.o
@@ -387,4 +388,7 @@ $(FLAT_CONE_OBJ): src/graph/flat_cone.cc include/primeparts/graph/flat_cone.h in
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(POINT_COUNT_OBJ): src/graph/point_count.cc include/primeparts/graph/point_count.h include/primeparts/graph/chain_forms.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(GINAC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(AS_FOLD_OBJ): src/graph/as_fold.cc include/primeparts/graph/as_fold.h include/primeparts/graph/chain_forms.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(GINAC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
