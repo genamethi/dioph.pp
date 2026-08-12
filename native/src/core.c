@@ -361,43 +361,6 @@ static int write_partition(pp_batch_result *result, uint64_t p, int32_t m, int32
     return PP_OK;
 }
 
-static bool exhausted_divides(uint64_t q_candidate, const uint64_t *exhausted, size_t n_exhausted)
-{
-    size_t i;
-
-    for (i = 0; i < n_exhausted; i++) {
-        if (exhausted[i] != 0 && q_candidate % exhausted[i] == 0) {
-            return true;
-        }
-    }
-    return false;
-}
-
-static void increment_hit(uint64_t base, uint64_t *hit_base, unsigned char *hit_count,
-                          size_t *n_hits, uint64_t *exhausted, size_t *n_exhausted)
-{
-    size_t i;
-
-    for (i = 0; i < *n_hits; i++) {
-        if (hit_base[i] == base) {
-            if (hit_count[i] < UCHAR_MAX) {
-                hit_count[i]++;
-            }
-            if (hit_count[i] >= 2 && *n_exhausted < 64) {
-                exhausted[*n_exhausted] = base;
-                (*n_exhausted)++;
-            }
-            return;
-        }
-    }
-
-    if (*n_hits < 64) {
-        hit_base[*n_hits] = base;
-        hit_count[*n_hits] = 1;
-        (*n_hits)++;
-    }
-}
-
 /* On the killed parity 3 | q, so a prime power there must be 3^n. Non-powers
  * (v_3(q) == 1) exit after one division. */
 static int power_of_three_exponent(uint64_t q, int32_t *exponent)
@@ -423,11 +386,6 @@ static int process_prime(pp_batch_result *result, uint64_t p)
     int killed_parity;
     size_t partition_start;
     uint64_t power;
-    uint64_t hit_base[64];
-    unsigned char hit_count[64];
-    size_t n_hits = 0;
-    uint64_t exhausted[64];
-    size_t n_exhausted = 0;
 
     if (p == 0 || p > (uint64_t)INT64_MAX) {
         return PP_ERR_OVERFLOW;
@@ -437,16 +395,13 @@ static int process_prime(pp_batch_result *result, uint64_t p)
     killed_parity = (p % 3 == 2);
     partition_start = result->partition_count;
     power = 2;
-    memset(hit_base, 0, sizeof(hit_base));
-    memset(hit_count, 0, sizeof(hit_count));
-    memset(exhausted, 0, sizeof(exhausted));
 
     for (m = 1; m <= max_m; m++) {
         uint64_t q_candidate = p - power;
         uint64_t base = 0;
         int32_t exponent = 0;
 
-        if (q_candidate >= 2 && !exhausted_divides(q_candidate, exhausted, n_exhausted)) {
+        if (q_candidate >= 2) {
             if ((m & 1) == killed_parity) {
                 /* Set A: 3 | q_candidate; a prime power here can only be 3^n. */
                 if (power_of_three_exponent(q_candidate, &exponent)) {
@@ -463,7 +418,6 @@ static int process_prime(pp_batch_result *result, uint64_t p)
                 if (status != PP_OK) {
                     return status;
                 }
-                increment_hit(base, hit_base, hit_count, &n_hits, exhausted, &n_exhausted);
             }
         }
         power <<= 1;
@@ -480,11 +434,6 @@ static int count_prime(uint64_t p, int64_t *partition_count)
     int killed_parity;
     int64_t local_partitions = 0;
     uint64_t power;
-    uint64_t hit_base[64];
-    unsigned char hit_count[64];
-    size_t n_hits = 0;
-    uint64_t exhausted[64];
-    size_t n_exhausted = 0;
 
     if (p == 0 || p > (uint64_t)INT64_MAX) {
         return PP_ERR_OVERFLOW;
@@ -493,16 +442,13 @@ static int count_prime(uint64_t p, int64_t *partition_count)
     max_m = floor_log2_u64(p);
     killed_parity = (p % 3 == 2);
     power = 2;
-    memset(hit_base, 0, sizeof(hit_base));
-    memset(hit_count, 0, sizeof(hit_count));
-    memset(exhausted, 0, sizeof(exhausted));
 
     for (m = 1; m <= max_m; m++) {
         uint64_t q_candidate = p - power;
         uint64_t base = 0;
         int32_t exponent = 0;
 
-        if (q_candidate >= 2 && !exhausted_divides(q_candidate, exhausted, n_exhausted)) {
+        if (q_candidate >= 2) {
             if ((m & 1) == killed_parity) {
                 /* Set A: 3 | q_candidate; a prime power here can only be 3^n. */
                 if (power_of_three_exponent(q_candidate, &exponent)) {
@@ -516,7 +462,6 @@ static int count_prime(uint64_t p, int64_t *partition_count)
             }
             if (exponent > 0) {
                 local_partitions++;
-                increment_hit(base, hit_base, hit_count, &n_hits, exhausted, &n_exhausted);
             }
         }
         power <<= 1;
