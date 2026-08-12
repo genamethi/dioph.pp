@@ -15,18 +15,18 @@ std::vector<int64_t> Cone(int64_t p) {
   return FlatCone(p, ComputedMask, nullptr);
 }
 
-TEST(FlatConeTest, MaskIsTheSetOfPrimeSubtractions) {
+TEST(FlatConeTest, Mask) {
   EXPECT_EQ(ComputedMask(29), uint64_t{1} << 4);
   EXPECT_EQ(ComputedMask(13), (uint64_t{1} << 1) | (uint64_t{1} << 3));
   EXPECT_EQ(ComputedMask(11), (uint64_t{1} << 2) | (uint64_t{1} << 3));
   EXPECT_EQ(ComputedMask(3), uint64_t{0});
 }
 
-TEST(FlatConeTest, ConeOfTwentyNineByHand) {
+TEST(FlatConeTest, Anchor) {
   EXPECT_EQ(Cone(29), (std::vector<int64_t>{3, 5, 7, 11, 13, 29}));
 }
 
-TEST(FlatConeTest, ConeIsClosedDownwardUnderTheMask) {
+TEST(FlatConeTest, Closed) {
   for (int64_t p : {29, 137, 8191, 65537}) {
     const std::vector<int64_t> cone = Cone(p);
     ASSERT_FALSE(cone.empty()) << p;
@@ -43,13 +43,13 @@ TEST(FlatConeTest, ConeIsClosedDownwardUnderTheMask) {
   }
 }
 
-TEST(FlatConeTest, ConeContainsItsTargetAndNothingAbove) {
+TEST(FlatConeTest, Bounds) {
   const std::vector<int64_t> cone = Cone(8191);
   EXPECT_EQ(cone.back(), 8191);
   EXPECT_GE(cone.front(), 3);
 }
 
-TEST(FlatConeTest, MatchesIndependentlyMeasuredSizes) {
+TEST(FlatConeTest, Sizes) {
   ConeStats a;
   FlatCone(86573, ComputedMask, &a);
   EXPECT_EQ(a.nodes, 3717);
@@ -59,7 +59,7 @@ TEST(FlatConeTest, MatchesIndependentlyMeasuredSizes) {
   EXPECT_EQ(b.nodes, 26791);
 }
 
-TEST(FlatConeTest, StatsCountEdgesAndFlatSources) {
+TEST(FlatConeTest, Stats) {
   ConeStats s;
   const std::vector<int64_t> cone = FlatCone(29, ComputedMask, &s);
   EXPECT_EQ(s.nodes, static_cast<int64_t>(cone.size()));
@@ -75,7 +75,7 @@ TEST(FlatConeTest, StatsCountEdgesAndFlatSources) {
   EXPECT_EQ(s.flat_sources, sources);
 }
 
-TEST(FlatConeTest, SmallInputsYieldNothing) {
+TEST(FlatConeTest, Small) {
   EXPECT_TRUE(Cone(2).empty());
   EXPECT_EQ(Cone(3), (std::vector<int64_t>{3}));
 }

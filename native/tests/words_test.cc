@@ -42,7 +42,7 @@ bool Closes(const Folded& f) {
   return GiNaC::expand(v).is_equal(GiNaC::numeric(f.target));
 }
 
-TEST(WordsTest, EveryWordClosesAtTwo) {
+TEST(WordsTest, ClosesAtTwo) {
   for (int64_t p : {29, 137, 251, 8191}) {
     const std::vector<Folded> words = Words(p);
     ASSERT_FALSE(words.empty()) << p;
@@ -53,7 +53,7 @@ TEST(WordsTest, EveryWordClosesAtTwo) {
   }
 }
 
-TEST(WordsTest, WordsAreDistinct) {
+TEST(WordsTest, Distinct) {
   for (int64_t p : {29, 137, 1021}) {
     std::set<std::string> keys;
     for (const Folded& f : Words(p)) {
@@ -62,7 +62,7 @@ TEST(WordsTest, WordsAreDistinct) {
   }
 }
 
-TEST(WordsTest, TwentyNineByHand) {
+TEST(WordsTest, Anchor) {
   const std::vector<Folded> words = Words(29);
   std::set<std::string> got;
   for (const Folded& f : words) {
@@ -81,14 +81,14 @@ TEST(WordsTest, TwentyNineByHand) {
   EXPECT_TRUE(saw_cube);
 }
 
-TEST(WordsTest, RootsHaveNoParentsOfEitherKind) {
+TEST(WordsTest, Roots) {
   for (const Folded& f : Words(251)) {
     EXPECT_EQ(ComputedMask(f.root), uint64_t{0}) << f.root;
     EXPECT_TRUE(ComputedHigher(f.root).empty()) << f.root;
   }
 }
 
-TEST(WordsTest, DegreeMatchesTheBlockProduct) {
+TEST(WordsTest, Degree) {
   for (const Folded& f : Words(137)) {
     const GiNaC::symbol x("x");
     int64_t d = 1;
@@ -97,7 +97,7 @@ TEST(WordsTest, DegreeMatchesTheBlockProduct) {
   }
 }
 
-TEST(WordsTest, FeedsTheFoldForEveryWord) {
+TEST(WordsTest, Folds) {
   const GiNaC::symbol x("x");
   for (const Folded& f : Words(137)) {
     const int swan = SwanAtInfinity(Composed(f, x), x);
@@ -106,7 +106,7 @@ TEST(WordsTest, FeedsTheFoldForEveryWord) {
   }
 }
 
-TEST(WordsTest, StatsReportConeAndEdges) {
+TEST(WordsTest, Stats) {
   WordStats s;
   const std::vector<Folded> words = Words(1021, &s);
   EXPECT_EQ(s.words, static_cast<int64_t>(words.size()));
@@ -114,7 +114,7 @@ TEST(WordsTest, StatsReportConeAndEdges) {
   EXPECT_FALSE(s.capped);
 }
 
-TEST(WordsTest, CapIsReported) {
+TEST(WordsTest, Cap) {
   WordStats s;
   std::string err;
   WordOptions opt;
@@ -128,7 +128,7 @@ TEST(WordsTest, CapIsReported) {
   EXPECT_TRUE(s.capped);
 }
 
-TEST(WordsTest, FaithfulLiftIsRefusedRatherThanSubstituted) {
+TEST(WordsTest, FaithfulRefused) {
   WordOptions opt;
   opt.lift = Lift::kFaithful;
   WordStats s;

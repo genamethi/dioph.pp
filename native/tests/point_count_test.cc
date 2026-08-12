@@ -6,10 +6,19 @@
 #include <numeric>
 
 #include "primeparts/graph/chain_forms.h"
+#include "primeparts/graph/words.h"
 
 namespace {
 
+using primeparts::graph::ComputedHigher;
+using primeparts::graph::ComputedMask;
 using primeparts::graph::Composed;
+using primeparts::graph::EnumerateWords;
+using primeparts::graph::Folded;
+using primeparts::graph::Moment;
+using primeparts::graph::Sum;
+using primeparts::graph::WordOptions;
+using primeparts::graph::WordStats;
 using primeparts::graph::Correlate;
 using primeparts::graph::FieldPoints;
 using primeparts::graph::FiberCounts;
@@ -26,7 +35,7 @@ Word Chain(int64_t root, int64_t target, std::vector<Step> steps) {
   return w;
 }
 
-TEST(PointCountTest, CountsSumToTheFieldSize) {
+TEST(PointCountTest, Total) {
   const GiNaC::symbol x("x");
   for (int d : {1, 2, 3, 4, 8}) {
     FieldPoints fp;
@@ -39,7 +48,7 @@ TEST(PointCountTest, CountsSumToTheFieldSize) {
   }
 }
 
-TEST(PointCountTest, LinearMapIsABijection) {
+TEST(PointCountTest, Linear) {
   const GiNaC::symbol x("x");
   FieldPoints fp;
   std::string err;
@@ -50,7 +59,7 @@ TEST(PointCountTest, LinearMapIsABijection) {
   }
 }
 
-TEST(PointCountTest, SquaringIsFrobeniusHenceAlsoABijection) {
+TEST(PointCountTest, Frobenius) {
   const GiNaC::symbol x("x");
   FieldPoints fp;
   std::string err;
@@ -62,7 +71,7 @@ TEST(PointCountTest, SquaringIsFrobeniusHenceAlsoABijection) {
   }
 }
 
-TEST(PointCountTest, CubeFibersMatchTheGcdWithFieldOrder) {
+TEST(PointCountTest, Cube) {
   const GiNaC::symbol x("x");
   for (int d : {2, 3, 4, 6}) {
     FieldPoints fp;
@@ -80,7 +89,7 @@ TEST(PointCountTest, CubeFibersMatchTheGcdWithFieldOrder) {
   }
 }
 
-TEST(PointCountTest, ThetaZeroIsTheDegenerateFiber) {
+TEST(PointCountTest, ThetaZero) {
   const GiNaC::symbol x("x");
   FieldPoints at_zero;
   FieldPoints pure;
@@ -92,7 +101,7 @@ TEST(PointCountTest, ThetaZeroIsTheDegenerateFiber) {
   EXPECT_EQ(at_zero.counts, pure.counts);
 }
 
-TEST(PointCountTest, CorrelationMatchesDirectPairCount) {
+TEST(PointCountTest, Correlation) {
   const GiNaC::symbol x("x");
   const int d = 6;
   const uint64_t theta = 3;
@@ -113,7 +122,7 @@ TEST(PointCountTest, CorrelationMatchesDirectPairCount) {
   EXPECT_GT(Correlate(fa, fb), 0);
 }
 
-TEST(PointCountTest, CorrelationOfAChainWithItselfCountsCollisions) {
+TEST(PointCountTest, SelfCorrelation) {
   const GiNaC::symbol x("x");
   FieldPoints fp;
   std::string err;
@@ -124,7 +133,64 @@ TEST(PointCountTest, CorrelationOfAChainWithItselfCountsCollisions) {
   EXPECT_EQ(Correlate(fp, fp), 1 + (q - 1) / g * g * g);
 }
 
-TEST(PointCountTest, RejectsOutOfRangeArguments) {
+TEST(PointCountTest, SumOfOne) {
+  const GiNaC::symbol x("x");
+  const GiNaC::ex p = Composed(Chain(3, 29, {{1, 3}}), x);
+  FieldPoints one;
+  FieldPoints summed;
+  std::string err;
+  ASSERT_TRUE(FiberCounts(p, x, 5, 3, &one, &err)) << err;
+  ASSERT_TRUE(Sum({p}, x, 5, 3, &summed, &err)) << err;
+  EXPECT_EQ(one.counts, summed.counts);
+}
+
+TEST(PointCountTest, Moments) {
+  const GiNaC::symbol x("x");
+  FieldPoints fp;
+  std::string err;
+  ASSERT_TRUE(FiberCounts(GiNaC::pow(x, 3) + TSymbol(), x, 6, 5, &fp, &err))
+      << err;
+  EXPECT_EQ(Moment(fp, 1), int64_t{64});
+  EXPECT_EQ(Moment(fp, 2), Correlate(fp, fp));
+}
+
+TEST(PointCountTest, CoproductSecondMoment) {
+  const GiNaC::symbol x("x");
+  const int d = 6;
+  const uint64_t theta = 3;
+  std::vector<Folded> words;
+  WordStats stats;
+  std::string err;
+  ASSERT_TRUE(EnumerateWords(
+      29, ComputedMask, ComputedHigher, WordOptions{},
+      [&](const Folded& f) { words.push_back(f); }, &stats, &err))
+      << err;
+  ASSERT_GE(words.size(), 4u);
+
+  std::vector<GiNaC::ex> polys;
+  for (const Folded& f : words) {
+    polys.push_back(Composed(f, x));
+  }
+
+  FieldPoints total;
+  ASSERT_TRUE(Sum(polys, x, d, theta, &total, &err)) << err;
+  EXPECT_EQ(Moment(total, 1), static_cast<int64_t>(polys.size()) * (1 << d));
+
+  int64_t pairwise = 0;
+  for (const GiNaC::ex& a : polys) {
+    for (const GiNaC::ex& b : polys) {
+      FieldPoints fa;
+      FieldPoints fb;
+      ASSERT_TRUE(FiberCounts(a, x, d, theta, &fa, &err)) << err;
+      ASSERT_TRUE(FiberCounts(b, x, d, theta, &fb, &err)) << err;
+      pairwise += Correlate(fa, fb);
+    }
+  }
+  EXPECT_EQ(Moment(total, 2), pairwise);
+  EXPECT_GT(Moment(total, 2), Moment(total, 1));
+}
+
+TEST(PointCountTest, Rejects) {
   const GiNaC::symbol x("x");
   FieldPoints fp;
   std::string err;

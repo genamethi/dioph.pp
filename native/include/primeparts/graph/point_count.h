@@ -22,4 +22,9 @@ int64_t Correlate(const FieldPoints& a, const FieldPoints& b);
 
 int64_t TotalPoints(const FieldPoints& a);
 
+bool Sum(const std::vector<GiNaC::ex>& polys, const GiNaC::symbol& x, int d,
+         uint64_t theta, FieldPoints* out, std::string* error);
+
+int64_t Moment(const FieldPoints& a, int r);
+
 }  // namespace primeparts::graph

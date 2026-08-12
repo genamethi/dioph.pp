@@ -31,7 +31,7 @@ Word Chain(std::vector<Step> steps) {
   return w;
 }
 
-TEST(AsFoldTest, SquaresAreExactlyTheEvenExponents) {
+TEST(AsFoldTest, Squares) {
   const GiNaC::ex t = TSymbol();
   EXPECT_TRUE(IsSquareModTwo(GiNaC::pow(t, 4)));
   EXPECT_TRUE(IsSquareModTwo(1 + GiNaC::pow(t, 2) + GiNaC::pow(t, 6)));
@@ -40,7 +40,7 @@ TEST(AsFoldTest, SquaresAreExactlyTheEvenExponents) {
   EXPECT_TRUE(IsSquareModTwo(2 * GiNaC::pow(t, 3)));
 }
 
-TEST(AsFoldTest, SquareRootHalvesTheExponents) {
+TEST(AsFoldTest, Sqrt) {
   const GiNaC::ex t = TSymbol();
   EXPECT_TRUE(GiNaC::expand(SqrtModTwo(GiNaC::pow(t, 4)) - GiNaC::pow(t, 2))
                   .is_zero());
@@ -49,7 +49,7 @@ TEST(AsFoldTest, SquareRootHalvesTheExponents) {
           .is_zero());
 }
 
-TEST(AsFoldTest, ReductionModTwoDropsEvenCoefficients) {
+TEST(AsFoldTest, ModTwo) {
   const GiNaC::ex t = TSymbol();
   EXPECT_TRUE(ReduceModTwo(2 * GiNaC::pow(t, 3)).is_zero());
   EXPECT_TRUE(GiNaC::expand(ReduceModTwo(3 * GiNaC::pow(t, 3)) -
@@ -57,7 +57,7 @@ TEST(AsFoldTest, ReductionModTwoDropsEvenCoefficients) {
                   .is_zero());
 }
 
-TEST(AsFoldTest, DepthOneFoldsToTheOddPartOfTheDegree) {
+TEST(AsFoldTest, DepthOne) {
   const GiNaC::symbol x("x");
   for (int n = 2; n <= 25; ++n) {
     for (int m : {1, 2, 3, 7, 12}) {
@@ -67,7 +67,7 @@ TEST(AsFoldTest, DepthOneFoldsToTheOddPartOfTheDegree) {
   }
 }
 
-TEST(AsFoldTest, TwoBlocksBlockOnOddExponents) {
+TEST(AsFoldTest, TwoBlocks) {
   const GiNaC::symbol x("x");
   const GiNaC::ex odd = Composed(Chain({{1, 2}, {1, 3}}), x);
   const GiNaC::ex even = Composed(Chain({{2, 2}, {1, 3}}), x);
@@ -78,7 +78,7 @@ TEST(AsFoldTest, TwoBlocksBlockOnOddExponents) {
   EXPECT_EQ(H1Dimension(even, x), 2);
 }
 
-TEST(AsFoldTest, EvaluatingTheBaseFirstCollapsesToTheOddPart) {
+TEST(AsFoldTest, EvaluatedBase) {
   const GiNaC::symbol x("x");
   const Word w = Chain({{1, 2}, {1, 3}});
   const GiNaC::ex formal = Composed(w, x);
@@ -88,7 +88,7 @@ TEST(AsFoldTest, EvaluatingTheBaseFirstCollapsesToTheOddPart) {
   EXPECT_EQ(SwanAtInfinity(evaluated, x), OddPart(6));
 }
 
-TEST(AsFoldTest, ReductionIsIdempotent) {
+TEST(AsFoldTest, Idempotent) {
   const GiNaC::symbol x("x");
   for (const Word& w : {Chain({{1, 2}, {1, 3}}), Chain({{3, 4}, {2, 5}}),
                         Chain({{1, 1}, {2, 6}, {5, 3}})}) {
@@ -98,7 +98,7 @@ TEST(AsFoldTest, ReductionIsIdempotent) {
   }
 }
 
-TEST(AsFoldTest, PowerOfTwoDegreeHasNoCohomologyOverTheEvaluatedBase) {
+TEST(AsFoldTest, PowerOfTwoDegree) {
   const GiNaC::symbol x("x");
   for (int k = 1; k <= 4; ++k) {
     const int n = 1 << k;

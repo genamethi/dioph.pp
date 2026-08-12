@@ -138,6 +138,38 @@ int64_t Correlate(const FieldPoints& a, const FieldPoints& b) {
   return total;
 }
 
+bool Sum(const std::vector<GiNaC::ex>& polys, const GiNaC::symbol& x, int d,
+         uint64_t theta, FieldPoints* out, std::string* error) {
+  if (d < 1 || d > 24) {
+    *error = "degree must be in [1, 24]";
+    return false;
+  }
+  out->d = d;
+  out->counts.assign(uint64_t{1} << d, 0);
+  for (const GiNaC::ex& p : polys) {
+    FieldPoints one;
+    if (!FiberCounts(p, x, d, theta, &one, error)) {
+      return false;
+    }
+    for (size_t i = 0; i < one.counts.size(); ++i) {
+      out->counts[i] += one.counts[i];
+    }
+  }
+  return true;
+}
+
+int64_t Moment(const FieldPoints& a, int r) {
+  int64_t total = 0;
+  for (int32_t c : a.counts) {
+    int64_t term = 1;
+    for (int i = 0; i < r; ++i) {
+      term *= c;
+    }
+    total += term;
+  }
+  return total;
+}
+
 int64_t TotalPoints(const FieldPoints& a) {
   int64_t total = 0;
   for (int32_t c : a.counts) {

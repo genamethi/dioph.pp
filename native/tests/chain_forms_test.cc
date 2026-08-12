@@ -35,7 +35,7 @@ Word Chain(int64_t root, int64_t target, std::vector<Step> steps) {
   return w;
 }
 
-TEST(ChainFormsTest, MaskRoundTripsThroughT) {
+TEST(ChainFormsTest, MaskRoundTrip) {
   for (uint64_t mask : {uint64_t{0}, uint64_t{1} << 4,
                         (uint64_t{1} << 1) | (uint64_t{1} << 4),
                         (uint64_t{1} << 63), ~uint64_t{0}}) {
@@ -45,17 +45,17 @@ TEST(ChainFormsTest, MaskRoundTripsThroughT) {
   }
 }
 
-TEST(ChainFormsTest, MaskRejectsNonBinaryCoefficients) {
+TEST(ChainFormsTest, MaskRejects) {
   uint64_t back = 0;
   EXPECT_FALSE(TToMask(2 * GiNaC::pow(TSymbol(), 3), &back));
 }
 
-TEST(ChainFormsTest, EvaluationAtTwoRecoversTheInteger) {
+TEST(ChainFormsTest, EvalAtTwo) {
   EXPECT_TRUE(EvalAtTwo(MaskToT((uint64_t{1} << 1) | (uint64_t{1} << 4)))
                   .is_equal(18));
 }
 
-TEST(ChainFormsTest, DepthOneFormsOfTwentyNine) {
+TEST(ChainFormsTest, DepthOne) {
   const std::vector<Word> forms = {Chain(13, 29, {{4, 1}}),
                                    Chain(3, 29, {{1, 3}}),
                                    Chain(5, 29, {{2, 2}})};
@@ -71,7 +71,7 @@ TEST(ChainFormsTest, DepthOneFormsOfTwentyNine) {
   }
 }
 
-TEST(ChainFormsTest, DepthTwoEliminationMatchesByHand) {
+TEST(ChainFormsTest, DepthTwo) {
   const GiNaC::symbol x("x");
 
   const Word via11 = Chain(11, 29, {{1, 1}, {4, 1}});
@@ -90,7 +90,7 @@ TEST(ChainFormsTest, DepthTwoEliminationMatchesByHand) {
   }
 }
 
-TEST(ChainFormsTest, GradedIsTheEliminationFiltration) {
+TEST(ChainFormsTest, Graded) {
   const GiNaC::symbol x("x");
   const Word w = Chain(3, 29, {{2, 2}, {4, 1}});
   const std::vector<GiNaC::ex> levels = Graded(w, x);
@@ -104,7 +104,7 @@ TEST(ChainFormsTest, GradedIsTheEliminationFiltration) {
   EXPECT_TRUE(EvalAtTwo(levels[2]).subs(x == 3).is_equal(29));
 }
 
-TEST(ChainFormsTest, UncollapsedGeneratorsVanishOnTheChain) {
+TEST(ChainFormsTest, Uncollapsed) {
   const Word w = Chain(3, 29, {{2, 2}, {4, 1}});
   const std::vector<GiNaC::symbol> y = ChainSymbols(w);
   const std::vector<GiNaC::ex> gens = Uncollapsed(w, y);
@@ -121,7 +121,7 @@ TEST(ChainFormsTest, UncollapsedGeneratorsVanishOnTheChain) {
   }
 }
 
-TEST(ChainFormsTest, HermiteCoefficientsCarryTheExponentsInHeZero) {
+TEST(ChainFormsTest, Hermite) {
   const GiNaC::symbol x("x");
   const GiNaC::ex t = TSymbol();
 
@@ -139,7 +139,7 @@ TEST(ChainFormsTest, HermiteCoefficientsCarryTheExponentsInHeZero) {
   EXPECT_EQ(mask, (uint64_t{1} << 1) | (uint64_t{1} << 4));
 }
 
-TEST(ChainFormsTest, FiberProductVanishesOnAgreeingRoots) {
+TEST(ChainFormsTest, FiberProduct) {
   const GiNaC::symbol y("y");
   const GiNaC::symbol yp("yp");
   const Word a = Chain(3, 29, {{1, 3}});
@@ -156,7 +156,7 @@ TEST(ChainFormsTest, FiberProductVanishesOnAgreeingRoots) {
   EXPECT_TRUE(GiNaC::expand(EvalAtTwo(c).subs(at)).is_zero());
 }
 
-TEST(ChainFormsTest, FaithfulFoldReproducesTheStepPolynomial) {
+TEST(ChainFormsTest, FaithfulFold) {
   const GiNaC::symbol x("x");
   for (const Word& w : {Chain(11, 29, {{1, 1}, {4, 1}}),
                         Chain(3, 29, {{2, 2}, {4, 1}}),
@@ -167,7 +167,7 @@ TEST(ChainFormsTest, FaithfulFoldReproducesTheStepPolynomial) {
   }
 }
 
-TEST(ChainFormsTest, FoldCollapsesRunsIntoBlockConstants) {
+TEST(ChainFormsTest, FoldRuns) {
   const Word w = Chain(3, 29, {{2, 2}, {4, 1}});
   const Folded f = Fold(w, Lift::kFaithful);
   const GiNaC::ex t = TSymbol();
@@ -179,7 +179,7 @@ TEST(ChainFormsTest, FoldCollapsesRunsIntoBlockConstants) {
                   .is_zero());
 }
 
-TEST(ChainFormsTest, LiftsAgreeAtTwoAndDifferFormallyOnRepeatedExponents) {
+TEST(ChainFormsTest, Lifts) {
   const GiNaC::symbol x("x");
   const Word w = Chain(0, 0, {{3, 1}, {3, 1}, {1, 2}});
 
@@ -196,7 +196,7 @@ TEST(ChainFormsTest, LiftsAgreeAtTwoAndDifferFormallyOnRepeatedExponents) {
       GiNaC::expand(Composed(faithful, x) - Composed(canonical, x)).is_zero());
 }
 
-TEST(ChainFormsTest, CanonicalLiftKeepsConstantsBinary) {
+TEST(ChainFormsTest, CanonicalMask) {
   const Word w = Chain(0, 0, {{3, 1}, {3, 1}, {1, 2}});
   const Folded canonical = Fold(w, Lift::kCanonical);
   uint64_t mask = 0;
@@ -204,7 +204,7 @@ TEST(ChainFormsTest, CanonicalLiftKeepsConstantsBinary) {
   EXPECT_EQ(mask, uint64_t{1} << 4);
 }
 
-TEST(ChainFormsTest, DegreeIsTheProductOfExponents) {
+TEST(ChainFormsTest, Degree) {
   EXPECT_EQ(Degree(Chain(3, 29, {{2, 2}, {4, 1}})), 2);
   EXPECT_EQ(Degree(Chain(3, 0, {{1, 3}, {2, 2}, {5, 4}})), 24);
   EXPECT_EQ(Degree(Chain(3, 0, {})), 1);

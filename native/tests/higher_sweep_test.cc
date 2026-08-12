@@ -86,37 +86,37 @@ void ExpectMatchesReference(uint64_t lo, uint64_t hi) {
   }
 }
 
-TEST(HigherSweepTest, MatchesReferenceOverSmallWindow) {
+TEST(HigherSweepTest, ReferenceSmall) {
   ExpectMatchesReference(3, 200000);
 }
 
-TEST(HigherSweepTest, MatchesReferenceNearOneBillion) {
+TEST(HigherSweepTest, Reference1e9) {
   ExpectMatchesReference(1000000000, 1002000000);
 }
 
-TEST(HigherSweepTest, MatchesReferenceAtFortyBits) {
+TEST(HigherSweepTest, Reference40Bit) {
   ExpectMatchesReference(uint64_t{1} << 40, (uint64_t{1} << 40) + 4000000);
 }
 
-TEST(HigherSweepTest, MatchesReferenceAtFiftyBits) {
+TEST(HigherSweepTest, Reference50Bit) {
   ExpectMatchesReference(uint64_t{1} << 50, (uint64_t{1} << 50) + 20000000);
 }
 
-TEST(HigherSweepTest, FindsTheTwentyNineAnchor) {
+TEST(HigherSweepTest, Anchor) {
   const std::vector<Hit> hits = Swept(3, 100);
 
   ASSERT_FALSE(hits.empty());
   EXPECT_NE(std::find(hits.begin(), hits.end(), Hit{29, 2, 2, 5}), hits.end());
 }
 
-TEST(HigherSweepTest, ExcludesBasesDivisibleByThree) {
+TEST(HigherSweepTest, BaseNotThree) {
   for (const Hit& h : Swept(3, 2000000)) {
     EXPECT_NE(h.q % 3, 0u) << "p=" << h.p;
     EXPECT_GE(h.q, 5u);
   }
 }
 
-TEST(HigherSweepTest, HitsSatisfyThePartitionIdentity) {
+TEST(HigherSweepTest, Identity) {
   for (const Hit& h : Swept(3, 2000000)) {
     __uint128_t power = 1;
     for (int32_t i = 0; i < h.n; ++i) {
@@ -129,7 +129,7 @@ TEST(HigherSweepTest, HitsSatisfyThePartitionIdentity) {
   }
 }
 
-TEST(HigherSweepTest, AdjacentWindowsPartitionTheResult) {
+TEST(HigherSweepTest, Windows) {
   const uint64_t lo = 500000000;
   const uint64_t mid = 501000000;
   const uint64_t hi = 502000000;
@@ -142,7 +142,7 @@ TEST(HigherSweepTest, AdjacentWindowsPartitionTheResult) {
   EXPECT_EQ(split, Swept(lo, hi));
 }
 
-TEST(HigherSweepTest, BoundsAreInclusive) {
+TEST(HigherSweepTest, Inclusive) {
   const std::vector<Hit> hits = Swept(3, 100000);
 
   ASSERT_FALSE(hits.empty());
@@ -155,12 +155,12 @@ TEST(HigherSweepTest, BoundsAreInclusive) {
               Swept(first.p + 1, last.p - 1).front().p > first.p);
 }
 
-TEST(HigherSweepTest, EmptyWindowsYieldNothing) {
+TEST(HigherSweepTest, Empty) {
   EXPECT_TRUE(Swept(3, 3).empty());
   EXPECT_TRUE(Swept(100, 10).empty());
 }
 
-TEST(HigherSweepTest, CursorConsumesInPositionOrder) {
+TEST(HigherSweepTest, Cursor) {
   pp_higher_table table;
 
   pp_higher_table_init(&table);
