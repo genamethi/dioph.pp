@@ -381,7 +381,7 @@ $(PARTITION_SCAN_OBJ): src/graph/partition_scan.cc include/primeparts/graph/part
 $(PP_GRAPH_OBJ): src/graph/pp_graph.cc include/primeparts/graph/chain_forms.h include/primeparts/partition_math.h include/primeparts/config.h include/primeparts/graph/hermite_modl.h include/primeparts/graph/partition_scan.h include/primeparts/catalog/rest_scan_plan.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/scan/scan_plan.h include/primeparts/scan/scan_planner.h include/primeparts/client/session.h include/primeparts/query/materialize.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(DUCKDB_CPPFLAGS) $(GINAC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/pp-graph: $(PP_GRAPH_OBJ) $(HERMITE_MODL_OBJ) $(CHAIN_FORMS_OBJ) $(PARTITION_SCAN_OBJ) $(PARTS_EXPAND_OBJ) $(CONFIG_OBJS) $(SESSION_OBJ) $(REST_SCAN_PLAN_OBJ) $(PLAN_STATUS_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(PP_ICEBERG_REST_OBJ) $(PP_COMMIT_OBJ) $(PARTITION_STATS_OBJ) $(PP_LMDB_STORE_OBJ) $(BUILD_DIR)/materialize.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(LMDB_LIB)
+$(BUILD_DIR)/pp-graph: $(PP_GRAPH_OBJ) $(HERMITE_MODL_OBJ) $(CHAIN_FORMS_OBJ) $(FLAT_CONE_OBJ) $(WORDS_OBJ) $(AS_FOLD_OBJ) $(POINT_COUNT_OBJ) $(CORE_OBJ) $(HIGHER_SWEEP_OBJ) $(PARTITION_SCAN_OBJ) $(PARTS_EXPAND_OBJ) $(CONFIG_OBJS) $(SESSION_OBJ) $(REST_SCAN_PLAN_OBJ) $(PLAN_STATUS_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(PP_ICEBERG_REST_OBJ) $(PP_COMMIT_OBJ) $(PARTITION_STATS_OBJ) $(PP_LMDB_STORE_OBJ) $(BUILD_DIR)/materialize.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $(DUCKDB_RPATH) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(DUCKDB_LDLIBS) $(GINAC_LDLIBS) $(LUA_LDLIBS) -lsqlite3 -pthread -o $@
 
 pp-graph: $(BUILD_DIR)/pp-graph

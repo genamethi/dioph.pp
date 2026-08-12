@@ -36,7 +36,10 @@
 #include "primeparts/config.h"
 #include "primeparts/partition_math.h"
 #include "primeparts/graph/hermite_modl.h"
+#include "primeparts/graph/as_fold.h"
 #include "primeparts/graph/chain_forms.h"
+#include "primeparts/graph/point_count.h"
+#include "primeparts/graph/words.h"
 #include "primeparts/graph/partition_scan.h"
 #include "primeparts/parts_expand.h"
 #include "primeparts/query/materialize.h"
@@ -75,6 +78,9 @@ struct Options {
   int64_t e_level = -1;
   bool materialize = false;
   std::string ells_list;
+  int64_t base_p = -1;
+  int64_t base_d = -1;
+  int64_t theta = 1;
 };
 
 struct Edge {
@@ -193,6 +199,9 @@ bool ParseArgs(int argc, char** argv, Options* opt) {
       {"he-n", required_argument, nullptr, 1010},
       {"ell-max", required_argument, nullptr, 1011},
       {"p", required_argument, nullptr, 1012},
+      {"base", required_argument, nullptr, 1023},
+      {"deg", required_argument, nullptr, 1024},
+      {"theta", required_argument, nullptr, 1025},
       {"k", required_argument, nullptr, 1013},
       {"sweep", no_argument, nullptr, 1014},
       {"orbits", no_argument, nullptr, 1016},
@@ -235,6 +244,15 @@ bool ParseArgs(int argc, char** argv, Options* opt) {
         break;
       case 1012:
         if (!ParseI64(optarg, &opt->target_p)) return false;
+        break;
+      case 1023:
+        if (!ParseI64(optarg, &opt->base_p)) return false;
+        break;
+      case 1024:
+        if (!ParseI64(optarg, &opt->base_d)) return false;
+        break;
+      case 1025:
+        if (!ParseI64(optarg, &opt->theta)) return false;
         break;
       case 1013:
         opt->k_list = optarg;
@@ -591,6 +609,72 @@ bool ReadEdges(const Options& opt, std::vector<Edge>* out, int64_t* rows_scanned
   if (rows_scanned) *rows_scanned += counts.flat_rows + counts.higher_rows;
   *t_read = Seconds(t0);
   return true;
+}
+
+int RunChain(const Options& opt) {
+  if (opt.target_p < 3) {
+    std::fprintf(stderr, "mode chain needs --target <prime>\n");
+    return 2;
+  }
+  const int64_t p = opt.target_p;
+
+  std::vector<primeparts::graph::Folded> words;
+  primeparts::graph::WordStats stats;
+  std::string error;
+  if (!primeparts::graph::EnumerateWords(
+          p, primeparts::graph::ComputedMask, primeparts::graph::ComputedHigher,
+          primeparts::graph::WordOptions{},
+          [&](const primeparts::graph::Folded& f) { words.push_back(f); },
+          &stats, &error)) {
+    std::fprintf(stderr, "pp-graph: %s\n", error.c_str());
+    return 1;
+  }
+
+  std::FILE* rep = stdout;
+  std::fprintf(rep,
+               "pp-graph chain  p=%" PRId64 "  words=%" PRId64
+               "  cone=%" PRId64 "  higher edges=%" PRId64 "%s\n\n",
+               p, stats.words, stats.cone_nodes, stats.higher_edges,
+               stats.capped ? "  (capped)" : "");
+
+  GiNaC::symbol x("x");
+  std::fprintf(rep, "%-12s %-8s %-16s %-8s %-8s %s\n", "root", "degree",
+               "skeleton", "P_red", "dim H1", "composed");
+  for (const auto& f : words) {
+    const GiNaC::ex poly = primeparts::graph::Composed(f, x);
+    const int swan = primeparts::graph::SwanAtInfinity(poly, x);
+    std::string skel;
+    for (const auto& b : f.blocks) {
+      skel += (skel.empty() ? "" : ",") + std::to_string(b.n);
+    }
+    if (skel.empty()) skel = "-";
+    std::ostringstream os;
+    os << poly;
+    std::fprintf(rep, "%-12" PRId64 " %-8" PRId64 " %-16s %-8d %-8d %s\n",
+                 f.root, primeparts::graph::Degree(f), skel.c_str(), swan,
+                 swan > 0 ? swan - 1 : 0, os.str().c_str());
+  }
+
+  if (opt.base_p > 0 && opt.base_d > 0) {
+    primeparts::graph::FieldPoints total;
+    std::vector<GiNaC::ex> polys;
+    polys.reserve(words.size());
+    for (const auto& f : words) polys.push_back(primeparts::graph::Composed(f, x));
+    if (!primeparts::graph::Sum(polys, x, static_cast<int>(opt.base_p),
+                                static_cast<int>(opt.base_d),
+                                static_cast<uint64_t>(opt.theta), &total,
+                                &error)) {
+      std::fprintf(stderr, "pp-graph: %s\n", error.c_str());
+      return 1;
+    }
+    std::fprintf(rep,
+                 "\ncoproduct over F_{%" PRId64 "^%" PRId64 "} at theta=%" PRId64
+                 ":  points=%" PRId64 "  second moment=%" PRId64 "\n",
+                 opt.base_p, opt.base_d, opt.theta,
+                 primeparts::graph::Moment(total, 1),
+                 primeparts::graph::Moment(total, 2));
+  }
+  return 0;
 }
 
 int RunBasis(const Options& opt) {
@@ -3170,6 +3254,7 @@ int main(int argc, char** argv) {
     return 2;
   }
 
+  if (opt.mode == "chain") return RunChain(opt);
   if (opt.mode == "basis") return RunBasis(opt);
   if (opt.mode == "hasse") return RunHasse(opt);
   if (opt.mode == "compose") return RunCompose(opt);
@@ -3179,7 +3264,7 @@ int main(int argc, char** argv) {
     return opt.target_p >= 0 ? RunSpectrum(opt) : RunSpectraFamily(opt);
   if (opt.mode != "edges") {
     std::fprintf(stderr,
-                 "unknown --mode %s (basis | hasse | compose | edges | roots "
+                 "unknown --mode %s (basis | chain | hasse | compose | edges | roots "
                  "| paths | spectrum)\n",
                  opt.mode.c_str());
     return 2;
