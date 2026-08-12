@@ -1,6 +1,7 @@
 #include "primeparts/core.h"
 
 #include <errno.h>
+#include <pthread.h>
 #include <limits.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -29,8 +30,13 @@ const char *pp_status_message(int status)
     }
 }
 
+static void pow3_table_init(void);
+
+static pthread_once_t g_tables_once = PTHREAD_ONCE_INIT;
+
 int pp_init(void)
 {
+    pthread_once(&g_tables_once, pow3_table_init);
     return PP_OK;
 }
 
@@ -361,18 +367,38 @@ static int write_partition(pp_batch_result *result, uint64_t p, int32_t m, int32
     return PP_OK;
 }
 
-/* On the killed parity 3 | q, so a prime power there must be 3^n. Non-powers
- * (v_3(q) == 1) exit after one division. */
+#define PP_POW3_MAX 40
+
+static uint64_t g_pow3[PP_POW3_MAX];
+static signed char g_pow3_at_bits[65];
+
+static void pow3_table_init(void)
+{
+    uint64_t v = 1;
+    int n;
+    int i;
+
+    for (i = 0; i < 65; i++) {
+        g_pow3_at_bits[i] = -1;
+    }
+    for (n = 0; n < PP_POW3_MAX; n++) {
+        int bits = 64 - __builtin_clzll(v);
+        g_pow3[n] = v;
+        g_pow3_at_bits[bits] = (signed char)n;
+        if (v > UINT64_MAX / 3) {
+            break;
+        }
+        v *= 3;
+    }
+}
+
 static int power_of_three_exponent(uint64_t q, int32_t *exponent)
 {
-    int32_t e = 0;
+    int bits = 64 - __builtin_clzll(q);
+    int n = g_pow3_at_bits[bits];
 
-    while (q % 3 == 0) {
-        q /= 3;
-        e++;
-    }
-    if (q == 1 && e > 0) {
-        *exponent = e;
+    if (n > 0 && g_pow3[n] == q) {
+        *exponent = n;
         return 1;
     }
     return 0;
