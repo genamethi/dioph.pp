@@ -66,6 +66,7 @@ ALIGNED_WRITER_OBJ := $(BUILD_DIR)/aligned_writer.o
 SCHEMAS_OBJ := $(BUILD_DIR)/schemas.o
 PARTS_EXPAND_OBJ := $(BUILD_DIR)/parts_expand.o
 HIGHER_SWEEP_OBJ := $(BUILD_DIR)/higher_sweep.o
+FLAT_CONE_OBJ := $(BUILD_DIR)/flat_cone.o
 SOURCE_SCAN_OBJ := $(BUILD_DIR)/source_scan.o
 TABLE_TRAITS_OBJ := $(BUILD_DIR)/table_traits.o
 SCAN_PLANNER_OBJ := $(BUILD_DIR)/scan_planner.o
@@ -89,8 +90,9 @@ TEST_SUITE_BIN := $(BUILD_DIR)/primeparts-tests
 TEST_SUITE_OBJS := $(BUILD_DIR)/core_test.o $(BUILD_DIR)/writer_test.o \
                    $(BUILD_DIR)/scan_planner_test.o $(BUILD_DIR)/partition_stats_test.o \
                    $(BUILD_DIR)/plan_store_test.o $(BUILD_DIR)/parts_expand_test.o \
-                   $(BUILD_DIR)/higher_sweep_test.o $(BUILD_DIR)/chain_forms_test.o
-TEST_SUITE_LIBOBJS := $(WRITER_OBJ) $(SCHEMAS_OBJ) $(SCAN_OBJS) $(PARTITION_STATS_OBJ) $(PLAN_STORE_OBJ) $(PLAN_STATUS_OBJ) $(CORE_OBJ) $(PARTS_EXPAND_OBJ) $(HIGHER_SWEEP_OBJ) $(BUILD_DIR)/chain_forms.o $(BUILD_DIR)/hermite_modl.o
+                   $(BUILD_DIR)/higher_sweep_test.o $(BUILD_DIR)/chain_forms_test.o \
+                   $(BUILD_DIR)/flat_cone_test.o
+TEST_SUITE_LIBOBJS := $(WRITER_OBJ) $(SCHEMAS_OBJ) $(SCAN_OBJS) $(PARTITION_STATS_OBJ) $(PLAN_STORE_OBJ) $(PLAN_STATUS_OBJ) $(CORE_OBJ) $(PARTS_EXPAND_OBJ) $(HIGHER_SWEEP_OBJ) $(BUILD_DIR)/chain_forms.o $(BUILD_DIR)/hermite_modl.o $(FLAT_CONE_OBJ)
 
 E2E_BIN := $(BUILD_DIR)/primeparts-e2e
 E2E_OBJ := $(BUILD_DIR)/e2e_test.o
@@ -379,3 +381,6 @@ $(BUILD_DIR)/pp-graph: $(PP_GRAPH_OBJ) $(HERMITE_MODL_OBJ) $(CHAIN_FORMS_OBJ) $(
 
 pp-graph: $(BUILD_DIR)/pp-graph
 .PHONY: pp-graph
+
+$(FLAT_CONE_OBJ): src/graph/flat_cone.cc include/primeparts/graph/flat_cone.h include/primeparts/parts_expand.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
