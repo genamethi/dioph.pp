@@ -38,28 +38,37 @@ TEST_F(CoreTest, ProcessRankBatch) {
   ASSERT_EQ(pp_process_rank_batch(1, 10, &result), PP_OK);
   EXPECT_EQ(result.processed_count, 10u);
   EXPECT_EQ(result.prime_count, 10u);
-  EXPECT_EQ(result.partition_count, 19u);
 
+  int32_t total_k = 0;
+  int reps = 0;
   for (size_t i = 0; i < 10; ++i) {
     EXPECT_EQ(result.prime_p[i], expected_p[i]);
     EXPECT_EQ(result.prime_k[i], expected_k[i]);
+    total_k += result.prime_k[i];
+    reps += __builtin_popcountll(result.prime_flat_mask[i]);
   }
+  reps += static_cast<int>(result.higher_count);
+  EXPECT_EQ(total_k, 19);
+  EXPECT_EQ(reps, 19);
 
-  auto check_partition = [&](size_t i, int64_t p, int32_t m, int32_t n,
-                             int64_t q) {
-    ASSERT_LT(i, result.partition_count);
-    EXPECT_EQ(result.partition_p[i], p);
-    EXPECT_EQ(result.partition_m[i], m);
-    EXPECT_EQ(result.partition_n[i], n);
-    EXPECT_EQ(result.partition_q[i], q);
+  auto mask_of = [&](int64_t p) -> uint64_t {
+    for (size_t i = 0; i < result.prime_count; ++i)
+      if (result.prime_p[i] == p) return result.prime_flat_mask[i];
+    return 0;
   };
-  check_partition(0, 5, 1, 1, 3);
-  check_partition(1, 7, 1, 1, 5);
-  check_partition(2, 7, 2, 1, 3);
-  check_partition(3, 11, 1, 2, 3);
-  check_partition(4, 11, 2, 1, 7);
-  check_partition(5, 11, 3, 1, 3);
-  check_partition(18, 29, 4, 1, 13);
+  EXPECT_EQ(mask_of(5), uint64_t{1} << 1);
+  EXPECT_EQ(mask_of(7), (uint64_t{1} << 1) | (uint64_t{1} << 2));
+  EXPECT_EQ(mask_of(11), (uint64_t{1} << 2) | (uint64_t{1} << 3));
+  EXPECT_EQ(mask_of(29), uint64_t{1} << 4);
+
+  auto has_higher = [&](int64_t p, int32_t m, int32_t n, int64_t q) {
+    for (size_t i = 0; i < result.higher_count; ++i)
+      if (result.higher_p[i] == p && result.higher_m[i] == m &&
+          result.higher_n[i] == n && result.higher_q[i] == q)
+        return true;
+    return false;
+  };
+  EXPECT_TRUE(has_higher(11, 1, 2, 3));
 
   pp_batch_result_clear(&result);
 }

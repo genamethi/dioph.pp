@@ -30,14 +30,12 @@ struct Folded {
 
 Folded Fold(const pp_batch_result& r) {
   Folded out;
-  for (size_t i = 0; i < r.partition_count; ++i) {
-    const int64_t p = r.partition_p[i];
-    if (r.partition_n[i] == 1) {
-      out.mask[p] |= uint64_t{1} << r.partition_m[i];
-    } else {
-      out.higher[p].push_back(
-          Higher{r.partition_m[i], r.partition_n[i], r.partition_q[i]});
-    }
+  for (size_t i = 0; i < r.prime_count; ++i) {
+    if (r.prime_flat_mask[i] != 0) out.mask[r.prime_p[i]] = r.prime_flat_mask[i];
+  }
+  for (size_t i = 0; i < r.higher_count; ++i) {
+    out.higher[r.higher_p[i]].push_back(
+        Higher{r.higher_m[i], r.higher_n[i], r.higher_q[i]});
   }
   return out;
 }
@@ -77,7 +75,8 @@ void CheckRoundTrip(const pp_batch_result& r) {
     }
   }
 
-  size_t at = 0;
+  size_t total_reps = 0;
+  size_t flat_bits = 0;
   for (size_t i = 0; i < r.prime_count; ++i) {
     const int64_t p = r.prime_p[i];
     auto mit = f.mask.find(p);
@@ -88,21 +87,20 @@ void CheckRoundTrip(const pp_batch_result& r) {
 
     std::vector<std::pair<int32_t, std::pair<int32_t, int64_t>>> merged;
     primeparts::ForEachPart(p, mask, [&](int32_t m, int64_t q) {
+      EXPECT_EQ(q, p - (int64_t{1} << m)) << "p=" << p << " m=" << m;
       merged.push_back({m, {1, q}});
     });
     for (const Higher& h : rows) merged.push_back({h.m, {h.n, h.q}});
     std::sort(merged.begin(), merged.end());
 
-    for (const auto& e : merged) {
-      ASSERT_LT(at, r.partition_count);
-      EXPECT_EQ(r.partition_p[at], p);
-      EXPECT_EQ(r.partition_m[at], e.first);
-      EXPECT_EQ(r.partition_n[at], e.second.first);
-      EXPECT_EQ(r.partition_q[at], e.second.second);
-      ++at;
+    for (size_t j = 1; j < merged.size(); ++j) {
+      EXPECT_NE(merged[j].first, merged[j - 1].first) << "p=" << p;
     }
+    EXPECT_EQ(static_cast<int32_t>(merged.size()), r.prime_k[i]) << "p=" << p;
+    total_reps += merged.size();
+    flat_bits += static_cast<size_t>(MaskCount(r.prime_flat_mask[i]));
   }
-  EXPECT_EQ(at, r.partition_count);
+  EXPECT_EQ(total_reps, flat_bits + r.higher_count);
 }
 
 class PartsExpandTest : public ::testing::Test {
@@ -266,8 +264,11 @@ TEST_F(PartsExpandTest, RoundTripsAcrossTheInt32Boundary) {
     if (r.prime_p[i] > INT32_MAX) saw_big_p = true;
   }
   bool saw_big_m = false;
-  for (size_t i = 0; i < r.partition_count; ++i) {
-    if (r.partition_m[i] > 30) saw_big_m = true;
+  for (size_t i = 0; i < r.prime_count; ++i) {
+    if ((r.prime_flat_mask[i] >> 31) != 0) saw_big_m = true;
+  }
+  for (size_t i = 0; i < r.higher_count; ++i) {
+    if (r.higher_m[i] > 30) saw_big_m = true;
   }
   EXPECT_TRUE(saw_big_p);
   EXPECT_TRUE(saw_big_m);
@@ -300,8 +301,11 @@ TEST_F(PartsExpandTest, RoundTripsOnLargeInt64Primes) {
   ASSERT_EQ(r.prime_count, primes.size());
 
   bool saw_high_m = false;
-  for (size_t i = 0; i < r.partition_count; ++i) {
-    if (r.partition_m[i] >= 50) saw_high_m = true;
+  for (size_t i = 0; i < r.prime_count; ++i) {
+    if ((r.prime_flat_mask[i] >> 50) != 0) saw_high_m = true;
+  }
+  for (size_t i = 0; i < r.higher_count; ++i) {
+    if (r.higher_m[i] >= 50) saw_high_m = true;
   }
   EXPECT_TRUE(saw_high_m);
 
