@@ -457,6 +457,7 @@ static int process_prime(pp_batch_result *result, pp_higher_table *higher, uint6
     int m;
     int status;
     int killed_parity;
+    int has_higher;
     int32_t k = 0;
     uint64_t flat_mask = 0;
     uint64_t power;
@@ -465,6 +466,8 @@ static int process_prime(pp_batch_result *result, pp_higher_table *higher, uint6
     killed_parity = (p % 3 == 2);
     power = 2;
     pp_higher_seek(higher, p);
+    has_higher = higher->cursor < higher->count
+        && (uint64_t)higher->hits[higher->cursor].p == p;
 
     for (m = 1; m <= max_m; m++) {
         uint64_t q_candidate = p - power;
@@ -480,7 +483,9 @@ static int process_prime(pp_batch_result *result, pp_higher_table *higher, uint6
                 base = 3;
             }
         } else {
-            const pp_higher_hit *hit = pp_higher_take(higher, p, (int32_t)m);
+            const pp_higher_hit *hit = has_higher
+                ? pp_higher_take(higher, p, (int32_t)m)
+                : NULL;
 
             if (hit != NULL) {
                 base = (uint64_t)hit->q;
