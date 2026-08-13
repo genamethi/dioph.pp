@@ -431,20 +431,38 @@ exponent. `ZeroConst` and `S` agree only on the sub-question of what a twist by
 
 4. **The spectrum walk enumerates paths, and D5 is over words.** `kCap = 400000`
    at `:1085` and `:1568` was read as a truncation to be raised. It is not:
-   paths into `p = 987391` number 50450299988 against 6361 words, so the cap
+   paths into `p = 987391` number 50450299988 against 5537 words, so the cap
    sits between two different objects and raising it changes nothing. The
    collapse is telescoping — an `n = 1` run from `v` to `p` adds `p - v`
    whatever route it takes — so words are indexed by where the `n >= 2` edges
-   sit. `EnumerateWords` in `graph/words.cc` computes the word set from the
-   cone. `SpectrumCore::capped` (`:1510`) still reports a truncated answer as an
-   answer; `kMonoidBound = 4000000` (`:1866`) reports and skips instead.
+   sit. `EnumerateWords` in `graph/words.cc` computes the word set from the cone
+   and agrees with the path walk on that count, but is reached only from mode
+   `chain`; both spectrum modes still enumerate paths. That is the open half.
 
-5. **The odd-only modulus filter excludes the base.** Partly fixed:
-   `ParseEllList` (`:1895`) no longer rejects 2, so `--ells 2 --e E` reaches the
-   base and produces the tables quoted in A1 and A3. `IsSmallPrime` always
-   accepted 2. Still open: the `ell = 3; ell += 2` loops driven by `--ell-max`
-   at `:1471`, `:1801` and `:2451` skip it, so anything reached only through `--ell-max`
-   still never sees the base.
+   The truncation half is settled. `SpectrumCore::capped` (`:1510`) reported a
+   truncated answer as an answer; it now follows `kMonoidBound`'s report-and-
+   skip. A capped target is excluded from the family census rather than folded
+   into `fam_a0`, `fam_seg`, `fam_red_*`, `total_chains` and the materialized
+   `spectra` rows, and the census states how many were dropped. The check that
+   mattered more: `--sweep` compared a truncated walk against a complete sweep,
+   so a single capped target forced a false MISMATCH in the one check that
+   evidences the fast path computes the definition. Both sides are now
+   restricted to the same target subset, with counted denominators.
+
+5. ~~**The odd-only modulus filter excludes the base.**~~ **Settled.** Every
+   `--ell-max` loop now walks primes from 2 via `NextSmallPrime` instead of odds
+   from 3: the spectrum reduction (`:1801`), the spectrum family's `ells`
+   (`:2451`), and mode `hasse`'s modulus fallback (`:916`), which was a fourth
+   site not listed here and was masked by `--ells`. Measured at `--k 3` under
+   2e5, `--ell-max` and `--ells 2` agree at `l = 2` on every figure, and the
+   full-class sweep agrees with the walk there — 11 family classes, which is
+   `floor(log_3 p_max)` as A1 says it must be.
+
+   The loop in mode `roots` (`:1471`) stays odd-only and was not a defect. Its
+   criterion is the Jacobi symbol, undefined at an even modulus, and mod 2
+   squaring is Frobenius, so "core root `y = x^2` with `y` a quadratic residue"
+   is vacuous rather than informative. The exclusion is now stated in that
+   mode's output instead of being implicit in `ell = 3`.
 
 6. **`FaithfulDegree` reports a gap it does not close.** It prints the `d` at
    which the degree-bounded maps become separated by `GF(l^d)`-points, and every

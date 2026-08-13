@@ -93,6 +93,7 @@ struct Edge {
 void EmitConeDot(int64_t target, const std::set<int64_t>& cone,
                  const std::map<int64_t, std::vector<Edge>>& in, int64_t top);
 bool IsSmallPrime(uint64_t v);
+uint64_t NextSmallPrime(uint64_t v);
 bool ParseEllList(const std::string& spec, std::vector<uint64_t>* out);
 
 std::string QuoteList(const std::vector<std::string>& paths) {
@@ -136,7 +137,7 @@ void Usage(FILE* out) {
       "  --ell-max N      mode roots: largest prime modulus to check\n"
       "                   mode spectrum: also reduce the spectrum mod each\n"
       "                   prime l <= N\n"
-      "  --ells LIST      explicit odd moduli, comma separated (3,7,31);\n"
+      "  --ells LIST      explicit moduli, comma separated (2,3,7,31);\n"
       "                   overrides --ell-max\n"
       "  --p P            mode spectrum: target prime whose spectrum to compute\n"
       "  --k K            mode spectrum: instead of --p, run the whole family\n"
@@ -907,14 +908,14 @@ int RunHasse(const Options& opt) {
   std::vector<uint64_t> moduli;
   if (!opt.ells_list.empty()) {
     if (!ParseEllList(opt.ells_list, &moduli)) {
-      std::fprintf(stderr, "--ells wants a comma-separated list of odd primes, "
+      std::fprintf(stderr, "--ells wants a comma-separated list of small primes, "
                            "got '%s'\n", opt.ells_list.c_str());
       return 2;
     }
   } else {
-    const int64_t upto = opt.ell_max >= 3 ? opt.ell_max : 31;
-    for (uint64_t l = 3; l <= static_cast<uint64_t>(upto); l += 2)
-      if (IsSmallPrime(l)) moduli.push_back(l);
+    const int64_t upto = opt.ell_max >= 2 ? opt.ell_max : 31;
+    for (uint64_t l = 2; l <= static_cast<uint64_t>(upto); l = NextSmallPrime(l))
+      moduli.push_back(l);
   }
 
   std::vector<int64_t> ls;
@@ -1453,6 +1454,11 @@ bool IsSmallPrime(uint64_t v) {
   return true;
 }
 
+uint64_t NextSmallPrime(uint64_t v) {
+  for (uint64_t w = v + 1;; ++w)
+    if (IsSmallPrime(w)) return w;
+}
+
 int RunRoots(const Options& opt) {
   if (opt.he_n < 3 || opt.ell_max < 3) {
     std::fprintf(stderr,
@@ -1464,13 +1470,14 @@ int RunRoots(const Options& opt) {
   int64_t mismatches = 0;
   std::printf("He_n root criterion over F_ell: core root (y = x^2) with y a "
               "quadratic residue\n");
+  std::printf("  l = 2 excluded: the residue criterion needs an odd modulus "
+              "and squaring is Frobenius there\n");
   for (int n = 3; n <= opt.he_n; ++n) {
     int64_t total = 0;
     int64_t hit = 0;
     int64_t bad = 0;
     for (uint64_t ell = 3; ell <= static_cast<uint64_t>(opt.ell_max);
-         ell += 2) {
-      if (!IsSmallPrime(ell)) continue;
+         ell = NextSmallPrime(ell)) {
       const auto r = primeparts::graph::HermiteRootsModL(n, ell);
       ++total;
       if (!r.roots.empty()) ++hit;
@@ -1727,7 +1734,11 @@ int RunSpectrum(const Options& opt) {
 
   if (opt.format == "dot") {
     EmitConeDot(opt.target_p, cone, in, opt.top);
-    return mismatches == 0 ? 0 : 1;
+    if (capped)
+      std::fprintf(stderr,
+                   "pp-graph: segment-sequence cap hit; the cone drawn is "
+                   "incomplete\n");
+    return (mismatches == 0 && !capped) ? 0 : 1;
   }
 
   if (opt.format == "json") {
@@ -1739,7 +1750,7 @@ int RunSpectrum(const Options& opt) {
                 opt.target_p, k_target, opt.min_p, opt.target_p, cone.size(),
                 sources, target_words.size(), by_vector.size(), total_chains,
                 vector_collisions, mismatches, capped ? "true" : "false");
-    return mismatches == 0 ? 0 : 1;
+    return (mismatches == 0 && !capped) ? 0 : 1;
   }
 
   std::printf("pp-graph spectrum  p=%" PRId64 "  window [%" PRId64 ", %" PRId64
@@ -1796,11 +1807,10 @@ int RunSpectrum(const Options& opt) {
   if (static_cast<int64_t>(lines.size()) > opt.top)
     std::printf("  ... %zu more\n", lines.size() - opt.top);
 
-  if (opt.ell_max >= 3) {
+  if (opt.ell_max >= 2) {
     std::printf("\nReduction mod l (spectrum classes / distinct vectors):\n");
-    for (uint64_t ell = 3; ell <= static_cast<uint64_t>(opt.ell_max);
-         ell += 2) {
-      if (!IsSmallPrime(ell)) continue;
+    for (uint64_t ell = 2; ell <= static_cast<uint64_t>(opt.ell_max);
+         ell = NextSmallPrime(ell)) {
       std::set<std::string> classes;
       for (const auto& [key, c] : by_vector) {
         std::string red;
@@ -2443,13 +2453,14 @@ int RunSpectraFamily(const Options& opt) {
   std::vector<uint64_t> ells;
   if (!opt.ells_list.empty()) {
     if (!ParseEllList(opt.ells_list, &ells)) {
-      std::fprintf(stderr, "--ells wants a comma-separated list of odd primes, "
+      std::fprintf(stderr, "--ells wants a comma-separated list of small primes, "
                            "got '%s'\n", opt.ells_list.c_str());
       return 2;
     }
-  } else if (opt.ell_max >= 3) {
-    for (uint64_t ell = 3; ell <= static_cast<uint64_t>(opt.ell_max); ell += 2)
-      if (IsSmallPrime(ell)) ells.push_back(ell);
+  } else if (opt.ell_max >= 2) {
+    for (uint64_t ell = 2; ell <= static_cast<uint64_t>(opt.ell_max);
+         ell = NextSmallPrime(ell))
+      ells.push_back(ell);
   }
   if (drawing && ells.size() != 1) {
     std::fprintf(stderr,
@@ -2473,6 +2484,10 @@ int RunSpectraFamily(const Options& opt) {
   double t_alg = 0.0;
   std::vector<std::vector<size_t>> walk_pure;
   std::vector<std::vector<size_t>> walk_all;
+  std::vector<char> walk_capped;
+  const auto walk_skipped = [&](size_t t) {
+    return !opt.sweep_only && t < walk_capped.size() && walk_capped[t] != 0;
+  };
   std::vector<SpectrumRow> table;
   size_t br_total = 0;
   size_t br_square = 0;
@@ -2496,7 +2511,21 @@ int RunSpectraFamily(const Options& opt) {
     SpectrumCore core;
     ComputeSpectrumCore(p, in, &core);
     t_cores += Seconds(t0);
-    if (core.capped) ++capped_targets;
+    if (core.capped) {
+      ++capped_targets;
+      walk_capped.push_back(1);
+      if (opt.sweep) {
+        walk_pure.emplace_back(ells.size(), 0);
+        walk_all.emplace_back(ells.size(), 0);
+      }
+      if (shown++ < opt.top)
+        std::fprintf(rep,
+                     "  %-12" PRId64 " %-8zu %-8zu %-8s %-5s %-20s"
+                     "  (capped: excluded from the census)\n",
+                     p, core.cone.size(), core.roots.size(), "-", "-", "-");
+      continue;
+    }
+    walk_capped.push_back(0);
 
     t0 = std::chrono::steady_clock::now();
     size_t seg_words = 0;
@@ -2602,7 +2631,7 @@ int RunSpectraFamily(const Options& opt) {
                   seg_words, chains);
       for (size_t i = 0; i < ells.size(); ++i)
         std::fprintf(rep, " %-6zu", red_a0[i].size() + red_seg[i].size());
-      std::fprintf(rep, "%s\n", core.capped ? "  (capped)" : "");
+      std::fprintf(rep, "\n");
     }
   }
   if (static_cast<int64_t>(targets.size()) > opt.top)
@@ -2629,7 +2658,12 @@ int RunSpectraFamily(const Options& opt) {
     }
   }
 
-  std::fprintf(rep, "\nFamily census (%zu targets):\n", targets.size());
+  std::fprintf(rep, "\nFamily census (%zu of %zu targets):\n",
+              targets.size() - capped_targets, targets.size());
+  if (capped_targets)
+    std::fprintf(rep, "  excluded, cap hit        : %zu  (segment sequences "
+                "truncated; every figure below is over the rest)\n",
+                capped_targets);
   std::fprintf(rep, "  spectrum lines, summed   : %zu (%zu segmented)\n",
               total_words, total_seg);
   std::fprintf(rep, "  distinct exact lines     : %zu (%zu translation + %zu "
@@ -2640,9 +2674,9 @@ int RunSpectraFamily(const Options& opt) {
   std::fprintf(rep, "  P_w(root) != p           : %" PRId64 "\n", mismatches);
   if (capped_targets)
     std::fprintf(stderr,
-                 "pp-graph: %zu targets hit the segment-sequence cap; their "
-                 "spectra are incomplete\n",
-                 capped_targets);
+                 "pp-graph: %zu of %zu targets hit the segment-sequence cap "
+                 "and are excluded from the census\n",
+                 capped_targets, targets.size());
   for (size_t i = 0; i < ells.size(); ++i)
     std::fprintf(rep, "  l=%-4" PRIu64 " family classes %zu   (per-target sum %zu)\n",
                 ells[i], fam_red_a0[i].size() + fam_red_seg[i].size(),
@@ -2652,7 +2686,7 @@ int RunSpectraFamily(const Options& opt) {
 
   if (opt.sweep) {
     if (ells.empty()) {
-      std::fprintf(stderr, "--sweep needs --ell-max >= 3\n");
+      std::fprintf(stderr, "--sweep needs --ell-max >= 2 or --ells\n");
       return 2;
     }
     t0 = std::chrono::steady_clock::now();
@@ -2843,7 +2877,10 @@ int RunSpectraFamily(const Options& opt) {
     size_t bad = 0;
     std::vector<std::vector<uint64_t>> fam_mask(
         ells.size(), std::vector<uint64_t>(words, 0));
+    size_t mask_checked = 0;
     for (size_t t = 0; t < targets.size(); ++t) {
+      if (walk_skipped(t)) continue;
+      ++mask_checked;
       const int64_t p = targets[t];
       auto mit = mask.find(p);
       const std::vector<uint64_t>& mv =
@@ -2868,8 +2905,8 @@ int RunSpectraFamily(const Options& opt) {
     std::fprintf(rep, "  sweep time               : %.3fs  (walks took %.3fs)\n",
                 t_sweep, t_cores);
     std::fprintf(rep, "  per-target agreement     : %zu / %zu%s\n",
-                targets.size() * ells.size() - bad,
-                targets.size() * ells.size(), bad ? "  (MISMATCH)" : "");
+                mask_checked * ells.size() - bad,
+                mask_checked * ells.size(), bad ? "  (MISMATCH)" : "");
     std::fprintf(rep, "  family-class agreement   : %zu / %zu%s\n",
                 ells.size() - fam_bad, ells.size(),
                 fam_bad ? "  (MISMATCH)" : "");
@@ -2957,7 +2994,10 @@ int RunSpectraFamily(const Options& opt) {
 
       size_t cbad = 0;
       std::unordered_set<std::string> fam_cls;
+      size_t cls_checked = 0;
       for (size_t t = 0; t < targets.size(); ++t) {
+        if (walk_skipped(t)) continue;
+        ++cls_checked;
         auto f = cls.find(targets[t]);
         const size_t n = f == cls.end() ? 0 : f->second.size();
         if (!opt.sweep_only && n != walk_all[t][li]) ++cbad;
@@ -2973,7 +3013,7 @@ int RunSpectraFamily(const Options& opt) {
                   "targets %zu/%zu  family %zu vs walk %zu%s\n",
                   ell, total_entries, max_state,
                   static_cast<double>(total_entries) / node_set.size(), t_cls,
-                  targets.size() - cbad, targets.size(), fam_cls.size(),
+                  cls_checked - cbad, cls_checked, fam_cls.size(),
                   fam_walk,
                   cbad || fam_cls.size() != fam_walk ? "  (MISMATCH)" : "");
 

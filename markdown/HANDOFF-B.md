@@ -52,7 +52,7 @@ an `n >= 2` edge out of `q`, `S_p = (S_q + q)^n - q^n`, which involves `q` and
 never `m`.
 
 **Words are not paths.** Because runs collapse, the spectrum is indexed by where
-the `n >= 2` edges sit, not by routes. At `p = 987391` that is 6361 words
+the `n >= 2` edges sit, not by routes. At `p = 987391` that is 5537 words
 against 50450299988 paths. Any enumeration over paths is enumerating the wrong
 object, and no cap makes it the right one.
 
@@ -406,6 +406,51 @@ Roughly in dependency order. Each is a starting point, not a spec.
    same way on them, so nothing is gained on the translation half of an edge.
    What Hermite has that monomials do not is the centering, the orthogonality,
    and the linearisation rule above.
+
+## Generation hot path: remaining bookkeeping
+
+Found by reading `process_prime` and its callers, not by profiling. `n_is_prime`
+is measured at 47.5 ns per candidate and about 18 candidates per prime, so it is
+roughly 28 percent of per-prime time at 8M primes/s on 12 threads. **The other
+~70 percent is unattributed.** Nothing below is known to be in it. Ranking these
+without instrumentation is what produced two wrong cost models already — a
+small-prime wheel in front of `n_is_prime` was predicted at 3-5x and measured
+strictly slower at every bound, because FLINT already rejects the same
+candidates more cheaply than the filter costs to run.
+
+Everything removed from this list so far — the per-row bounds checks, the
+per-row `processed_count`/`first_p`/`last_p`, the per-`m` `pp_higher_take`, and
+enabling LTO — changed throughput by **nothing measurable**, each within a two
+percent run-to-run spread. The work was real and is gone; it was not where the
+time is. Treat that as evidence about the remaining items below, which were
+found the same way.
+
+**The toolchain was mixed, and LTO is what noticed.** `CC ?=` and `CXX ?=`
+never took effect, because make predefines both from its built-in rules. Every
+build took whatever `PATH` served: `cc` resolved to Debian gcc-16, `g++` to a
+source-built 16.0.0 under `/usr/local`. The two differ in one relevant respect,
+visible in `gcc -v` as *Supported LTO compression algorithms*: gcc-16 lists
+`zlib zstd`, the source build lists `zlib`. So C objects carried
+zstd-compressed IL and the link ran the wrong `lto1`, which could not read it.
+Fixed by testing `$(origin CC)` against `default`. Anything diagnosing a
+toolchain oddity here should check `make -p | grep '^CXX'` first.
+
+`-flto=auto` is now on by default via `LTOFLAGS`; the clean tree builds in
+about 39 s. Throughput is unchanged by it — three interleaved pairs at 24e6
+primes on 12 threads gave 7.78 against 7.75 M/s, inside a 2.5 percent
+within-group spread — so LTO is enabled for the inlining and the option value,
+not for a measured win.
+
+**Inferred, on the writer thread, not measured.**
+
+1. `dense_int64_range` in `generate.cc` allocates a `std::vector<int64_t>` the
+   size of the batch, fills it with an arithmetic sequence, and then
+   `AppendValues` copies it into Arrow's own buffer. Two allocations and two
+   passes per batch for `prime_rank`, which is `rank_start + i`.
+2. `int64_array` and `int32_array` copy `prime_p` and `prime_k` out of the batch
+   buffer into Arrow buffers. Unavoidable without wrapping the buffers as
+   `arrow::Buffer` and giving up ownership, which conflicts with the group
+   recycling on the producer side. Noted so it is not rediscovered as free.
 
 ## Lower priority leftovers
 
