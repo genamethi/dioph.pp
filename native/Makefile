@@ -6,13 +6,19 @@
 PREFIX ?= /usr/local
 PKG_CONFIG ?= /usr/bin/pkg-config
 PKG_CONFIG_PATH ?= $(PREFIX)/lib/pkgconfig:/usr/lib/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig
-CC ?= /usr/bin/gcc
-CXX ?= /usr/bin/g++
+ifeq ($(origin CC),default)
+CC := /usr/bin/gcc
+endif
+ifeq ($(origin CXX),default)
+CXX := /usr/bin/g++
+endif
+
+LTOFLAGS ?= -flto=auto
 
 CPPFLAGS += -Iinclude -I$(PREFIX)/include
-CFLAGS += -std=c11 -D_POSIX_C_SOURCE=200809L -O3 -g -fPIC -Wall -Wextra -Wpedantic $(SANITIZE)
-CXXFLAGS += -std=c++23 -O3 -g -fPIC -Wall -Wextra -Wpedantic $(SANITIZE)
-LDFLAGS += -L$(PREFIX)/lib -Wl,-rpath,$(abspath $(PREFIX)/lib) -rdynamic $(SANITIZE)
+CFLAGS += -std=c11 -D_POSIX_C_SOURCE=200809L -O3 -g -fPIC -Wall -Wextra -Wpedantic $(LTOFLAGS) $(SANITIZE)
+CXXFLAGS += -std=c++23 -O3 -g -fPIC -Wall -Wextra -Wpedantic $(LTOFLAGS) $(SANITIZE)
+LDFLAGS += -L$(PREFIX)/lib -Wl,-rpath,$(abspath $(PREFIX)/lib) -rdynamic $(LTOFLAGS) $(SANITIZE)
 EXE_LDFLAGS += -no-pie
 LDLIBS += $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --libs primecount primesieve gmp flint) -lpari -lm
 NOTCURSES_LDLIBS ?= $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --libs notcurses-core 2>/dev/null || PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --libs notcurses 2>/dev/null)

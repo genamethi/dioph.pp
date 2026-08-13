@@ -382,16 +382,20 @@ static int write_prime(pp_batch_result *result, uint64_t p, int32_t k, uint64_t 
     result->prime_p[result->prime_count] = (int64_t)p;
     result->prime_k[result->prime_count] = k;
     result->prime_flat_mask[result->prime_count] = flat_mask;
-    if (result->prime_count == 0) {
-        result->first_p = (int64_t)p;
-    }
-    result->last_p = (int64_t)p;
     result->prime_count++;
     if (flat_mask != 0) {
         result->flat_prime_count++;
     }
-    result->processed_count = (int64_t)result->prime_count;
     return PP_OK;
+}
+
+static void finalize_result(pp_batch_result *result)
+{
+    result->processed_count = (int64_t)result->prime_count;
+    if (result->prime_count > 0) {
+        result->first_p = result->prime_p[0];
+        result->last_p = result->prime_p[result->prime_count - 1];
+    }
 }
 
 static int write_higher(pp_batch_result *result, uint64_t p, int32_t m, int32_t n, uint64_t q)
@@ -614,6 +618,7 @@ int pp_process_prime_array(const uint64_t *primes, size_t count, pp_batch_result
         }
     }
     pp_higher_table_clear(&higher);
+    finalize_result(out);
     return PP_OK;
 }
 
@@ -672,6 +677,7 @@ int pp_process_prime_span(int64_t first_prime, int64_t end_prime,
     }
     primesieve_free_iterator(&it);
     pp_higher_table_clear(&higher);
+    finalize_result(out);
     return PP_OK;
 }
 
