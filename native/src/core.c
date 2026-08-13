@@ -375,9 +375,6 @@ static int write_prime(pp_batch_result *result, uint64_t p, int32_t k, uint64_t 
 {
     int status;
 
-    if (p > (uint64_t)INT64_MAX) {
-        return PP_ERR_OVERFLOW;
-    }
     status = grow_prime_rows(result, result->prime_count + 1);
     if (status != PP_OK) {
         return status;
@@ -401,9 +398,6 @@ static int write_higher(pp_batch_result *result, uint64_t p, int32_t m, int32_t 
 {
     int status;
 
-    if (p > (uint64_t)INT64_MAX || q > (uint64_t)INT64_MAX) {
-        return PP_ERR_OVERFLOW;
-    }
     status = grow_higher_rows(result, result->higher_count + 1);
     if (status != PP_OK) {
         return status;
@@ -462,10 +456,6 @@ static int process_prime(pp_batch_result *result, pp_higher_table *higher, uint6
     int32_t k = 0;
     uint64_t flat_mask = 0;
     uint64_t power;
-
-    if (p == 0 || p > (uint64_t)INT64_MAX) {
-        return PP_ERR_OVERFLOW;
-    }
 
     max_m = floor_log2_u64(p);
     killed_parity = (p % 3 == 2);
@@ -593,6 +583,11 @@ int pp_process_prime_array(const uint64_t *primes, size_t count, pp_batch_result
     if (out == NULL || (primes == NULL && count != 0)) {
         return PP_ERR_INVALID_ARGUMENT;
     }
+    for (i = 0; i < count; i++) {
+        if (primes[i] < 2 || primes[i] > (uint64_t)PP_MAX_PRIME) {
+            return PP_ERR_OVERFLOW;
+        }
+    }
     status = pp_init();
     if (status != PP_OK) {
         return status;
@@ -631,6 +626,9 @@ int pp_process_prime_span(int64_t first_prime, int64_t end_prime,
 
     if (out == NULL || first_prime < 2 || end_prime < first_prime || expected_primes < 0) {
         return PP_ERR_INVALID_ARGUMENT;
+    }
+    if (end_prime > PP_MAX_PRIME + 1) {
+        return PP_ERR_OVERFLOW;
     }
 
     status = pp_init();
@@ -692,6 +690,9 @@ int pp_process_rank_batch(int64_t start_idx, int64_t count, pp_batch_result *out
     if (start_idx > INT64_MAX - count) {
         return PP_ERR_OVERFLOW;
     }
+    if (start_idx + count - 1 > PP_MAX_PRIME_RANK) {
+        return PP_ERR_OVERFLOW;
+    }
 
     status = pp_init();
     if (status != PP_OK) {
@@ -734,6 +735,9 @@ int pp_count_rank_batch(int64_t start_idx, int64_t count, pp_count_result *out)
         return PP_OK;
     }
     if (start_idx > INT64_MAX - count) {
+        return PP_ERR_OVERFLOW;
+    }
+    if (start_idx + count - 1 > PP_MAX_PRIME_RANK) {
         return PP_ERR_OVERFLOW;
     }
 

@@ -1016,6 +1016,13 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
   std::string error;
   int64_t start_idx = 0;
   if (!resolve_start_idx(options, callbacks, &start_idx)) return 1;
+  if (start_idx > PP_MAX_PRIME_RANK - options.count + 1) {
+    set_last_error("range: start_idx=" + std::to_string(start_idx) + " plus count=" +
+                   std::to_string(options.count) + " runs past prime_rank " +
+                   std::to_string(PP_MAX_PRIME_RANK) + ", the last prime below 2^63");
+    log_line(callbacks, "%s", g_last_error.c_str());
+    return 1;
+  }
   int64_t prime_rank_start =
       options.prime_rank_start > 0 ? options.prime_rank_start : start_idx;
   if (out) {
