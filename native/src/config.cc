@@ -288,6 +288,9 @@ const Field kFields[] = {
 
     PP_I64(generate, threads, "threads", 0)
     PP_I64(generate, chunk_primes, "chunk_primes", 500000)
+    PP_I64(generate, group_chunks, "group_chunks", 0)
+    PP_I64(generate, queue_depth, "queue_depth", 6)
+    PP_I64(generate, primecount_threads, "primecount_threads", 0)
 
     PP_STR(catalogd, host, "host", "127.0.0.1", nullptr)
     PP_I64(catalogd, port, "port", 8181)

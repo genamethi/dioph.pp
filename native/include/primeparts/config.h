@@ -19,6 +19,9 @@ struct Core {
 struct Generate {
   int64_t threads = 0;
   int64_t chunk_primes = 0;
+  int64_t group_chunks = 0;
+  int64_t queue_depth = 0;
+  int64_t primecount_threads = 0;
 };
 
 struct Catalogd {

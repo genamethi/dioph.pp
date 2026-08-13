@@ -56,6 +56,8 @@ void pp_batch_result_clear(pp_batch_result *result);
 size_t pp_batch_result_used_bytes(const pp_batch_result *result);
 size_t pp_batch_result_allocated_bytes(const pp_batch_result *result);
 
+void pp_set_nth_prime_threads(int threads);
+
 int64_t pp_prime_pi(int64_t n);
 int64_t pp_nth_prime(int64_t n);
 int64_t pp_next_prime(int64_t n);
@@ -64,6 +66,8 @@ int64_t pp_previous_prime(int64_t n);
 int pp_is_prime_power_u64(uint64_t n, uint64_t *base, int32_t *exponent);
 int pp_is_prime_power_mpz(const mpz_t n, mpz_t base, int32_t *exponent);
 
+int pp_process_prime_span(int64_t first_prime, int64_t end_prime,
+                          int64_t expected_primes, pp_batch_result *out);
 int pp_process_rank_batch(int64_t start_idx, int64_t count, pp_batch_result *out);
 int pp_process_prime_array(const uint64_t *primes, size_t count, pp_batch_result *out);
 int pp_count_rank_batch(int64_t start_idx, int64_t count, pp_count_result *out);

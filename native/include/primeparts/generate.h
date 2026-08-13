@@ -18,7 +18,10 @@ typedef struct {
   int64_t start_idx;
   int64_t count;
   int64_t chunk_primes;
+  int64_t group_chunks;
+  int64_t queue_depth;
   int64_t threads;
+  int64_t primecount_threads;
   int64_t prime_rank_start;
   int temp;
   const char* warehouse;

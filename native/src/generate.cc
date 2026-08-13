@@ -87,7 +87,10 @@ struct Options {
   int64_t start_idx = 0;
   int64_t count = -1;
   int64_t chunk_primes = 0;
+  int64_t group_chunks = 0;
+  int64_t queue_depth = 0;
   int64_t threads = -1;
+  int64_t primecount_threads = -1;
   int64_t prime_rank_start = 0;
   bool temp = false;
   bool init = false;
@@ -120,6 +123,37 @@ struct BatchHolder {
   }
 };
 
+int64_t hw_threads() {
+  unsigned hw = std::thread::hardware_concurrency();
+  return hw == 0 ? 1 : static_cast<int64_t>(hw);
+}
+
+bool resolve_tuning(const primeparts::config::Generate& gen, Options* options) {
+  if (options->chunk_primes <= 0) options->chunk_primes = gen.chunk_primes;
+  if (options->group_chunks <= 0) options->group_chunks = gen.group_chunks;
+  if (options->queue_depth <= 0) options->queue_depth = gen.queue_depth;
+  if (options->threads < 0) options->threads = gen.threads;
+  if (options->primecount_threads < 0) {
+    options->primecount_threads = gen.primecount_threads;
+  }
+  if (options->chunk_primes <= 0 || options->threads < 0 ||
+      options->group_chunks < 0 || options->primecount_threads < 0) {
+    return false;
+  }
+  if (options->threads == 0) options->threads = hw_threads();
+  if (options->primecount_threads == 0) {
+    options->primecount_threads = hw_threads();
+  }
+  if (options->group_chunks == 0) options->group_chunks = options->threads;
+  if (options->queue_depth <= 0) options->queue_depth = 1;
+  return true;
+}
+
+struct PrimeSpan {
+  int64_t lo = 0;
+  int64_t hi = 0;
+};
+
 struct FileGroup {
   std::vector<BatchHolder> batches;
   int64_t prime_rows = 0;
@@ -127,8 +161,126 @@ struct FileGroup {
   int64_t higher_parts_rows = 0;
   int64_t first_p = 0;
   int64_t last_p = 0;
-  int64_t start_idx = 0;
   int64_t processed_count = 0;
+
+  void reset() {
+    prime_rows = 0;
+    flat_parts_rows = 0;
+    higher_parts_rows = 0;
+    first_p = 0;
+    last_p = 0;
+    processed_count = 0;
+  }
+
+  int64_t allocated_bytes() const {
+    int64_t bytes = 0;
+    for (const auto& holder : batches) {
+      bytes += static_cast<int64_t>(pp_batch_result_allocated_bytes(&holder.batch));
+    }
+    return bytes;
+  }
+};
+
+struct GroupCursor {
+  int64_t next_idx = 0;
+  int64_t end_idx = 0;
+  int64_t next_prime = 0;
+};
+
+class ChunkPool {
+ public:
+  explicit ChunkPool(int64_t workers) {
+    if (workers < 1) workers = 1;
+    threads_.reserve(static_cast<size_t>(workers));
+    for (int64_t i = 0; i < workers; ++i) {
+      threads_.emplace_back([this]() { Loop(); });
+    }
+  }
+
+  ~ChunkPool() {
+    {
+      std::lock_guard<std::mutex> guard(mu_);
+      quit_ = true;
+    }
+    wake_.notify_all();
+    for (auto& t : threads_) {
+      if (t.joinable()) t.join();
+    }
+  }
+
+  ChunkPool(const ChunkPool&) = delete;
+  ChunkPool& operator=(const ChunkPool&) = delete;
+
+  size_t size() const { return threads_.size(); }
+
+  bool Run(const std::vector<PrimeSpan>& spans, int64_t expected_primes,
+           std::vector<BatchHolder>* out, std::string* error) {
+    if (spans.empty()) return true;
+    out->resize(spans.size());
+    {
+      std::lock_guard<std::mutex> guard(mu_);
+      spans_ = &spans;
+      out_ = out;
+      expected_primes_ = expected_primes;
+      next_ = 0;
+      failed_ = false;
+      error_.clear();
+      active_ = threads_.size();
+      generation_++;
+    }
+    wake_.notify_all();
+
+    std::unique_lock<std::mutex> lk(mu_);
+    done_.wait(lk, [this]() { return active_ == 0; });
+    spans_ = nullptr;
+    out_ = nullptr;
+    if (failed_) {
+      *error = error_;
+      return false;
+    }
+    return true;
+  }
+
+ private:
+  void Loop() {
+    std::unique_lock<std::mutex> lk(mu_);
+    uint64_t seen = generation_;
+    for (;;) {
+      wake_.wait(lk, [this, seen]() { return quit_ || generation_ != seen; });
+      if (quit_) return;
+      seen = generation_;
+      for (;;) {
+        if (failed_ || next_ >= spans_->size()) break;
+        const size_t id = next_++;
+        const PrimeSpan span = (*spans_)[id];
+        pp_batch_result* batch = &(*out_)[id].batch;
+        const int64_t expected = expected_primes_;
+        lk.unlock();
+        const int status =
+            pp_process_prime_span(span.lo, span.hi, expected, batch);
+        lk.lock();
+        if (status != PP_OK && !failed_) {
+          failed_ = true;
+          error_ = pp_status_message(status);
+        }
+      }
+      if (--active_ == 0) done_.notify_one();
+    }
+  }
+
+  std::mutex mu_;
+  std::condition_variable wake_;
+  std::condition_variable done_;
+  std::vector<std::thread> threads_;
+  const std::vector<PrimeSpan>* spans_ = nullptr;
+  std::vector<BatchHolder>* out_ = nullptr;
+  int64_t expected_primes_ = 0;
+  size_t next_ = 0;
+  size_t active_ = 0;
+  uint64_t generation_ = 0;
+  bool quit_ = false;
+  bool failed_ = false;
+  std::string error_;
 };
 
 class Progress {
@@ -272,10 +424,24 @@ void usage(FILE* stream) {
       "                            is a hard error rather than a silent restart.\n"
       "  --temp                    Write to $FUNBUNS_DATA_DIR/tmp/iceberg_temp_<ts>/\n"
       "                            warehouse and skip the commit (files-only).\n"
-      "  --chunk-primes N          Materialization chunk size.\n"
+      "  --chunk-primes N          Primes per worker chunk (a target; chunks are\n"
+      "                            split by value inside a group, so counts vary\n"
+      "                            by a few parts in a thousand).\n"
       "                            Default: conf.generate.chunk_primes.\n"
+      "  --group-chunks N          Chunks per file group. The group is the unit\n"
+      "                            handed to the writer, so this sets both the\n"
+      "                            write size and how much work one nth_prime\n"
+      "                            call covers. 0 = --threads.\n"
+      "                            Default: conf.generate.group_chunks.\n"
+      "  --queue-depth N           Groups that may sit materialized ahead of the\n"
+      "                            writer. Costs one group of memory each.\n"
+      "                            Default: conf.generate.queue_depth.\n"
       "  --threads N               Materialization threads (0 = hw).\n"
       "                            Default: conf.generate.threads.\n"
+      "  --primecount-threads N    Threads for the nth_prime calls that place\n"
+      "                            group boundaries (0 = hw). These run on the\n"
+      "                            producer, not inside the workers.\n"
+      "                            Default: conf.generate.primecount_threads.\n"
       "  --help\n"
       "\n"
       "Environment:\n"
@@ -469,63 +635,44 @@ PartsBatches make_parts_batches(const pp_batch_result& batch) {
   return out;
 }
 
-bool materialize_group(int64_t* next_idx, int64_t end_idx, const Options& options,
-                       FileGroup* group, std::string* error) {
-  group->start_idx = *next_idx;
-  int64_t remaining_total = end_idx - *next_idx;
-  int64_t chunk_count =
-      (remaining_total + options.chunk_primes - 1) / options.chunk_primes;
-  int64_t max_group_chunks = options.threads > 0 ? options.threads : 1;
-  if (chunk_count > max_group_chunks) chunk_count = max_group_chunks;
+int64_t group_primes(const Options& options) {
+  return options.group_chunks * options.chunk_primes;
+}
 
-  std::vector<int64_t> starts(static_cast<size_t>(chunk_count));
-  std::vector<int64_t> counts(static_cast<size_t>(chunk_count));
+bool materialize_group(ChunkPool* pool, const Options& options,
+                       GroupCursor* cursor, FileGroup* group,
+                       std::string* error) {
+  const int64_t remaining = cursor->end_idx - cursor->next_idx;
+  int64_t primes = group_primes(options);
+  if (primes > remaining) primes = remaining;
+
+  const int64_t span_end = pp_nth_prime(cursor->next_idx + primes);
+  if (span_end <= 0) {
+    *error = "nth_prime failed at rank " +
+             std::to_string(cursor->next_idx + primes);
+    return false;
+  }
+  if (span_end <= cursor->next_prime) {
+    *error = "non-monotone prime span at rank " +
+             std::to_string(cursor->next_idx);
+    return false;
+  }
+
+  const int64_t chunk_count =
+      (primes + options.chunk_primes - 1) / options.chunk_primes;
+  const int64_t width = span_end - cursor->next_prime;
+  std::vector<PrimeSpan> spans(static_cast<size_t>(chunk_count));
   for (int64_t i = 0; i < chunk_count; ++i) {
-    starts[static_cast<size_t>(i)] = *next_idx + i * options.chunk_primes;
-    int64_t remaining = end_idx - starts[static_cast<size_t>(i)];
-    counts[static_cast<size_t>(i)] =
-        remaining < options.chunk_primes ? remaining : options.chunk_primes;
+    auto& span = spans[static_cast<size_t>(i)];
+    span.lo = cursor->next_prime + (width * i) / chunk_count;
+    span.hi = cursor->next_prime + (width * (i + 1)) / chunk_count;
   }
+  spans.front().lo = cursor->next_prime;
+  spans.back().hi = span_end;
 
-  group->batches.resize(static_cast<size_t>(chunk_count));
-  int64_t worker_count = options.threads;
-  if (worker_count <= 0) worker_count = 1;
-  if (worker_count > chunk_count) worker_count = chunk_count;
-
-  std::mutex lock;
-  int64_t next_chunk = 0;
-  bool failed = false;
-  std::string first_error;
-  std::vector<std::thread> workers;
-  workers.reserve(static_cast<size_t>(worker_count));
-  for (int64_t worker = 0; worker < worker_count; ++worker) {
-    workers.emplace_back([&]() {
-      for (;;) {
-        int64_t chunk_id;
-        {
-          std::lock_guard<std::mutex> guard(lock);
-          if (failed || next_chunk >= chunk_count) return;
-          chunk_id = next_chunk++;
-        }
-        auto& holder = group->batches[static_cast<size_t>(chunk_id)];
-        int status = pp_process_rank_batch(starts[static_cast<size_t>(chunk_id)],
-                                           counts[static_cast<size_t>(chunk_id)],
-                                           &holder.batch);
-        if (status != PP_OK ||
-            holder.batch.processed_count != counts[static_cast<size_t>(chunk_id)]) {
-          std::lock_guard<std::mutex> guard(lock);
-          failed = true;
-          if (first_error.empty()) {
-            first_error =
-                status != PP_OK ? pp_status_message(status) : "short native batch without interrupt";
-          }
-          return;
-        }
-      }
-    });
+  if (!pool->Run(spans, options.chunk_primes, &group->batches, error)) {
+    return false;
   }
-  for (auto& worker : workers) worker.join();
-  if (failed) { *error = first_error; return false; }
 
   for (const auto& holder : group->batches) {
     if (group->first_p == 0 || holder.batch.first_p < group->first_p) {
@@ -540,7 +687,16 @@ bool materialize_group(int64_t* next_idx, int64_t end_idx, const Options& option
     group->processed_count += holder.batch.processed_count;
   }
 
-  *next_idx += group->processed_count;
+  if (group->processed_count != primes) {
+    *error = "span [" + std::to_string(cursor->next_prime) + ", " +
+             std::to_string(span_end) + ") holds " +
+             std::to_string(group->processed_count) + " primes, expected " +
+             std::to_string(primes);
+    return false;
+  }
+
+  cursor->next_idx += primes;
+  cursor->next_prime = span_end;
   return true;
 }
 
@@ -549,7 +705,10 @@ bool parse_args(int argc, char** argv, Options* options) {
       {"start-idx", required_argument, nullptr, 1000},
       {"count", required_argument, nullptr, 'n'},
       {"chunk-primes", required_argument, nullptr, 'c'},
+      {"group-chunks", required_argument, nullptr, 1009},
+      {"queue-depth", required_argument, nullptr, 1010},
       {"threads", required_argument, nullptr, 1003},
+      {"primecount-threads", required_argument, nullptr, 1011},
       {"warehouse", required_argument, nullptr, 'w'},
       {"temp", no_argument, nullptr, 1004},
       {"init", no_argument, nullptr, 1007},
@@ -581,9 +740,27 @@ bool parse_args(int argc, char** argv, Options* options) {
           return false;
         }
         break;
+      case 1009:
+        if (!parse_i64(optarg, &options->group_chunks)) {
+          std::fprintf(stderr, "invalid --group-chunks: %s\n", optarg);
+          return false;
+        }
+        break;
+      case 1010:
+        if (!parse_i64(optarg, &options->queue_depth)) {
+          std::fprintf(stderr, "invalid --queue-depth: %s\n", optarg);
+          return false;
+        }
+        break;
       case 1003:
         if (!parse_i64(optarg, &options->threads)) {
           std::fprintf(stderr, "invalid --threads: %s\n", optarg);
+          return false;
+        }
+        break;
+      case 1011:
+        if (!parse_i64(optarg, &options->primecount_threads)) {
+          std::fprintf(stderr, "invalid --primecount-threads: %s\n", optarg);
           return false;
         }
         break;
@@ -617,15 +794,9 @@ bool parse_args(int argc, char** argv, Options* options) {
     options->warehouse = options->temp ? default_temp_root() / "warehouse"
                                        : fs::path(conf.core.warehouse);
   }
-  if (options->chunk_primes <= 0) options->chunk_primes = conf.generate.chunk_primes;
-  if (options->threads < 0) options->threads = conf.generate.threads;
-  if (options->chunk_primes <= 0 || options->threads < 0) {
+  if (!resolve_tuning(conf.generate, options)) {
     usage(stderr);
     return false;
-  }
-  if (options->threads == 0) {
-    unsigned hw = std::thread::hardware_concurrency();
-    options->threads = hw == 0 ? 1 : static_cast<int64_t>(hw);
   }
   return resolve_rank_start(options);
 }
@@ -878,6 +1049,7 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
     log_line(callbacks, "%s", g_last_error.c_str());
     return 1;
   }
+  pp_set_nth_prime_threads(static_cast<int>(options.primecount_threads));
 
   auto run_start = std::chrono::steady_clock::now();
   try {
@@ -996,8 +1168,17 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
       return 1;
     }
 
-    int64_t next_idx = start_idx;
-    int64_t end_idx = start_idx + options.count;
+    GroupCursor cursor;
+    cursor.next_idx = start_idx;
+    cursor.end_idx = start_idx + options.count;
+    cursor.next_prime = pp_nth_prime(start_idx);
+    if (cursor.next_prime <= 0) {
+      set_last_error("nth_prime failed at rank " + std::to_string(start_idx));
+      log_line(callbacks, "%s", g_last_error.c_str());
+      pp_shutdown();
+      return 1;
+    }
+
     int64_t prime_rank_cursor = prime_rank_start;
     int64_t total_primes = 0;
     int64_t total_flat_parts = 0;
@@ -1006,12 +1187,21 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
     int64_t last_p = 0;
     bool stop_requested = false;
 
-    int64_t total_chunks =
-        (options.count + options.chunk_primes - 1) / options.chunk_primes;
-    int64_t group_width = options.threads > 0 ? options.threads : 1;
-    int64_t total_groups = (total_chunks + group_width - 1) / group_width;
+    const int64_t primes_per_group = group_primes(options);
+    int64_t total_groups =
+        (options.count + primes_per_group - 1) / primes_per_group;
+    log_line(callbacks,
+             "pipeline: threads=%" PRId64 " chunk_primes=%" PRId64
+             " group_chunks=%" PRId64 " group_primes=%" PRId64
+             " queue_depth=%" PRId64 " primecount_threads=%" PRId64
+             " groups=%" PRId64 " first_p=%" PRId64,
+             options.threads, options.chunk_primes, options.group_chunks,
+             primes_per_group, options.queue_depth, options.primecount_threads,
+             total_groups, cursor.next_prime);
+
     Progress progress(total_groups, options.count);
     StopMonitor stop_monitor;
+    ChunkPool pool(options.threads);
     int64_t groups_done = 0;
     progress.update(0, 0);
 
@@ -1024,7 +1214,8 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
     std::condition_variable q_can_push;
     std::condition_variable q_can_pop;
     std::deque<WriteJob> jobs;
-    const size_t kMaxPending = 1;
+    std::deque<FileGroup> spares;
+    const size_t max_pending = static_cast<size_t>(options.queue_depth);
     bool producer_done = false;
     bool writer_failed = false;
     std::string writer_error;
@@ -1066,6 +1257,11 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
           w_primes += static_cast<int64_t>(holder.batch.prime_count);
         }
         log_line(callbacks, "group written | primes=%" PRId64, w_primes);
+        {
+          std::lock_guard<std::mutex> guard(q_mu);
+          spares.push_back(std::move(job.group));
+          q_can_push.notify_one();
+        }
       }
     });
 
@@ -1085,12 +1281,29 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
     } writer_guard{writer_thread, q_mu, q_can_pop, producer_done};
 
     bool producer_error = false;
-    while (next_idx < end_idx) {
+    bool memory_logged = false;
+    while (cursor.next_idx < cursor.end_idx) {
       FileGroup group;
-      if (!materialize_group(&next_idx, end_idx, options, &group, &error)) {
+      {
+        std::lock_guard<std::mutex> guard(q_mu);
+        if (!spares.empty()) {
+          group = std::move(spares.front());
+          spares.pop_front();
+        }
+      }
+      group.reset();
+      if (!materialize_group(&pool, options, &cursor, &group, &error)) {
         set_last_error("materialize failed: " + error);
         producer_error = true;
         break;
+      }
+
+      if (!memory_logged) {
+        memory_logged = true;
+        log_line(callbacks,
+                 "pipeline: group holds %" PRId64 " MiB; up to %" PRId64
+                 " groups live",
+                 group.allocated_bytes() >> 20, options.queue_depth + 2);
       }
 
       if (first_p == 0 || group.first_p < first_p) first_p = group.first_p;
@@ -1115,7 +1328,7 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
       {
         std::unique_lock<std::mutex> lk(q_mu);
         q_can_push.wait(
-            lk, [&]() { return jobs.size() < kMaxPending || writer_failed; });
+            lk, [&]() { return jobs.size() < max_pending || writer_failed; });
         if (writer_failed) break;
         jobs.push_back(std::move(job));
         q_can_pop.notify_one();
@@ -1220,16 +1433,23 @@ int pp_gen_run(const pp_gen_options* options,
   Options internal;
   internal.start_idx = options->start_idx;
   internal.count = options->count;
-  internal.chunk_primes = options->chunk_primes > 0 ? options->chunk_primes
-                                                    : conf.generate.chunk_primes;
-  internal.threads = options->threads;
+  internal.chunk_primes = options->chunk_primes;
+  internal.group_chunks = options->group_chunks;
+  internal.queue_depth = options->queue_depth;
+  internal.threads = options->threads > 0 ? options->threads : -1;
+  internal.primecount_threads =
+      options->primecount_threads > 0 ? options->primecount_threads : -1;
   internal.prime_rank_start = options->prime_rank_start;
   internal.temp = options->temp != 0;
   if (options->warehouse) internal.warehouse = options->warehouse;
   if (options->rest_uri) internal.rest_uri = options->rest_uri;
   internal.ns = primeparts::catalog::ResolveNamespace(
       options->ns && options->ns[0] ? options->ns : conf.core.ns_name);
-  if (internal.count < kMinCount || internal.chunk_primes <= 0 || internal.threads < 0) {
+  if (!resolve_tuning(conf.generate, &internal)) {
+    set_last_error("invalid pp_gen_options tuning values");
+    return 1;
+  }
+  if (internal.count < kMinCount) {
     set_last_error("invalid pp_gen_options values (count must be >= 1000000000)");
     return 1;
   }
@@ -1243,10 +1463,6 @@ int pp_gen_run(const pp_gen_options* options,
       return 1;
     }
     internal.warehouse = default_temp_root() / "warehouse";
-  }
-  if (internal.threads == 0) {
-    unsigned hw = std::thread::hardware_concurrency();
-    internal.threads = hw == 0 ? 1 : static_cast<int64_t>(hw);
   }
   return run_generation(internal, callbacks, out);
 }

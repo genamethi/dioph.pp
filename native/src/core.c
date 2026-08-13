@@ -93,6 +93,13 @@ size_t pp_batch_result_allocated_bytes(const pp_batch_result *result)
             + sizeof(*result->partition_q));
 }
 
+void pp_set_nth_prime_threads(int threads)
+{
+    if (threads > 0) {
+        primecount_set_num_threads(threads);
+    }
+}
+
 int64_t pp_prime_pi(int64_t n)
 {
     if (n < 0) {
@@ -510,7 +517,12 @@ static int prepare_result(pp_batch_result *out, int64_t start_idx, int64_t reque
     size_t partition_capacity;
     int status;
 
-    pp_batch_result_clear(out);
+    out->prime_count = 0;
+    out->partition_count = 0;
+    out->processed_count = 0;
+    out->interrupted = 0;
+    out->first_p = 0;
+    out->last_p = 0;
     out->start_idx = start_idx;
     out->requested_count = requested_count;
 
@@ -568,13 +580,66 @@ int pp_process_prime_array(const uint64_t *primes, size_t count, pp_batch_result
     return PP_OK;
 }
 
+int pp_process_prime_span(int64_t first_prime, int64_t end_prime,
+                          int64_t expected_primes, pp_batch_result *out)
+{
+    int status;
+    primesieve_iterator it;
+    pp_higher_table higher;
+
+    if (out == NULL || first_prime < 2 || end_prime < first_prime || expected_primes < 0) {
+        return PP_ERR_INVALID_ARGUMENT;
+    }
+
+    status = pp_init();
+    if (status != PP_OK) {
+        return status;
+    }
+
+    status = prepare_result(out, 0, expected_primes, (size_t)expected_primes);
+    if (status != PP_OK) {
+        return status;
+    }
+    if (end_prime == first_prime) {
+        return PP_OK;
+    }
+
+    pp_higher_table_init(&higher);
+    status = pp_higher_sweep(&higher, (uint64_t)first_prime, (uint64_t)end_prime - 1);
+    if (status != PP_OK) {
+        pp_higher_table_clear(&higher);
+        return status;
+    }
+
+    primesieve_init(&it);
+    primesieve_jump_to(&it, (uint64_t)first_prime, (uint64_t)end_prime);
+    for (;;) {
+        uint64_t p = primesieve_next_prime(&it);
+        if (p == PRIMESIEVE_ERROR || it.is_error) {
+            primesieve_free_iterator(&it);
+            pp_higher_table_clear(&higher);
+            return PP_ERR_LIBRARY;
+        }
+        if (p >= (uint64_t)end_prime) {
+            break;
+        }
+        status = process_prime(out, &higher, p);
+        if (status != PP_OK) {
+            primesieve_free_iterator(&it);
+            pp_higher_table_clear(&higher);
+            return status;
+        }
+    }
+    primesieve_free_iterator(&it);
+    pp_higher_table_clear(&higher);
+    return PP_OK;
+}
+
 int pp_process_rank_batch(int64_t start_idx, int64_t count, pp_batch_result *out)
 {
     int64_t first_prime;
     int64_t end_prime;
     int status;
-    primesieve_iterator it;
-    pp_higher_table higher;
 
     if (out == NULL || start_idx <= 0 || count < 0) {
         return PP_ERR_INVALID_ARGUMENT;
@@ -597,40 +662,12 @@ int pp_process_rank_batch(int64_t start_idx, int64_t count, pp_batch_result *out
         return PP_ERR_LIBRARY;
     }
 
-    status = prepare_result(out, start_idx, count, (size_t)count);
+    status = pp_process_prime_span(first_prime, end_prime, count, out);
     if (status != PP_OK) {
         return status;
     }
-
-    pp_higher_table_init(&higher);
-    status = pp_higher_sweep(&higher, (uint64_t)first_prime, (uint64_t)end_prime - 1);
-    if (status != PP_OK) {
-        pp_higher_table_clear(&higher);
-        return status;
-    }
-
-    primesieve_init(&it);
-    primesieve_jump_to(&it, (uint64_t)first_prime, (uint64_t)end_prime);
-    while (out->processed_count < count) {
-        uint64_t p = primesieve_next_prime(&it);
-        if (p == PRIMESIEVE_ERROR || it.is_error) {
-            primesieve_free_iterator(&it);
-            pp_higher_table_clear(&higher);
-            return PP_ERR_LIBRARY;
-        }
-        if (p >= (uint64_t)end_prime) {
-            break;
-        }
-        status = process_prime(out, &higher, p);
-        if (status != PP_OK) {
-            primesieve_free_iterator(&it);
-            pp_higher_table_clear(&higher);
-            return status;
-        }
-    }
-    primesieve_free_iterator(&it);
-    pp_higher_table_clear(&higher);
-
+    out->start_idx = start_idx;
+    out->requested_count = count;
     if (out->processed_count != count) {
         return PP_ERR_LIBRARY;
     }
