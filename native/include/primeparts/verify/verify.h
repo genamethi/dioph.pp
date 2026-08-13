@@ -39,6 +39,7 @@ struct CheckResult {
 struct CheckSpec {
   std::string table;
   std::vector<std::string> select;
+  std::string requires_ascending;
 };
 
 class ShardState {
@@ -51,13 +52,13 @@ class Check {
   virtual ~Check() = default;
   virtual const CheckSpec& spec() const = 0;
   virtual std::unique_ptr<ShardState> NewShard() const = 0;
-  virtual void Eval(const arrow::RecordBatch& batch,
+  virtual bool Eval(const arrow::RecordBatch& batch,
                     const std::string& data_file, ShardState& state,
-                    CheckResult& out, int max_examples) const = 0;
+                    CheckResult& out, int max_examples,
+                    std::string* error) const = 0;
 };
 
-std::unique_ptr<Check> MakePrimeRankCheck();
-std::unique_ptr<Check> MakePartitionCheck();
+std::vector<std::unique_ptr<Check>> AllChecks();
 
 class TableVerifier {
  public:
@@ -68,4 +69,4 @@ class TableVerifier {
                          std::string* error);
 };
 
-}
+}  // namespace primeparts::verify

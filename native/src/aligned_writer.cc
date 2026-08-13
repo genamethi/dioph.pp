@@ -5,15 +5,20 @@
 #include <cstdint>
 #include <memory>
 #include <string>
-#include <system_error>
 #include <vector>
 
 #include <arrow/api.h>
 
-#include "iceberg/partition_spec.h"
-#include "iceberg/schema.h"
+#include "iceberg/catalog.h"
+#include "iceberg/expression/literal.h"
+#include "iceberg/result.h"
+#include "iceberg/row/partition_values.h"
+#include "iceberg/snapshot.h"
+#include "iceberg/table.h"
+#include "iceberg/table_identifier.h"
 
-#include "primeparts/catalog/pp_iceberg_rest.h"  // StagingDataDir
+#include "primeparts/catalog/partition_stats.h"
+#include "primeparts/catalog/pp_iceberg_rest.h"
 #include "primeparts/writer.h"
 
 namespace primeparts {
@@ -22,14 +27,12 @@ namespace {
 
 constexpr double kEwmaAlpha = 0.3;
 
-// Raw ascending int64 column pointer, or nullptr if absent / not int64.
 const int64_t* Int64Col(const arrow::RecordBatch& batch, const std::string& name) {
   auto col = batch.GetColumnByName(name);
   if (!col || col->type_id() != arrow::Type::INT64) return nullptr;
   return static_cast<const arrow::Int64Array&>(*col).raw_values();
 }
 
-// First row whose key > cut_key (sorted-ascending key column).
 int64_t UpperBoundByKey(const arrow::RecordBatch& batch, const std::string& key,
                         int64_t cut_key) {
   const int64_t* p = Int64Col(batch, key);
@@ -42,6 +45,7 @@ int64_t UpperBoundByKey(const arrow::RecordBatch& batch, const std::string& key,
 
 struct AlignedBucketWriter::Impl {
   fs::path warehouse;
+  iceberg::Namespace ns;
   std::vector<BoundTable> tables;
   AtomKey atom;
   ShapePolicy policy;
@@ -55,9 +59,9 @@ struct AlignedBucketWriter::Impl {
   int64_t rg_ref_bytes_est = 0;
   int64_t ref_atoms_in_rg = 0;
 
-  std::vector<std::unique_ptr<BucketParquetWriter>> writers;  // per table, current bucket
-  std::vector<std::vector<WrittenFile>> all_files;            // per table, across buckets
-  std::vector<int32_t> next_seq;                              // per table, current bucket
+  std::vector<std::unique_ptr<BucketParquetWriter>> writers;
+  std::vector<std::vector<WrittenFile>> all_files;
+  std::vector<int32_t> next_seq;
 
   bool OpenBucketWriters(std::string* error);
   bool CloseBucketWriters(std::string* error);
@@ -72,19 +76,24 @@ bool AlignedBucketWriter::Impl::OpenBucketWriters(std::string* error) {
   const std::string vdir =
       "p_bucket_version=" + std::to_string(policy.bucket_version);
   const std::string bdir = "p_bucket=" + std::to_string(bucket);
+  auto partition_values = std::make_shared<iceberg::PartitionValues>(
+      std::vector<iceberg::Literal>{iceberg::Literal::Int(policy.bucket_version),
+                                    iceberg::Literal::Int(bucket)});
   for (size_t t = 0; t < tables.size(); ++t) {
     const auto& bt = tables[t];
     WriterConfig cfg;
-    cfg.output_dir = catalog::StagingDataDir(warehouse, bt.name) / vdir / bdir;
+    cfg.output_dir = catalog::StagingDataDir(warehouse, ns, bt.name) / vdir / bdir;
     cfg.schema = bt.schema;
     cfg.table_name = bt.name;
     cfg.filename_prefix = bt.name;
     cfg.delta_columns = bt.delta_columns;
+    cfg.stat_columns = bt.stat_columns;
     cfg.partition_spec = bt.spec;
+    cfg.partition_values = partition_values;
     cfg.bucket_version = policy.bucket_version;
     cfg.bucket = bucket;
-    cfg.target_rows_per_file = 0;         // facade rolls files explicitly
-    cfg.max_row_group_rows = INT64_MAX;   // facade cuts row groups explicitly
+    cfg.target_rows_per_file = 0;
+    cfg.max_row_group_rows = INT64_MAX;
     cfg.starting_file_seq = next_seq[t];
     auto w = BucketParquetWriter::Make(std::move(cfg), error);
     if (!w) return false;
@@ -110,14 +119,7 @@ bool AlignedBucketWriter::Impl::WriteSlice(size_t t,
                                            std::string* error) {
   if (end <= start) return true;
   auto slice = batch.Slice(start, end - start);
-  const int64_t* p = Int64Col(batch, atom.column);
-  const int64_t* rank = Int64Col(batch, "prime_rank");
-  BucketParquetWriter::BatchStats stats{};
-  stats.p_min = p ? p[start] : 0;
-  stats.p_max = p ? p[end - 1] : 0;
-  stats.rank_min = rank ? rank[start] : 0;
-  stats.rank_max = rank ? rank[end - 1] : 0;
-  return writers[t]->Write(*slice, stats, error);
+  return writers[t]->Write(*slice, error);
 }
 
 bool AlignedBucketWriter::Impl::RgFill(std::string* error) {
@@ -145,7 +147,7 @@ bool AlignedBucketWriter::Impl::RgFill(std::string* error) {
       if (!CloseBucketWriters(error)) return false;
       ++bucket;
       bucket_ref_bytes = 0;
-      next_seq.assign(tables.size(), 0);  // fresh bucket dir starts at seq 0
+      next_seq.assign(tables.size(), 0);
       if (!OpenBucketWriters(error)) return false;
     }
   }
@@ -155,17 +157,19 @@ bool AlignedBucketWriter::Impl::RgFill(std::string* error) {
 }
 
 std::unique_ptr<AlignedBucketWriter> AlignedBucketWriter::Make(
-    const fs::path& warehouse, std::vector<BoundTable> tables, AtomKey atom,
-    ShapePolicy policy, ResumeState resume, std::string* error) {
+    const fs::path& warehouse, const iceberg::Namespace& ns,
+    std::vector<BoundTable> tables, AtomKey atom, ShapePolicy policy,
+    ResumeState resume, std::string* error) {
   auto impl = std::make_unique<Impl>();
   impl->warehouse = warehouse;
+  impl->ns = ns;
   impl->tables = std::move(tables);
   impl->atom = std::move(atom);
   impl->policy = policy;
   impl->ref_bpr =
       policy.ref_bytes_per_row_prior > 0 ? policy.ref_bytes_per_row_prior : 1.1;
   impl->bucket = resume.bucket;
-  impl->bucket_ref_bytes = resume.bucket_fill_bytes;
+  impl->bucket_ref_bytes = resume.bucket_bytes;
 
   int ref_count = 0;
   for (size_t t = 0; t < impl->tables.size(); ++t) {
@@ -211,7 +215,7 @@ bool AlignedBucketWriter::Append(
     return false;
   }
 
-  std::vector<int64_t> cursor(I.tables.size(), 0);  // per-table write cursor
+  std::vector<int64_t> cursor(I.tables.size(), 0);
   const int64_t rg_target = I.policy.rg_target_bytes();
   int64_t a = 0;
   while (a < R) {
@@ -257,44 +261,109 @@ bool AlignedBucketWriter::Finish(CommitPlan* out, std::string* error) {
   return true;
 }
 
-bool LoadAlignedResume(const fs::path& warehouse,
-                       const std::vector<std::string>& table_names,
-                       const std::string& reference_table, int32_t bucket_version,
-                       ResumeState* out, std::string* error) {
-  (void)error;
-  *out = ResumeState{};
-  const std::string vdir = "p_bucket_version=" + std::to_string(bucket_version);
-  const std::string pfx = "p_bucket=";
-  for (const auto& name : table_names) {
-    const fs::path base = warehouse / "primeparts" / name / "data" / vdir;
-    int32_t max_bucket = -1;
-    std::error_code ec;
-    if (fs::exists(base, ec)) {
-      for (auto& e : fs::directory_iterator(base, ec)) {
-        if (!e.is_directory()) continue;
-        const auto fn = e.path().filename().string();
-        if (fn.rfind(pfx, 0) != 0) continue;
-        try {
-          int32_t b = std::stoi(fn.substr(pfx.size()));
-          if (b > max_bucket) max_bucket = b;
-        } catch (...) {
-        }
-      }
+namespace {
+
+struct BucketStats {
+  int32_t frontier = 0;
+  int64_t frontier_bytes = 0;
+  int32_t frontier_files = 0;
+  bool any = false;
+};
+
+bool BucketStatsForTable(const iceberg::Table& table, const std::string& name,
+                         const BucketFields& bucket_fields,
+                         int32_t bucket_version, BucketStats* out,
+                         std::string* error) {
+  catalog::PartitionStatsSet stats;
+  if (!catalog::LoadPartitionStats(table, &stats, error)) {
+    if (error) *error = name + ": " + *error;
+    return false;
+  }
+  int v_pos = -1;
+  int b_pos = -1;
+  for (size_t i = 0; i < stats.field_names.size(); ++i) {
+    if (stats.field_names[i] == bucket_fields.version_field) {
+      v_pos = static_cast<int>(i);
+    } else if (stats.field_names[i] == bucket_fields.bucket_field) {
+      b_pos = static_cast<int>(i);
     }
-    const int32_t bucket_for_seq = max_bucket < 0 ? 0 : max_bucket;
-    const fs::path bucket_dir = base / (pfx + std::to_string(bucket_for_seq));
-    out->next_seq[name] = NextFileSeq(bucket_dir, name);
-    if (name == reference_table) {
-      out->bucket = bucket_for_seq;
-      int64_t fill = 0;
-      if (max_bucket >= 0 && fs::exists(bucket_dir, ec)) {
-        for (auto& f : fs::directory_iterator(bucket_dir, ec)) {
-          if (f.is_regular_file()) {
-            fill += static_cast<int64_t>(fs::file_size(f.path(), ec));
-          }
-        }
+  }
+  if (v_pos < 0 || b_pos < 0) {
+    if (error) {
+      *error = name + ": partition spec lacks declared bucket fields " +
+               bucket_fields.version_field + "/" + bucket_fields.bucket_field;
+    }
+    return false;
+  }
+  for (const auto& row : stats.rows) {
+    if (row.data_file_count <= 0) continue;
+    const int64_t version = row.partition[v_pos];
+    if (version > bucket_version) {
+      if (error) {
+        *error = name + ": partition stats declare bucket-version " +
+                 std::to_string(version) + " newer than requested " +
+                 std::to_string(bucket_version);
       }
-      out->bucket_fill_bytes = fill;
+      return false;
+    }
+    if (version < bucket_version) continue;
+    const auto bucket = static_cast<int32_t>(row.partition[b_pos]);
+    if (!out->any || bucket > out->frontier) {
+      out->any = true;
+      out->frontier = bucket;
+      out->frontier_bytes = row.total_data_file_size_in_bytes;
+      out->frontier_files = row.data_file_count;
+    }
+  }
+  return true;
+}
+
+}  // namespace
+
+bool LoadAlignedResume(const std::shared_ptr<iceberg::Catalog>& catalog,
+                       const iceberg::Namespace& ns,
+                       const std::vector<std::string>& table_names,
+                       const std::string& reference_table,
+                       const BucketFields& bucket_fields,
+                       int32_t bucket_version, ResumeState* out,
+                       std::string* error) {
+  *out = ResumeState{};
+
+  std::map<std::string, BucketStats> per_table;
+  for (const auto& name : table_names) {
+    out->next_seq[name] = 0;
+    auto t = catalog->LoadTable(iceberg::TableIdentifier{.ns = ns, .name = name});
+    if (!t.has_value()) {
+      if (t.error().kind == iceberg::ErrorKind::kNoSuchTable) continue;
+      if (error) *error = "LoadTable(" + name + "): " + t.error().message;
+      return false;
+    }
+    auto snap_r = t.value()->current_snapshot();
+    if (!snap_r.has_value() || !snap_r.value()) continue;
+    BucketStats bs;
+    if (!BucketStatsForTable(*t.value(), name, bucket_fields, bucket_version,
+                             &bs, error)) {
+      return false;
+    }
+    per_table[name] = bs;
+  }
+
+  auto ref = per_table.find(reference_table);
+  if (ref != per_table.end() && ref->second.any) {
+    out->bucket = ref->second.frontier;
+    out->bucket_bytes = ref->second.frontier_bytes;
+  }
+  for (const auto& [name, bs] : per_table) {
+    if (!bs.any) continue;
+    if (bs.frontier > out->bucket) {
+      if (error) {
+        *error = name + ": frontier bucket " + std::to_string(bs.frontier) +
+                 " is past the reference frontier " + std::to_string(out->bucket);
+      }
+      return false;
+    }
+    if (bs.frontier == out->bucket) {
+      out->next_seq[name] = bs.frontier_files;
     }
   }
   return true;

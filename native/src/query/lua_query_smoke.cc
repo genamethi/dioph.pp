@@ -1,13 +1,9 @@
-// Smoke for the reader `query` Lua module: register it into a lua_State and run
-// a Lua script. Number-theory works without a catalog; pget/kget need one.
-//
-// Usage: lua-query-smoke [warehouse_root]
-
 #include <cstdio>
 #include <string>
 
 #include <lua.hpp>
 
+#include "primeparts/catalog/pp_iceberg_rest.h"
 #include "primeparts/query/lua_query_module.h"
 #include "primeparts/query/query_service.h"
 
@@ -18,7 +14,8 @@ int main(int argc, char** argv) {
   const std::string wh =
       argc >= 2 ? argv[1] : "/media/extssd/research/dioph.pp/data/ib-staging";
   std::string e;
-  auto qs = primeparts::query::QueryService::Open(wh, &e);
+  auto qs = primeparts::query::QueryService::Open(
+      wh, primeparts::catalog::ResolveNamespace(""), &e);
   if (!qs) std::fprintf(stderr, "[i] no catalog (%s) — number-theory only\n", e.c_str());
   primeparts::query::RegisterQueryModule(L, qs.get());
 

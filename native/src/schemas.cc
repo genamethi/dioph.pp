@@ -9,6 +9,8 @@
 #include "iceberg/partition_spec.h"
 #include "iceberg/schema.h"
 #include "iceberg/schema_field.h"
+#include "iceberg/sort_field.h"
+#include "iceberg/sort_order.h"
 #include "iceberg/transform.h"
 #include "iceberg/type.h"
 
@@ -65,12 +67,36 @@ std::shared_ptr<iceberg::PartitionSpec> BucketPartitionSpec(
                                iceberg::Transform::Identity()),
        iceberg::PartitionField(bucket_id, 1001, "p_bucket",
                                iceberg::Transform::Identity())},
-      /*allow_missing_fields=*/false);
+      false);
   if (!spec_result.has_value()) {
     if (error) *error = spec_result.error().message;
     return nullptr;
   }
   return std::shared_ptr<iceberg::PartitionSpec>(std::move(spec_result.value()));
+}
+
+std::shared_ptr<iceberg::SortOrder> AscendingSortOrder(
+    const iceberg::Schema& schema, const std::vector<std::string>& fields,
+    std::string* error) {
+  std::vector<iceberg::SortField> sort_fields;
+  sort_fields.reserve(fields.size());
+  for (const auto& name : fields) {
+    const int32_t field_id = FieldIdByName(schema, name);
+    if (field_id < 0) {
+      if (error) *error = "schema is missing " + name;
+      return nullptr;
+    }
+    sort_fields.emplace_back(field_id, iceberg::Transform::Identity(),
+                             iceberg::SortDirection::kAscending,
+                             iceberg::NullOrder::kFirst);
+  }
+  auto order_result = iceberg::SortOrder::Make(
+      schema, iceberg::SortOrder::kInitialSortOrderId, std::move(sort_fields));
+  if (!order_result.has_value()) {
+    if (error) *error = order_result.error().message;
+    return nullptr;
+  }
+  return std::shared_ptr<iceberg::SortOrder>(std::move(order_result.value()));
 }
 
 }  // namespace primeparts

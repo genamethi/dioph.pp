@@ -1,6 +1,4 @@
-// Smoke for QueryService against the live LMDB-cataloged warehouse.
-// Usage: query-service-smoke <warehouse_root>   (default: ib-staging)
-
+#include "primeparts/catalog/pp_iceberg_rest.h"
 #include "primeparts/query/query_service.h"
 
 #include <atomic>
@@ -23,7 +21,7 @@ int main(int argc, char** argv) {
       argc >= 2 ? argv[1] : "/media/extssd/research/dioph.pp/data/ib-staging";
 
   std::string err;
-  auto qs = QueryService::Open(wh, &err);
+  auto qs = QueryService::Open(wh, primeparts::catalog::ResolveNamespace(""), &err);
   if (!qs) {
     std::fprintf(stderr, "[!] Open: %s\n", err.c_str());
     return 1;
@@ -32,17 +30,15 @@ int main(int argc, char** argv) {
 
   int failures = 0;
 
-  // 1) k-scan: k=0, LIMIT 10, unbounded p (the priority query) — near-instant.
   {
     auto t0 = std::chrono::steady_clock::now();
-    auto hits = qs->ScanByK(0, /*p_lo=*/0, /*p_hi=*/0, /*limit=*/10, &err);
+    auto hits = qs->ScanByK(0, 0, 0, 10, &err);
     double dt = secs_since(t0);
     std::printf("\n[k-scan] k=0 LIMIT 10 -> %zu hits in %.3fs\n", hits.size(), dt);
     for (auto& h : hits) std::printf("    p=%lld  rank=%lld\n", (long long)h.p, (long long)h.prime_rank);
     if (hits.size() != 10) { std::printf("    [!] expected 10\n"); ++failures; }
   }
 
-  // 1b) k-scan with a p-window pushdown: k=0 in p in [1e9, 2e9], LIMIT 5.
   {
     auto t0 = std::chrono::steady_clock::now();
     auto hits = qs->ScanByK(0, 1000000000LL, 2000000000LL, 5, &err);
@@ -59,7 +55,6 @@ int main(int argc, char** argv) {
     }
   }
 
-  // 2) point lookup: p=11 -> k=3, rank=5; partitions = 3 tuples.
   {
     auto t0 = std::chrono::steady_clock::now();
     auto pi = qs->LookupPrime(11, &err);
@@ -79,16 +74,12 @@ int main(int argc, char** argv) {
     if (parts.size() != 3) { std::printf("    [!] expected 3 partitions (k=3)\n"); ++failures; }
   }
 
-  // 3) a non-prime even number -> absent.
   {
     auto pi = qs->LookupPrime(12, &err);
     std::printf("\n[lookup] p=12 (not prime) -> %s\n", pi ? "FOUND (BUG)" : "absent (ok)");
     if (pi) ++failures;
   }
 
-  // 4) cooperative cancel: an unbounded k=16 scan is sparse (no k=16 in the
-  // first ~900M rows) so it would run a long time. Cancel after a beat and
-  // require a prompt return — this is the machinery the TUI's worker uses.
   {
     std::atomic<bool> cancel{false};
     primeparts::query::ScanControl ctl;
@@ -98,7 +89,7 @@ int main(int argc, char** argv) {
     auto t0 = std::chrono::steady_clock::now();
     std::thread th([&] {
       std::string e;
-      qs->ScanByK(16, 0, 0, 10, &e, ctl);  // sparse -> long-running
+      qs->ScanByK(16, 0, 0, 10, &e, ctl);
     });
     std::this_thread::sleep_for(std::chrono::milliseconds(400));
     cancel.store(true);
@@ -109,8 +100,6 @@ int main(int argc, char** argv) {
     if (dt > 5.0) { std::printf("    [!] cancel too slow (>5s)\n"); ++failures; }
   }
 
-  // 5) warehouse status (the Status-tab seam): ListTables + Extent. Summary
-  // facts are zero-scan; max_p on `primes` is a manifest aggregate.
   {
     auto tables = qs->ListTables(&err);
     std::printf("\n[status] %zu tables: ", tables.size());
@@ -128,13 +117,13 @@ int main(int argc, char** argv) {
       std::printf("    %-18s rows=%-13lld files=%-6lld bytes=%-13lld snaps=%lld snap_id=%lld",
                   e.table.c_str(), (long long)e.row_count, (long long)e.data_files,
                   (long long)e.file_bytes, (long long)e.snapshots, (long long)e.snapshot_id);
-      if (e.max_p >= 0) std::printf(" max_p=%lld", (long long)e.max_p);
+      if (e.key_max >= 0)
+        std::printf(" %s_max=%lld", e.key_name.c_str(), (long long)e.key_max);
       std::printf("  (%.2fs)\n", dt);
       if (want_p) {
         saw_primes = true;
-        // Known dataset basics: ~21.7B rows, max_p ~5.6e11 (project memory).
         if (e.row_count < 1'000'000'000LL) { std::printf("    [!] primes row_count implausibly small\n"); ++failures; }
-        if (e.max_p < 1'000'000'000LL) { std::printf("    [!] primes max_p missing/implausible\n"); ++failures; }
+        if (e.key_max < 1'000'000'000LL) { std::printf("    [!] primes key_max missing/implausible\n"); ++failures; }
       }
     }
     if (!saw_primes) { std::printf("    [!] primes table not listed\n"); ++failures; }
