@@ -18,18 +18,29 @@ enum {
     PP_ERR_LIBRARY = -4
 };
 
+enum {
+    PP_FLAT_ROWS_PER_PRIME_NUM = 82,
+    PP_FLAT_ROWS_PER_PRIME_DEN = 100,
+    PP_SPAN_SLACK_NUM = 102,
+    PP_SPAN_SLACK_DEN = 100,
+    PP_HIGHER_SEED_ROWS = 1024
+};
+
 typedef struct pp_batch_result {
     int64_t *prime_p;
     int32_t *prime_k;
-    int64_t *partition_p;
-    int32_t *partition_m;
-    int32_t *partition_n;
-    int64_t *partition_q;
+    uint64_t *prime_flat_mask;
+
+    int64_t *higher_p;
+    int32_t *higher_m;
+    int32_t *higher_n;
+    int64_t *higher_q;
 
     size_t prime_count;
-    size_t partition_count;
     size_t prime_capacity;
-    size_t partition_capacity;
+    size_t flat_prime_count;
+    size_t higher_count;
+    size_t higher_capacity;
 
     int64_t processed_count;
     int64_t start_idx;

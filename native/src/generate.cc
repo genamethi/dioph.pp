@@ -554,24 +554,6 @@ struct PartsBatches {
   int64_t higher_rows = 0;
 };
 
-void count_parts_rows(const pp_batch_result& batch, int64_t* flat_rows,
-                      int64_t* higher_rows) {
-  size_t i = 0;
-  while (i < batch.partition_count) {
-    const int64_t p = batch.partition_p[i];
-    bool any_flat = false;
-    while (i < batch.partition_count && batch.partition_p[i] == p) {
-      if (batch.partition_n[i] == 1) {
-        any_flat = true;
-      } else {
-        ++*higher_rows;
-      }
-      ++i;
-    }
-    if (any_flat) ++*flat_rows;
-  }
-}
-
 PartsBatches make_parts_batches(const pp_batch_result& batch) {
   arrow::Int64Builder flat_p;
   arrow::Int64Builder flat_mask;
@@ -579,32 +561,30 @@ PartsBatches make_parts_batches(const pp_batch_result& batch) {
   arrow::Int32Builder hi_m;
   arrow::Int32Builder hi_n;
   arrow::Int64Builder hi_q;
-  if (!flat_p.Reserve(static_cast<int64_t>(batch.prime_count)).ok() ||
-      !flat_mask.Reserve(static_cast<int64_t>(batch.prime_count)).ok()) {
+
+  const int64_t flat_hint = static_cast<int64_t>(batch.prime_count) *
+                            PP_FLAT_ROWS_PER_PRIME_NUM /
+                            PP_FLAT_ROWS_PER_PRIME_DEN;
+  const int64_t higher_rows = static_cast<int64_t>(batch.higher_count);
+  if (!flat_p.Reserve(flat_hint).ok() || !flat_mask.Reserve(flat_hint).ok() ||
+      !hi_p.Reserve(higher_rows).ok() || !hi_m.Reserve(higher_rows).ok() ||
+      !hi_n.Reserve(higher_rows).ok() || !hi_q.Reserve(higher_rows).ok()) {
     return PartsBatches{};
   }
 
-  size_t i = 0;
-  while (i < batch.partition_count) {
-    const int64_t p = batch.partition_p[i];
-    uint64_t mask = 0;
-    while (i < batch.partition_count && batch.partition_p[i] == p) {
-      if (batch.partition_n[i] == 1) {
-        mask |= uint64_t{1} << batch.partition_m[i];
-      } else {
-        if (!hi_p.Append(p).ok() ||
-            !hi_m.Append(batch.partition_m[i]).ok() ||
-            !hi_n.Append(batch.partition_n[i]).ok() ||
-            !hi_q.Append(batch.partition_q[i]).ok()) {
-          return PartsBatches{};
-        }
-      }
-      ++i;
+  for (size_t i = 0; i < batch.prime_count; ++i) {
+    const uint64_t mask = batch.prime_flat_mask[i];
+    if (mask == 0) continue;
+    if (!flat_p.Append(batch.prime_p[i]).ok() ||
+        !flat_mask.Append(static_cast<int64_t>(mask)).ok()) {
+      return PartsBatches{};
     }
-    if (mask != 0) {
-      flat_p.UnsafeAppend(p);
-      flat_mask.UnsafeAppend(static_cast<int64_t>(mask));
-    }
+  }
+  for (size_t i = 0; i < batch.higher_count; ++i) {
+    hi_p.UnsafeAppend(batch.higher_p[i]);
+    hi_m.UnsafeAppend(batch.higher_m[i]);
+    hi_n.UnsafeAppend(batch.higher_n[i]);
+    hi_q.UnsafeAppend(batch.higher_q[i]);
   }
 
   auto flat_schema = arrow::schema({
@@ -682,8 +662,8 @@ bool materialize_group(ChunkPool* pool, const Options& options,
       group->last_p = holder.batch.last_p;
     }
     group->prime_rows += static_cast<int64_t>(holder.batch.prime_count);
-    count_parts_rows(holder.batch, &group->flat_parts_rows,
-                     &group->higher_parts_rows);
+    group->flat_parts_rows += static_cast<int64_t>(holder.batch.flat_prime_count);
+    group->higher_parts_rows += static_cast<int64_t>(holder.batch.higher_count);
     group->processed_count += holder.batch.processed_count;
   }
 

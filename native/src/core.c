@@ -60,11 +60,24 @@ void pp_batch_result_clear(pp_batch_result *result)
     }
     free(result->prime_p);
     free(result->prime_k);
-    free(result->partition_p);
-    free(result->partition_m);
-    free(result->partition_n);
-    free(result->partition_q);
+    free(result->prime_flat_mask);
+    free(result->higher_p);
+    free(result->higher_m);
+    free(result->higher_n);
+    free(result->higher_q);
     memset(result, 0, sizeof(*result));
+}
+
+static size_t prime_row_bytes(const pp_batch_result *result)
+{
+    return sizeof(*result->prime_p) + sizeof(*result->prime_k)
+        + sizeof(*result->prime_flat_mask);
+}
+
+static size_t higher_row_bytes(const pp_batch_result *result)
+{
+    return sizeof(*result->higher_p) + sizeof(*result->higher_m)
+        + sizeof(*result->higher_n) + sizeof(*result->higher_q);
 }
 
 size_t pp_batch_result_used_bytes(const pp_batch_result *result)
@@ -72,12 +85,8 @@ size_t pp_batch_result_used_bytes(const pp_batch_result *result)
     if (result == NULL) {
         return 0;
     }
-    return result->prime_count * (sizeof(*result->prime_p) + sizeof(*result->prime_k))
-        + result->partition_count * (
-            sizeof(*result->partition_p)
-            + sizeof(*result->partition_m)
-            + sizeof(*result->partition_n)
-            + sizeof(*result->partition_q));
+    return result->prime_count * prime_row_bytes(result)
+        + result->higher_count * higher_row_bytes(result);
 }
 
 size_t pp_batch_result_allocated_bytes(const pp_batch_result *result)
@@ -85,12 +94,8 @@ size_t pp_batch_result_allocated_bytes(const pp_batch_result *result)
     if (result == NULL) {
         return 0;
     }
-    return result->prime_capacity * (sizeof(*result->prime_p) + sizeof(*result->prime_k))
-        + result->partition_capacity * (
-            sizeof(*result->partition_p)
-            + sizeof(*result->partition_m)
-            + sizeof(*result->partition_n)
-            + sizeof(*result->partition_q));
+    return result->prime_capacity * prime_row_bytes(result)
+        + result->higher_capacity * higher_row_bytes(result);
 }
 
 void pp_set_nth_prime_threads(int threads)
@@ -257,122 +262,157 @@ int pp_is_prime_power_mpz(const mpz_t n, mpz_t base, int32_t *exponent)
     return PP_OK;
 }
 
-static int reserve_prime_rows(pp_batch_result *result, size_t needed)
+static int set_prime_capacity(pp_batch_result *result, size_t want)
 {
     int64_t *new_p;
     int32_t *new_k;
-    size_t new_capacity;
+    uint64_t *new_mask;
 
-    if (needed <= result->prime_capacity) {
+    if (want <= result->prime_capacity) {
         return PP_OK;
     }
-    new_capacity = result->prime_capacity == 0 ? 1 : result->prime_capacity;
-    while (new_capacity < needed) {
-        if (new_capacity > SIZE_MAX / 2) {
-            return PP_ERR_OVERFLOW;
-        }
-        new_capacity *= 2;
+    if (want > SIZE_MAX / sizeof(*new_p)) {
+        return PP_ERR_OVERFLOW;
     }
 
-    new_p = (int64_t *)realloc(result->prime_p, new_capacity * sizeof(*new_p));
+    new_p = (int64_t *)realloc(result->prime_p, want * sizeof(*new_p));
     if (new_p == NULL) {
         return PP_ERR_ALLOC;
     }
     result->prime_p = new_p;
 
-    new_k = (int32_t *)realloc(result->prime_k, new_capacity * sizeof(*new_k));
+    new_k = (int32_t *)realloc(result->prime_k, want * sizeof(*new_k));
     if (new_k == NULL) {
         return PP_ERR_ALLOC;
     }
     result->prime_k = new_k;
-    result->prime_capacity = new_capacity;
+
+    new_mask = (uint64_t *)realloc(result->prime_flat_mask, want * sizeof(*new_mask));
+    if (new_mask == NULL) {
+        return PP_ERR_ALLOC;
+    }
+    result->prime_flat_mask = new_mask;
+    result->prime_capacity = want;
     return PP_OK;
 }
 
-static int reserve_partition_rows(pp_batch_result *result, size_t needed)
+static int set_higher_capacity(pp_batch_result *result, size_t want)
 {
     int64_t *new_p;
     int32_t *new_m;
     int32_t *new_n;
     int64_t *new_q;
-    size_t new_capacity;
 
-    if (needed <= result->partition_capacity) {
+    if (want <= result->higher_capacity) {
         return PP_OK;
     }
-    new_capacity = result->partition_capacity == 0 ? 1 : result->partition_capacity;
-    while (new_capacity < needed) {
-        if (new_capacity > SIZE_MAX / 2) {
-            return PP_ERR_OVERFLOW;
-        }
-        new_capacity *= 2;
+    if (want > SIZE_MAX / sizeof(*new_p)) {
+        return PP_ERR_OVERFLOW;
     }
 
-    new_p = (int64_t *)realloc(result->partition_p, new_capacity * sizeof(*new_p));
+    new_p = (int64_t *)realloc(result->higher_p, want * sizeof(*new_p));
     if (new_p == NULL) {
         return PP_ERR_ALLOC;
     }
-    result->partition_p = new_p;
+    result->higher_p = new_p;
 
-    new_m = (int32_t *)realloc(result->partition_m, new_capacity * sizeof(*new_m));
+    new_m = (int32_t *)realloc(result->higher_m, want * sizeof(*new_m));
     if (new_m == NULL) {
         return PP_ERR_ALLOC;
     }
-    result->partition_m = new_m;
+    result->higher_m = new_m;
 
-    new_n = (int32_t *)realloc(result->partition_n, new_capacity * sizeof(*new_n));
+    new_n = (int32_t *)realloc(result->higher_n, want * sizeof(*new_n));
     if (new_n == NULL) {
         return PP_ERR_ALLOC;
     }
-    result->partition_n = new_n;
+    result->higher_n = new_n;
 
-    new_q = (int64_t *)realloc(result->partition_q, new_capacity * sizeof(*new_q));
+    new_q = (int64_t *)realloc(result->higher_q, want * sizeof(*new_q));
     if (new_q == NULL) {
         return PP_ERR_ALLOC;
     }
-    result->partition_q = new_q;
-    result->partition_capacity = new_capacity;
+    result->higher_q = new_q;
+    result->higher_capacity = want;
     return PP_OK;
 }
 
-static int write_prime(pp_batch_result *result, uint64_t p, int32_t k)
+static int grow_prime_rows(pp_batch_result *result, size_t needed)
+{
+    size_t want;
+
+    if (needed <= result->prime_capacity) {
+        return PP_OK;
+    }
+    want = result->prime_capacity == 0 ? needed : result->prime_capacity;
+    while (want < needed) {
+        if (want > SIZE_MAX / 2) {
+            return PP_ERR_OVERFLOW;
+        }
+        want *= 2;
+    }
+    return set_prime_capacity(result, want);
+}
+
+static int grow_higher_rows(pp_batch_result *result, size_t needed)
+{
+    size_t want;
+
+    if (needed <= result->higher_capacity) {
+        return PP_OK;
+    }
+    want = result->higher_capacity == 0 ? needed : result->higher_capacity;
+    while (want < needed) {
+        if (want > SIZE_MAX / 2) {
+            return PP_ERR_OVERFLOW;
+        }
+        want *= 2;
+    }
+    return set_higher_capacity(result, want);
+}
+
+static int write_prime(pp_batch_result *result, uint64_t p, int32_t k, uint64_t flat_mask)
 {
     int status;
 
     if (p > (uint64_t)INT64_MAX) {
         return PP_ERR_OVERFLOW;
     }
-    status = reserve_prime_rows(result, result->prime_count + 1);
+    status = grow_prime_rows(result, result->prime_count + 1);
     if (status != PP_OK) {
         return status;
     }
     result->prime_p[result->prime_count] = (int64_t)p;
     result->prime_k[result->prime_count] = k;
+    result->prime_flat_mask[result->prime_count] = flat_mask;
     if (result->prime_count == 0) {
         result->first_p = (int64_t)p;
     }
     result->last_p = (int64_t)p;
     result->prime_count++;
+    if (flat_mask != 0) {
+        result->flat_prime_count++;
+    }
     result->processed_count = (int64_t)result->prime_count;
     return PP_OK;
 }
 
-static int write_partition(pp_batch_result *result, uint64_t p, int32_t m, int32_t n, uint64_t q)
+static int write_higher(pp_batch_result *result, uint64_t p, int32_t m, int32_t n, uint64_t q)
 {
     int status;
 
     if (p > (uint64_t)INT64_MAX || q > (uint64_t)INT64_MAX) {
         return PP_ERR_OVERFLOW;
     }
-    status = reserve_partition_rows(result, result->partition_count + 1);
+    status = grow_higher_rows(result, result->higher_count + 1);
     if (status != PP_OK) {
         return status;
     }
-    result->partition_p[result->partition_count] = (int64_t)p;
-    result->partition_m[result->partition_count] = m;
-    result->partition_n[result->partition_count] = n;
-    result->partition_q[result->partition_count] = (int64_t)q;
-    result->partition_count++;
+    result->higher_p[result->higher_count] = (int64_t)p;
+    result->higher_m[result->higher_count] = m;
+    result->higher_n[result->higher_count] = n;
+    result->higher_q[result->higher_count] = (int64_t)q;
+    result->higher_count++;
     return PP_OK;
 }
 
@@ -419,7 +459,8 @@ static int process_prime(pp_batch_result *result, pp_higher_table *higher, uint6
     int m;
     int status;
     int killed_parity;
-    size_t partition_start;
+    int32_t k = 0;
+    uint64_t flat_mask = 0;
     uint64_t power;
 
     if (p == 0 || p > (uint64_t)INT64_MAX) {
@@ -428,7 +469,6 @@ static int process_prime(pp_batch_result *result, pp_higher_table *higher, uint6
 
     max_m = floor_log2_u64(p);
     killed_parity = (p % 3 == 2);
-    partition_start = result->partition_count;
     power = 2;
     pp_higher_seek(higher, p);
 
@@ -437,34 +477,40 @@ static int process_prime(pp_batch_result *result, pp_higher_table *higher, uint6
         uint64_t base = 0;
         int32_t exponent = 0;
 
-        if (q_candidate >= 2) {
-            if ((m & 1) == killed_parity) {
-                /* Set A: 3 | q_candidate; a prime power here can only be 3^n. */
-                if (power_of_three_exponent(q_candidate, &exponent)) {
-                    base = 3;
-                }
-            } else {
-                const pp_higher_hit *hit = pp_higher_take(higher, p, (int32_t)m);
-
-                if (hit != NULL) {
-                    base = (uint64_t)hit->q;
-                    exponent = hit->n;
-                } else if (n_is_prime((ulong)q_candidate)) {
-                    base = q_candidate;
-                    exponent = 1;
-                }
+        power <<= 1;
+        if (q_candidate < 2) {
+            continue;
+        }
+        if ((m & 1) == killed_parity) {
+            if (power_of_three_exponent(q_candidate, &exponent)) {
+                base = 3;
             }
-            if (exponent > 0) {
-                status = write_partition(result, p, (int32_t)m, exponent, base);
-                if (status != PP_OK) {
-                    return status;
-                }
+        } else {
+            const pp_higher_hit *hit = pp_higher_take(higher, p, (int32_t)m);
+
+            if (hit != NULL) {
+                base = (uint64_t)hit->q;
+                exponent = hit->n;
+            } else if (n_is_prime((ulong)q_candidate)) {
+                base = q_candidate;
+                exponent = 1;
             }
         }
-        power <<= 1;
+        if (exponent <= 0) {
+            continue;
+        }
+        if (exponent == 1) {
+            flat_mask |= (uint64_t)1 << m;
+        } else {
+            status = write_higher(result, p, (int32_t)m, exponent, base);
+            if (status != PP_OK) {
+                return status;
+            }
+        }
+        k++;
     }
 
-    return write_prime(result, p, (int32_t)(result->partition_count - partition_start));
+    return write_prime(result, p, k, flat_mask);
 }
 
 static int count_prime(pp_higher_table *higher, uint64_t p, int64_t *partition_count)
@@ -514,11 +560,12 @@ static int count_prime(pp_higher_table *higher, uint64_t p, int64_t *partition_c
 
 static int prepare_result(pp_batch_result *out, int64_t start_idx, int64_t requested_count, size_t expected_count)
 {
-    size_t partition_capacity;
+    size_t want;
     int status;
 
     out->prime_count = 0;
-    out->partition_count = 0;
+    out->flat_prime_count = 0;
+    out->higher_count = 0;
     out->processed_count = 0;
     out->interrupted = 0;
     out->first_p = 0;
@@ -526,20 +573,15 @@ static int prepare_result(pp_batch_result *out, int64_t start_idx, int64_t reque
     out->start_idx = start_idx;
     out->requested_count = requested_count;
 
-    status = reserve_prime_rows(out, expected_count == 0 ? 1 : expected_count);
-    if (status != PP_OK) {
-        return status;
-    }
-
-    if (expected_count > (SIZE_MAX - 1) / 183) {
+    want = expected_count == 0 ? 1 : expected_count;
+    if (want > SIZE_MAX / PP_SPAN_SLACK_NUM) {
         return PP_ERR_OVERFLOW;
     }
-    partition_capacity = (expected_count * 183) / 100 + 1;
-    status = reserve_partition_rows(out, partition_capacity == 0 ? 1 : partition_capacity);
+    status = set_prime_capacity(out, want * PP_SPAN_SLACK_NUM / PP_SPAN_SLACK_DEN);
     if (status != PP_OK) {
         return status;
     }
-    return PP_OK;
+    return set_higher_capacity(out, PP_HIGHER_SEED_ROWS);
 }
 
 int pp_process_prime_array(const uint64_t *primes, size_t count, pp_batch_result *out)
