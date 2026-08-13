@@ -164,6 +164,32 @@ query.materialize{ name = "k_freq", cols = {"k","count"}, rows = query.hist{col=
 for _, r in ipairs(query.read{ table = "k_freq" }) do print(r.k, r.count) end
 ```
 
+#### `query.extent{ [table="primes"], [key_max=true] }` → dataset bounds
+
+Snapshot-level bounds for a table — no row scan; everything comes from the
+Iceberg manifest/snapshot summary plus per-file upper bounds. Callable bare
+(`query.extent()`) for the `primes` default. → `QueryService::Extent`.
+
+```lua
+local x = query.extent()
+print(x.count, x.max_p)   --> 102120000000   2821481272793
+```
+
+Returned fields (any the snapshot doesn't report are **nil**, not `-1`):
+
+| field | meaning |
+|---|---|
+| `table` | table name echoed back |
+| `count` | total records in the current snapshot |
+| `data_files`, `file_bytes` | current-snapshot totals |
+| `snapshots`, `snapshot_id`, `sequence` | snapshot history / current pointer |
+| `key`, `key_max` | sort-key name and its max, from data-file upper bounds |
+| `max_p` | alias of `key_max` when `key == "p"` |
+
+`key_max=false` skips the scan-plan pass that reads per-file upper bounds — the
+rest of the record is unaffected. Failure is the Lua idiom `nil, "message"`
+(e.g. a table that doesn't exist), not an error.
+
 > **Cached MVs** (warehouse `primeparts.*`): `k_freq` (k,count) and `r_freq`
 > (r,count) hold the full-census k- and r=⌊log₂p⌋−k distributions — read them
 > instead of rescanning 21.7 B rows.
@@ -189,7 +215,7 @@ For a `k=0` prime, `partitions = {}`.
 ## Not yet implemented
 
 Sketched in [`../arch/lua_query_api.md`](../arch/lua_query_api.md) but **not
-built**: `query.parts`, `query.extent`, `query.reload`, and the `on_progress` /
+built**: `query.parts`, `query.reload`, and the `on_progress` /
 cooperative-cancellation hooks. `query.count` is subsumed by the more general
 `query.hist` (above); `query.materialize`/`query.read` cover the MV cache. `is_obstructed(p)` is not a distinct function — use
 `query.pget{p=p}.k == 0` (or `kget{k=0,...}`).

@@ -31,6 +31,16 @@ int64_t opt_int(lua_State* L, const char* key, int64_t dflt, bool* present) {
   return v;
 }
 
+bool opt_bool(lua_State* L, const char* key, bool dflt, bool* present = nullptr) {
+  lua_getfield(L, 1, key);
+  bool v = dflt;
+  bool p = false;
+  if (!lua_isnoneornil(L, -1)) { v = lua_toboolean(L, -1) != 0; p = true; }
+  lua_pop(L, 1);
+  if (present) *present = p;
+  return v;
+}
+
 std::string opt_str(lua_State* L, const char* key, const char* dflt,
                     bool* present = nullptr) {
   lua_getfield(L, 1, key);
@@ -254,6 +264,54 @@ int q_read(lua_State* L) {
   return 1;
 }
 
+void set_int(lua_State* L, const char* name, int64_t v) {
+  lua_pushinteger(L, (lua_Integer)v);
+  lua_setfield(L, -2, name);
+}
+
+// -1 is the "unknown" sentinel on TableExtent; leave those fields nil rather
+// than handing Lua a number that isn't one.
+void set_int_known(lua_State* L, const char* name, int64_t v) {
+  if (v >= 0) set_int(L, name, v);
+}
+
+int extent(lua_State* L) {
+  QueryService* qs = qs_upvalue(L);
+  if (lua_isnoneornil(L, 1)) {  // query.extent() — spec is optional
+    lua_settop(L, 0);
+    lua_newtable(L);
+  }
+  luaL_checktype(L, 1, LUA_TTABLE);
+  std::string table = opt_str(L, "table", "primes");
+  bool key_max = opt_bool(L, "key_max", true);
+
+  if (qs == nullptr) { lua_pushnil(L); lua_pushstring(L, "no catalog"); return 2; }
+  std::string e;
+  auto x = qs->Extent(table, key_max, &e);
+  if (!x.ok) {
+    lua_pushnil(L);
+    lua_pushstring(L, e.empty() ? "extent unavailable" : e.c_str());
+    return 2;
+  }
+
+  lua_newtable(L);
+  lua_pushstring(L, x.table.c_str()); lua_setfield(L, -2, "table");
+  set_int(L, "snapshots", x.snapshots);
+  set_int_known(L, "count", x.row_count);
+  set_int_known(L, "data_files", x.data_files);
+  set_int_known(L, "file_bytes", x.file_bytes);
+  set_int_known(L, "snapshot_id", x.snapshot_id);
+  set_int_known(L, "sequence", x.sequence);
+  if (!x.key_name.empty()) {
+    lua_pushstring(L, x.key_name.c_str()); lua_setfield(L, -2, "key");
+    if (x.key_max >= 0) {
+      set_int(L, "key_max", x.key_max);
+      if (x.key_name == "p") set_int(L, "max_p", x.key_max);
+    }
+  }
+  return 1;
+}
+
 }  // namespace
 
 void RegisterQueryModule(lua_State* L, QueryService* qs) {
@@ -277,6 +335,7 @@ void RegisterQueryModule(lua_State* L, QueryService* qs) {
   reg("hist", q_hist);
   reg("materialize", q_materialize);
   reg("read", q_read);
+  reg("extent", extent);
   lua_setglobal(L, "query");
 }
 
