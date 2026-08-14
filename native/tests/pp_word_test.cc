@@ -148,21 +148,28 @@ TEST(PpWordTest, Stats) {
   const std::vector<Word> words = Words(1021, &s);
   EXPECT_EQ(s.words, static_cast<int64_t>(words.size()));
   EXPECT_GT(s.cone_nodes, 0);
-  EXPECT_FALSE(s.capped);
+
 }
 
-TEST(PpWordTest, Cap) {
+TEST(PpWordTest, ConeBudget) {
   WordStats s;
   std::string err;
   WordOptions opt;
-  opt.max_words = 2;
+  opt.cone_budget = 1;
   int64_t seen = 0;
-  ASSERT_TRUE(Enumerate(
+  EXPECT_FALSE(Enumerate(
+      8191, ComputedMask, ComputedHigher, opt, [&](const Word&) { ++seen; }, &s,
+      &err));
+  EXPECT_EQ(seen, 0);
+  EXPECT_NE(err.find("cone budget"), std::string::npos);
+
+  opt.cone_budget.reset();
+  EXPECT_TRUE(Enumerate(
       8191, ComputedMask, ComputedHigher, opt, [&](const Word&) { ++seen; }, &s,
       &err))
       << err;
-  EXPECT_EQ(seen, 2);
-  EXPECT_TRUE(s.capped);
+  EXPECT_EQ(seen, s.words);
+  EXPECT_GT(seen, 0);
 }
 
 TEST(PpWordTest, SharedAscentTarget) {

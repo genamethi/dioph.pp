@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -58,14 +59,13 @@ std::string Key(const Word& w);
 
 struct WordOptions {
   Lift lift = Lift::kCanonical;
-  int64_t max_words = 1000000;
+  std::optional<int64_t> cone_budget;
 };
 
 struct WordStats {
   int64_t words = 0;
   int64_t cone_nodes = 0;
   int64_t ascents = 0;
-  bool capped = false;
 };
 
 bool Enumerate(int64_t p, const MaskFn& mask, const HigherFn& higher,

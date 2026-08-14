@@ -54,6 +54,13 @@ struct Enumerator {
     const std::vector<int64_t> cone = Cone(p, *mask, &cs);
     stats->cone_nodes += cs.nodes;
 
+    if (options.cone_budget && stats->cone_nodes > *options.cone_budget) {
+      *error = "cone budget of " + std::to_string(*options.cone_budget) +
+               " nodes exhausted at " + std::to_string(stats->cone_nodes);
+      failed = true;
+      return aborted;
+    }
+
     for (int64_t v : cone) {
       const uint64_t tail = static_cast<uint64_t>(p - v);
       const std::vector<Ascent> up = (*higher)(v);
@@ -222,10 +229,6 @@ bool Enumerate(int64_t p, const MaskFn& mask, const HigherFn& higher,
   }
 
   for (const Word& w : words) {
-    if (stats->words >= options.max_words) {
-      stats->capped = true;
-      break;
-    }
     ++stats->words;
     emit(w);
   }
