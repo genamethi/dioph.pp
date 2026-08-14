@@ -125,3 +125,4 @@ actions-runner/
 !.pixi/config.toml
 .chunkhound.json
 .chunkhound/
+markdown/ROADMAP-AUDIT.md
