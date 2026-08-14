@@ -101,6 +101,10 @@ PARTITION_STATS_OBJ := $(BUILD_DIR)/partition_stats.o
 ICEBERG_SRC_CPPFLAGS := -Ivendor/iceberg-cpp/src
 VERIFY_OBJ := $(BUILD_DIR)/verify.o
 VERIFY_MAIN_OBJ := $(BUILD_DIR)/verify_main.o
+PP_BASE_OBJ := $(BUILD_DIR)/pp_base.o
+PP_CONE_OBJ := $(BUILD_DIR)/pp_cone.o
+PP_WORD_OBJ := $(BUILD_DIR)/pp_word.o
+PP_OBJS := $(PP_BASE_OBJ) $(PP_CONE_OBJ) $(PP_WORD_OBJ)
 
 TEST_SUITE_BIN := $(BUILD_DIR)/primeparts-tests
 TEST_SUITE_OBJS := $(BUILD_DIR)/core_test.o $(BUILD_DIR)/writer_test.o \
@@ -110,12 +114,16 @@ TEST_SUITE_OBJS := $(BUILD_DIR)/core_test.o $(BUILD_DIR)/writer_test.o \
                    $(BUILD_DIR)/flat_cone_test.o $(BUILD_DIR)/point_count_test.o $(BUILD_DIR)/as_fold_test.o $(BUILD_DIR)/words_test.o $(BUILD_DIR)/characters_test.o $(BUILD_DIR)/ramification_test.o
 TEST_SUITE_LIBOBJS := $(WRITER_OBJ) $(SCHEMAS_OBJ) $(SCAN_OBJS) $(PARTITION_STATS_OBJ) $(PLAN_STORE_OBJ) $(PLAN_STATUS_OBJ) $(CORE_OBJ) $(PARTS_EXPAND_OBJ) $(HIGHER_SWEEP_OBJ) $(BUILD_DIR)/chain_forms.o $(BUILD_DIR)/hermite_modl.o $(FLAT_CONE_OBJ) $(POINT_COUNT_OBJ) $(AS_FOLD_OBJ) $(WORDS_OBJ) $(CHARACTERS_OBJ) $(RAMIFICATION_OBJ)
 
+PP_TEST_BIN := $(BUILD_DIR)/primeparts-pp-tests
+PP_TEST_OBJS := $(BUILD_DIR)/pp_cone_test.o $(BUILD_DIR)/pp_word_test.o
+PP_TEST_LIBOBJS := $(PP_OBJS) $(CORE_OBJ) $(HIGHER_SWEEP_OBJ) $(PARTS_EXPAND_OBJ)
+
 E2E_BIN := $(BUILD_DIR)/primeparts-e2e
 E2E_OBJ := $(BUILD_DIR)/e2e_test.o
 E2E_LIBOBJS := $(SESSION_OBJ) $(REST_SCAN_PLAN_OBJ) $(PLAN_STATUS_OBJ) $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(WRITER_OBJ) $(ALIGNED_WRITER_OBJ) $(SCHEMAS_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(PP_ICEBERG_REST_OBJ) $(PP_COMMIT_OBJ) $(PP_LMDB_STORE_OBJ) $(PARTITION_STATS_OBJ) $(LMDB_LIB)
 
 .DEFAULT_GOAL := all
-.PHONY: all clean test e2e build-deps install install-deps install-service rocks
+.PHONY: all clean test pp-test e2e build-deps install install-deps install-service rocks
 
 CONFIGURE_FLAGS ?=
 
@@ -322,6 +330,15 @@ $(TABLE_TRAITS_OBJ): src/scan/table_traits.cc include/primeparts/scan/table_trai
 $(SCAN_PLANNER_OBJ): src/scan/scan_planner.cc include/primeparts/scan/scan_planner.h include/primeparts/scan/scan_plan.h include/primeparts/scan/table_traits.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(ICEBERG_SRC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
+$(PP_BASE_OBJ): src/pp/base.cc include/primeparts/pp/base.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(GINAC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(PP_CONE_OBJ): src/pp/cone.cc include/primeparts/pp/cone.h include/primeparts/parts_expand.h include/primeparts/core.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(PP_WORD_OBJ): src/pp/word.cc include/primeparts/pp/word.h include/primeparts/pp/base.h include/primeparts/pp/cone.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(GINAC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
 $(BUILD_DIR)/libprimeparts_core.so: $(CORE_OBJ) $(HIGHER_SWEEP_OBJ)
 	$(CC) -shared $(LDFLAGS) $^ $(LDLIBS) -o $@
 
@@ -352,8 +369,15 @@ $(BUILD_DIR)/%_test.o: tests/%_test.cc | $(BUILD_DIR)
 $(TEST_SUITE_BIN): $(TEST_SUITE_OBJS) $(TEST_SUITE_LIBOBJS)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(ICEBERG_LDLIBS) $(GINAC_LDLIBS) $(GTEST_LDLIBS) -pthread -o $@
 
-test: $(TEST_SUITE_BIN)
+$(PP_TEST_BIN): $(PP_TEST_OBJS) $(PP_TEST_LIBOBJS)
+	$(CXX) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(GINAC_LDLIBS) $(GTEST_LDLIBS) -pthread -o $@
+
+pp-test: $(PP_TEST_BIN)
+	$(PP_TEST_BIN)
+
+test: $(TEST_SUITE_BIN) $(PP_TEST_BIN)
 	$(TEST_SUITE_BIN)
+	$(PP_TEST_BIN)
 
 $(E2E_OBJ): e2e/e2e_test.cc include/primeparts/aligned_writer.h | $(BUILD_DIR)
 	$(CXX) $(GTEST_CPPFLAGS) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
