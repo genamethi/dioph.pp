@@ -72,12 +72,6 @@ ALIGNED_WRITER_OBJ := $(BUILD_DIR)/aligned_writer.o
 SCHEMAS_OBJ := $(BUILD_DIR)/schemas.o
 PARTS_EXPAND_OBJ := $(BUILD_DIR)/parts_expand.o
 HIGHER_SWEEP_OBJ := $(BUILD_DIR)/higher_sweep.o
-FLAT_CONE_OBJ := $(BUILD_DIR)/flat_cone.o
-POINT_COUNT_OBJ := $(BUILD_DIR)/point_count.o
-AS_FOLD_OBJ := $(BUILD_DIR)/as_fold.o
-WORDS_OBJ := $(BUILD_DIR)/words.o
-CHARACTERS_OBJ := $(BUILD_DIR)/characters.o
-RAMIFICATION_OBJ := $(BUILD_DIR)/ramification.o
 SOURCE_SCAN_OBJ := $(BUILD_DIR)/source_scan.o
 TABLE_TRAITS_OBJ := $(BUILD_DIR)/table_traits.o
 SCAN_PLANNER_OBJ := $(BUILD_DIR)/scan_planner.o
@@ -101,9 +95,8 @@ TEST_SUITE_BIN := $(BUILD_DIR)/primeparts-tests
 TEST_SUITE_OBJS := $(BUILD_DIR)/core_test.o $(BUILD_DIR)/writer_test.o \
                    $(BUILD_DIR)/scan_planner_test.o $(BUILD_DIR)/partition_stats_test.o \
                    $(BUILD_DIR)/plan_store_test.o $(BUILD_DIR)/parts_expand_test.o \
-                   $(BUILD_DIR)/higher_sweep_test.o $(BUILD_DIR)/chain_forms_test.o \
-                   $(BUILD_DIR)/flat_cone_test.o $(BUILD_DIR)/point_count_test.o $(BUILD_DIR)/as_fold_test.o $(BUILD_DIR)/words_test.o $(BUILD_DIR)/characters_test.o $(BUILD_DIR)/ramification_test.o
-TEST_SUITE_LIBOBJS := $(WRITER_OBJ) $(SCHEMAS_OBJ) $(SCAN_OBJS) $(PARTITION_STATS_OBJ) $(PLAN_STORE_OBJ) $(PLAN_STATUS_OBJ) $(CORE_OBJ) $(PARTS_EXPAND_OBJ) $(HIGHER_SWEEP_OBJ) $(BUILD_DIR)/chain_forms.o $(BUILD_DIR)/hermite_modl.o $(FLAT_CONE_OBJ) $(POINT_COUNT_OBJ) $(AS_FOLD_OBJ) $(WORDS_OBJ) $(CHARACTERS_OBJ) $(RAMIFICATION_OBJ)
+                   $(BUILD_DIR)/higher_sweep_test.o
+TEST_SUITE_LIBOBJS := $(WRITER_OBJ) $(SCHEMAS_OBJ) $(SCAN_OBJS) $(PARTITION_STATS_OBJ) $(PLAN_STORE_OBJ) $(PLAN_STATUS_OBJ) $(CORE_OBJ) $(PARTS_EXPAND_OBJ) $(HIGHER_SWEEP_OBJ)
 
 E2E_BIN := $(BUILD_DIR)/primeparts-e2e
 E2E_OBJ := $(BUILD_DIR)/e2e_test.o
@@ -125,8 +118,7 @@ INSTALL_BINS := \
      $(BUILD_DIR)/pp \
      $(BUILD_DIR)/primeparts-catalogd \
      $(BUILD_DIR)/primeparts-tui \
-     $(BUILD_DIR)/primeparts-verify \
-     $(BUILD_DIR)/pp-graph
+     $(BUILD_DIR)/primeparts-verify
 
 build-deps:
 	./configure $(CONFIGURE_FLAGS)
@@ -163,8 +155,7 @@ all: $(ROCKS_STAMP) \
      $(BUILD_DIR)/pp \
      $(BUILD_DIR)/primeparts-catalogd \
      $(BUILD_DIR)/primeparts-tui \
-     $(BUILD_DIR)/primeparts-verify \
-     $(BUILD_DIR)/pp-graph
+     $(BUILD_DIR)/primeparts-verify
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -367,46 +358,3 @@ $(BUILD_DIR)/pp-fixture-warehouse: $(PP_FIXTURE_OBJ) $(WRITER_OBJ) $(SCHEMAS_OBJ
 pp-fixture-warehouse: $(BUILD_DIR)/pp-fixture-warehouse
 .PHONY: pp-fixture-warehouse
 
-PP_GRAPH_OBJ := $(BUILD_DIR)/pp_graph.o
-
-HERMITE_MODL_OBJ := $(BUILD_DIR)/hermite_modl.o
-
-$(HERMITE_MODL_OBJ): src/graph/hermite_modl.cc include/primeparts/graph/hermite_modl.h | $(BUILD_DIR)
-	$(CXX) $(CPPFLAGS) $(GINAC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
-
-CHAIN_FORMS_OBJ := $(BUILD_DIR)/chain_forms.o
-
-$(CHAIN_FORMS_OBJ): src/graph/chain_forms.cc include/primeparts/graph/chain_forms.h | $(BUILD_DIR)
-	$(CXX) $(CPPFLAGS) $(GINAC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
-
-PARTITION_SCAN_OBJ := $(BUILD_DIR)/partition_scan.o
-
-$(PARTITION_SCAN_OBJ): src/graph/partition_scan.cc include/primeparts/graph/partition_scan.h include/primeparts/partition_math.h | $(BUILD_DIR)
-	$(CXX) $(CPPFLAGS) $(DUCKDB_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
-
-$(PP_GRAPH_OBJ): src/graph/pp_graph.cc include/primeparts/graph/chain_forms.h include/primeparts/partition_math.h include/primeparts/config.h include/primeparts/graph/hermite_modl.h include/primeparts/graph/partition_scan.h include/primeparts/catalog/rest_scan_plan.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/scan/scan_plan.h include/primeparts/scan/scan_planner.h include/primeparts/client/session.h include/primeparts/query/materialize.h | $(BUILD_DIR)
-	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(DUCKDB_CPPFLAGS) $(GINAC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
-
-$(BUILD_DIR)/pp-graph: $(PP_GRAPH_OBJ) $(HERMITE_MODL_OBJ) $(CHAIN_FORMS_OBJ) $(FLAT_CONE_OBJ) $(WORDS_OBJ) $(AS_FOLD_OBJ) $(POINT_COUNT_OBJ) $(CORE_OBJ) $(HIGHER_SWEEP_OBJ) $(PARTITION_SCAN_OBJ) $(PARTS_EXPAND_OBJ) $(CONFIG_OBJS) $(SESSION_OBJ) $(REST_SCAN_PLAN_OBJ) $(PLAN_STATUS_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(PP_ICEBERG_REST_OBJ) $(PP_COMMIT_OBJ) $(PARTITION_STATS_OBJ) $(PP_LMDB_STORE_OBJ) $(BUILD_DIR)/materialize.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(LMDB_LIB)
-	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $(DUCKDB_RPATH) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(DUCKDB_LDLIBS) $(GINAC_LDLIBS) $(LUA_LDLIBS) -lsqlite3 -pthread -o $@
-
-pp-graph: $(BUILD_DIR)/pp-graph
-.PHONY: pp-graph
-
-$(FLAT_CONE_OBJ): src/graph/flat_cone.cc include/primeparts/graph/flat_cone.h include/primeparts/parts_expand.h | $(BUILD_DIR)
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
-
-$(POINT_COUNT_OBJ): src/graph/point_count.cc include/primeparts/graph/point_count.h include/primeparts/graph/chain_forms.h | $(BUILD_DIR)
-	$(CXX) $(CPPFLAGS) $(GINAC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
-
-$(AS_FOLD_OBJ): src/graph/as_fold.cc include/primeparts/graph/as_fold.h include/primeparts/graph/chain_forms.h | $(BUILD_DIR)
-	$(CXX) $(CPPFLAGS) $(GINAC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
-
-$(WORDS_OBJ): src/graph/words.cc include/primeparts/graph/words.h include/primeparts/graph/flat_cone.h include/primeparts/graph/chain_forms.h | $(BUILD_DIR)
-	$(CXX) $(CPPFLAGS) $(GINAC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
-
-$(CHARACTERS_OBJ): src/graph/characters.cc include/primeparts/graph/characters.h | $(BUILD_DIR)
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
-
-$(RAMIFICATION_OBJ): src/graph/ramification.cc include/primeparts/graph/ramification.h include/primeparts/graph/chain_forms.h | $(BUILD_DIR)
-	$(CXX) $(CPPFLAGS) $(GINAC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
