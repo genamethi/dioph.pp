@@ -28,6 +28,8 @@ NOTCURSES_RPATH ?= -Wl,-rpath,$(PREFIX)/lib
 LUA_CPPFLAGS ?= -I$(PREFIX)/include
 LUA_LDLIBS ?= $(PREFIX)/lib/liblua.a -lm -ldl
 
+READLINE_LDLIBS ?= -lreadline
+
 DUCKDB_CPPFLAGS ?= -I$(PREFIX)/include
 DUCKDB_LDLIBS ?= -lduckdb
 DUCKDB_RPATH ?= -Wl,-rpath,$(abspath $(PREFIX)/lib)
@@ -316,7 +318,7 @@ $(BUILD_DIR)/primeparts-tui: $(BUILD_DIR)/tui_main.o $(BUILD_DIR)/tui_runquery.o
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $(NOTCURSES_RPATH) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(NOTCURSES_LDLIBS) $(LUA_LDLIBS) -lsqlite3 -pthread -o $@
 
 $(BUILD_DIR)/pp: $(BUILD_DIR)/pp_main.o $(CONFIG_OBJS) $(BUILD_DIR)/lua_query_module.o $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(CORE_OBJ) $(HIGHER_SWEEP_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(LMDB_LIB)
-	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(LUA_LDLIBS) -lsqlite3 -pthread -o $@
+	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(LUA_LDLIBS) $(READLINE_LDLIBS) -lsqlite3 -pthread -o $@
 
 $(BUILD_DIR)/%_test.o: tests/%_test.cc | $(BUILD_DIR)
 	$(CXX) $(GTEST_CPPFLAGS) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(GINAC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
