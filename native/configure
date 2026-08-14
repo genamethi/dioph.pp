@@ -14,6 +14,7 @@ SUDO=
 SANITIZE=
 SANITIZE_VENDOR=
 VENDOR_FLINT=
+VENDOR_LTO="${VENDOR_LTO-1}"
 FORCE=
 DISTCLEAN=
 for arg in "$@"; do
@@ -24,10 +25,11 @@ for arg in "$@"; do
     SANITIZE_VENDOR=1
     ;;
   --vendor-flint) VENDOR_FLINT=1 ;;
+  --no-vendor-lto) VENDOR_LTO= ;;
   --force) FORCE=1 ;;
   --distclean) DISTCLEAN=1 ;;
   *)
-    echo "unknown option: $arg (supported: --sanitize, --sanitize-vendor, --vendor-flint, --force, --distclean)"
+    echo "unknown option: $arg (supported: --sanitize, --sanitize-vendor, --vendor-flint, --no-vendor-lto, --force, --distclean)"
     exit 1
     ;;
   esac
@@ -60,6 +62,14 @@ ICEBERG_SAN_FLAGS=
 if [ -n "$SANITIZE_VENDOR" ]; then
   ARROW_SAN_FLAGS="-DARROW_USE_ASAN=ON -DARROW_USE_UBSAN=ON"
   ICEBERG_SAN_FLAGS="-DICEBERG_ENABLE_ASAN=ON -DICEBERG_ENABLE_UBSAN=ON"
+fi
+
+VENDOR_LTO_FLAGS=
+if [ -n "$VENDOR_LTO" ]; then
+  LTO_AR=$(command -v gcc-ar || command -v ar)
+  LTO_RANLIB=$(command -v gcc-ranlib || command -v ranlib)
+  VENDOR_LTO_FLAGS="-DCMAKE_C_FLAGS=-flto=auto -DCMAKE_CXX_FLAGS=-flto=auto"
+  VENDOR_LTO_FLAGS="$VENDOR_LTO_FLAGS -DCMAKE_AR=$LTO_AR -DCMAKE_RANLIB=$LTO_RANLIB"
 fi
 
 DISTRO=
@@ -142,6 +152,7 @@ stamp_rel() { echo "lib/.pp-$1.sha"; }
 
 vendor_token() {
   vt=$(git -C "$VENDOR/$1" rev-parse HEAD)
+  vt="$vt lto-${VENDOR_LTO:-0}"
   [ "$1" != iceberg-cpp ] || vt="$vt nlohmann-${PREFIX_NLOHMANN:-default}"
   echo "$vt"
 }
@@ -303,6 +314,7 @@ if needs_install arrow "lib/libarrow.a"; then
   cmake .. --preset ninja-release -DCMAKE_INSTALL_PREFIX="$PREFIX" \
     -DARROW_BUILD_STATIC=ON -DARROW_DEPENDENCY_SOURCE=BUNDLED \
     -DARROW_WITH_SNAPPY=ON -DARROW_BUILD_UTILITIES=ON -DARROW_TESTING=ON \
+    $VENDOR_LTO_FLAGS \
     $ARROW_SAN_FLAGS
   ninja -j "$JOBS"
   DESTDIR="$STAGE" cmake --install .
@@ -346,9 +358,11 @@ if needs_install iceberg-cpp "lib/libiceberg_sql_catalog.a"; then
   # staged tree first so this build can find it either way.
   cmake -S . -B build -G Ninja \
     -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_PREFIX_PATH="$STAGE$PREFIX;$PREFIX" \
+    -DCMAKE_BUILD_TYPE=Release \
     -DICEBERG_BUILD_BUNDLE=ON -DICEBERG_BUILD_SHARED=ON \
     -DICEBERG_SQL_SQLITE=ON -DICEBERG_BUILD_SQL_CATALOG=ON \
     -DICEBERG_BUILD_REST_INTEGRATION_TESTS=ON \
+    $VENDOR_LTO_FLAGS \
     $ICEBERG_SAN_FLAGS
   cmake --build build -j "$JOBS"
   DESTDIR="$STAGE" cmake --install build
@@ -441,6 +455,7 @@ fi
   echo "STAGE := $STAGE"
   [ -n "$FALLBACK" ] && echo "ICEBERG_FALLBACK_CPPFLAGS := -I$ICEBERG_SRC"
   [ -n "$SANITIZE" ] && echo "SANITIZE := -fsanitize=address,undefined -fno-omit-frame-pointer"
+  [ -n "$VENDOR_LTO" ] || echo "LTOFLAGS :="
 } >"$ROOT/config.mk"
 
 INSTALL_PATH="${PP_INSTALL_PATH:-$HOME/.local/bin}"
