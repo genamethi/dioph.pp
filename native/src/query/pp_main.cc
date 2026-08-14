@@ -1,9 +1,14 @@
 #include <lua.hpp>
+#include <readline/history.h>
+#include <readline/readline.h>
+#include <unistd.h>
 
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <string>
+#include <system_error>
 
 #include "primeparts/catalog/pp_iceberg_rest.h"
 #include "primeparts/config.h"
@@ -29,15 +34,56 @@ void ReportLuaError(lua_State* L) {
   lua_pop(L, 1);
 }
 
-int RunRepl(lua_State* L) {
+std::string HistoryPath() {
+  if (const char* explicit_path = std::getenv("PP_HISTORY")) return explicit_path;
+  if (const char* state = std::getenv("XDG_STATE_HOME"); state && *state) {
+    return std::string(state) + "/pp/history";
+  }
+  if (const char* home = std::getenv("HOME"); home && *home) {
+    return std::string(home) + "/.pp_history";
+  }
+  return {};
+}
+
+bool IsQuit(const std::string& line) {
+  return line == "\\q" || line == "quit" || line == "exit";
+}
+
+int RunPipedRepl(lua_State* L) {
   std::string line;
-  std::fprintf(stderr, "pp> ");
   while (std::getline(std::cin, line)) {
-    if (line == "\\q" || line == "quit" || line == "exit") break;
+    if (IsQuit(line)) break;
     if (!line.empty() && luaL_dostring(L, line.c_str()) != LUA_OK) {
       ReportLuaError(L);
     }
-    std::fprintf(stderr, "pp> ");
+  }
+  return 0;
+}
+
+int RunRepl(lua_State* L) {
+  if (!isatty(STDIN_FILENO)) return RunPipedRepl(L);
+
+  const std::string history = HistoryPath();
+  using_history();
+  stifle_history(5000);
+  if (!history.empty()) read_history(history.c_str());
+
+  for (;;) {
+    char* raw = readline("pp> ");
+    if (raw == nullptr) break;
+    std::string line(raw);
+    std::free(raw);
+    if (IsQuit(line)) break;
+    if (line.empty()) continue;
+    add_history(line.c_str());
+    if (luaL_dostring(L, line.c_str()) != LUA_OK) ReportLuaError(L);
+  }
+
+  if (!history.empty() && write_history(history.c_str()) != 0) {
+    std::error_code ec;
+    std::filesystem::create_directories(
+        std::filesystem::path(history).parent_path(), ec);
+    if (!ec) write_history(history.c_str());
   }
   std::fprintf(stderr, "\n");
   return 0;
