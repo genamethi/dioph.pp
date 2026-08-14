@@ -198,214 +198,64 @@ residues, so even `n` loses nothing and odd `n` loses a third of its exponents.
 
 Roughly in dependency order. Each is a starting point, not a spec.
 
-1. **Make the objects above manipulable, not just computable.**
+1. **Give me exact algebraic values I can hold.**
 
-   Everything in this document is a formal object with operations on it: a word
-   has a degree and a skeleton, a polynomial has a reduction and a Swan
-   conductor, a cover has places and a branch locus, a character has a Gauss sum.
-   I want to compose those in a query rather than run a binary per question, the
-   way one writes expressions in Polars rather than materialising every
-   intermediate.
+   I want to compute with elements of a structure rather than with numbers that
+   have forgotten where they came from. `2` in the integers, `2` modulo 7, and
+   `2` in the 2-adics are three different things and I never want one silently
+   standing in for another; when a value crosses from one structure to another I
+   want that to be a step that can fail and say so, not a coincidence of
+   representation. Polynomials over whichever of those structures I name, on the
+   same footing.
 
-   Concretely I want to ask, of a set of primes selected by the usual
-   predicates, for the words into each, the degrees and skeletons realised, the
-   reduced degrees, and the fiber counts over a field I choose — and get one
-   answer, not seven files.
+   Everything the engine can construct I want to hold from the query interface —
+   name it, print it, compare it, and build a bigger thing out of it. If I can
+   only reach it by adding a flag to a binary then it is not finished.
 
-   Constraints. Moduli, ranges, characteristic, field degree: parameters, never
-   fixed in the code. Nothing that works only on a bounded prefix, and no
-   unmotivated cap that makes a bad shape look finite. The formal variable for
-   the base is not optional; evaluate at 2 last or not at all. Whatever holds
-   the polynomials must reach a factoring layer, since factorisation is how
-   ramification is computed and there is no route to it from a symbolic
-   expression alone.
+   Exact throughout. Nothing on this path may reach for a floating point number,
+   and an answer that is a magnitude rather than a value is not an answer.
 
-   I want to ask this for a prime near `10^12` and get an answer while I am
-   still looking at the screen.
+   Two or three structures are enough to show me the shape. I care about what a
+   structure and its elements *are* here, and how they reach me, far more than
+   about how many of them exist on the first pass — the rest are the same work
+   repeated. Symbolic representation and the arithmetic that evaluates it are
+   separate concerns and I should not be able to tell from the outside which one
+   answered a given question.
 
-2. **The partition function, weighted.**
+2. **The graph is in the tables. I want the objects it composes into.**
 
-   Three separable pieces, and they are not equally hard.
+   For a set of primes I select with the usual predicates, I want the distinct
+   chains reaching each one, and how many times each is realized. Distinct is
+   the load-bearing word: the routes through a chain vastly outnumber the things
+   the routes produce, and counting routes is answering a different question
+   that happens to be much larger. I want the count of objects.
 
-   *Computable.* The singular series constant. The mechanism is settled — the
-   Chebyshev-weighted `k(p)` is `log 2 * sum_m Lambda(p - 2^m)`, an additive
-   convolution of von Mangoldt with one argument restricted to powers of two, and
-   its local factors are `n`-dependent for the reason stated above. What is
-   missing is the product over `l`. That is an elementary convergent product,
-   not a theorem. Measured, the constant is near 3.
+   This has to hold up over a window near `10^12`, compared against other
+   windows, on the machine I have. If something has to be cut off then I want to
+   be told what was cut and it must not be folded into any total I am shown —
+   a truncated answer reported as an answer is worse to me than an error.
 
-   *Not computable by us.* An asymptotic for `count(n)`. Binary additive with
-   primes on both sides, so Goldbach-class regardless of how thin the set of
-   `2^m` is. Do not attempt a proof; do check the constant against the counts.
+   The two edge kinds are not alike and the tables already say so. Read what is
+   there rather than reconstructing it.
 
-   *Open, and the interesting one.* The fiber product's point count is the
-   correlation of two chains' fiber counts over a finite field — an analogue of
-   `k`, a sum over field points rather than over primes. The standard route from
-   one to the other is a Vaughan or Heath-Brown decomposition with bilinear
-   bounds, which wants bounded conductor and an interval. We have the conductor
-   bounds; we do not have the interval. I do not know how to close it.
+3. **Fields, and the one a chain actually needs.**
 
-   **The covering side is the same function.** `l | p - 2^m` is periodic in `m`
-   with period `ord_l(2)`, so one prime covers a residue class of exponents, and
-   a covering system built from such classes forces `p ≡ 2^{a_i} mod l_i` on each
-   — which is exactly the condition that makes the local factor at `l_i` vanish.
-   **A covering system is a construction of primes where the singular series is
-   zero.** Romanov's positive lower density for the representable integers, and
-   Erdos's arithmetic progression avoiding the form entirely by covering
-   congruences, are that function being positive and being zero. Do not
-   rediscover either bound. Work already exists here that builds order-capped
-   covers from primes with small `ord_l(2)` and measures how much they bleed onto
-   representable primes; the primitive prime factors of `2^d - 1` are the
-   material, since they are exactly the primes entering at order `d`.
+   Finite fields as objects I can name and work in: the Frobenius map, the
+   multiplicative structure, and moving between a field and its extensions. The
+   characteristic and the degree are things I pass in, never constants in the
+   source.
 
-   One structural fact from that direction worth carrying: if `l` divides both
-   `p - 2^{m_a}` and `p - 2^{m_b}` then `l | 2^{|m_a - m_b|} - 1`. **The pairwise
-   differences of a prime's hit positions are Mersenne indices**, and the
-   primitive factors of those Mersennes are precisely the primes that can cover
-   two of its exponents at once. The exponent set is the obvious invariant of a
-   hit mask; the difference multiset is the covering-relevant one.
+   What I want out of it first: for a chain, the smallest field in which every
+   one of its steps comes apart — determined by the chain, not chosen by me and
+   not found by trying fields until one works. Then the same question asked
+   across the whole warehouse at once, since it depends only on data that is
+   already small.
 
-   The Eisenstein-versus-cuspidal split you may be reaching for is available here
-   without a modular object: it is the circle method's own. Major arcs give the
-   singular series, explicit and local; minor arcs are the fluctuation. That is
-   the decomposition, and `c` against the residual scatter already is it.
+   Some chains have a step that cannot come apart in a given characteristic. I
+   want that reported as the step it is, not smoothed into a number.
 
-   *What is measured.* Restricted to primes, 10769840447 of the first
-   60032000000 have no `n = 1` representation, and 10889 of those still have an
-   `n >= 2` one. The mean of `k` is flat near 1.883 across nine decades, because
-   `log_2 p` more exponents cancels `1/ln p` less likely — which is why this is a
-   density question at all. But the zero rate is still climbing, 13.15 percent at
-   `1e4` to 17.98 at `1.6e12`, so **that figure is a running value and not a
-   density.** A fixed mean with a rising zero rate is the `m`-trials becoming
-   more heterogeneous, not drift; the untested consequence is that the variance
-   of `k` grows across decades while the mean holds.
-
-3. **Characterize which degree sets occur.**
-
-   By level one a prime's class is its set of realisable degrees, a subset of
-   `[1, floor(log_3 p_max)]`. Measured over a large family, the number of
-   distinct such sets is 52, 82, 118, 160, 201, 244 as the bound runs 10 to 20.
-   At the top that is 244 subsets out of `2^20` across 376 million primes.
-
-   Which 244. An exact characterisation. A fitted growth law is not an answer to
-   this and neither is a bigger table.
-
-4. **Separation.**
-
-   The state set of `p` is a union over its parents, and level `e` of the tower
-   sees the exponents below `e`. Empirically `k = 14` separates completely at
-   level 4 while `k = 1` does not separate at all. Give the level at which a
-   given `k` separates.
-
-5. **The monodromy group. Apply the known theory; do not rederive it.**
-
-   Galois groups of polynomial compositions are studied — Ritt's decomposition
-   theorems, and the literature on which wreath subgroups actually occur for
-   composed maps. Computing the group of a specific polynomial is a solved
-   algorithm and there are libraries for it. The uncollapsed presentation gives
-   the wreath containment for free; what is wanted is the group, per prime,
-   using the existing machinery.
-
-   What is genuinely ours is the reporting: I would like to see a prime's
-   monodromy drawn. Tables are not giving me a view of it. Orbits of
-   translations acting on reductions of the maps are not a partial step toward
-   this — that is a degree-one statement and the structure lives at all degrees.
-
-6. **Kummer decomposition on the graded presentation. A check, not a discovery.**
-
-   The theory is textbook. What is worth doing is verifying our layers against
-   it: per layer, sum the characters and confirm it reproduces the fiber counts
-   exactly. That is falsifiable against a quantity computable two ways, and it is
-   the concrete content of the claim that the graded form is where the
-   decomposition lives.
-
-   The field is determined rather than searched for. Decomposition needs
-   `n | q - 1`, and with `q = 2^d` that is `n | 2^d - 1`, so `d` must be a
-   multiple of the multiplicative order of 2 modulo `n` and the smallest usable
-   field is `F_{2^{ord}}`. The primitive prime factors of `2^d - 1` are exactly
-   the primes entering at order `d`, and the tree already computes them for the
-   Hermite root work — same arithmetic, different consumer.
-
-   Characteristic two degenerates the character side entirely: every additive
-   character is trivial or the sign. This wants an odd base.
-
-   *Where the Gauss sums already sit.* The Weil representation of `SL_2(F_q)`
-   acts on functions on `F_q`, and the matrix entries of its Fourier transform
-   are Gauss sums — the finite-field shadow of the metaplectic action, with the
-   Heisenberg group generated by the additive translations and the multiplicative
-   characters. So the Gauss and Jacobi sums are not a separate computation
-   bolted on beside the Kummer decomposition; they are the same representation
-   seen through its intertwiners. `|G(chi)| = sqrt(q)` for nontrivial `chi` is
-   unitarity of that action, not a coincidence of the counting.
-
-   This matters for what to attempt and what not to. The Heisenberg-Weyl and
-   metaplectic apparatus applies here, over `F_q`, where it is classical and the
-   objects are already computed. It does not obviously apply on the other side:
-   our Hermite use is a triangular basis change over `Z` whose content is the
-   2-adic valuation of integer coefficients, while the analytic Hermite theory is
-   about orthogonality against a Gaussian measure and spectra of operators. The
-   two share a name and a three-term recurrence. Building a bridge from an
-   integer coefficient vector to an analytic object carrying a group action is
-   not a short piece of work, and nothing here needs it.
-
-7. **Reachability in the flat layer.**
-
-   Composite degrees route through `n = 1` edges, so what the degree spectrum
-   depends on is which `n >= 2` endpoints reach which. That is a reachability
-   question on the largest object here and it is where the cost sits. It is also
-   the same arithmetic as direction 2, from the other side.
-
-8. **What the Hermite basis is actually for.**
-
-   Two things that are settled, and they point opposite ways.
-
-   *The depth filtration is not a Hermite fact.* The claim that coefficients
-   above index `N - N_1` are those of `x^N`, and that `c_i` first appears at
-   `N - N_i` with linear coefficient `(N/N_i) c_i`, is a statement about
-   `deg(P - x^N)` in monomials, transported. Both bases are triangular with unit
-   diagonal, so agreement above an index is basis-independent. It is also false
-   whenever `A_0` is nonzero, since `(x + A_0)^N` contributes `N A_0 x^{N-1}` and
-   the filtration collapses at `N - 1`. Every example that appeared to support it
-   had `A_0 = 0`. Drop this framing; it was a degree statement in costume.
-
-   *The basis and the Lucas filter are the same combinatorics.* In
-
-       x^n = sum_j C(n, 2j) (2j-1)!! He_{n-2j}
-
-   the double factorial `1 * 3 * 5 * ... * (2j-1)` is a product of odd numbers,
-   hence odd. So modulo 2 it drops out entirely and the surviving terms are
-   exactly those with `2j` a submask of `n` — the same Lucas condition that
-   governs the edge operator's coefficients. Checked: `n = 8` gives support
-   `{8, 0}` against the vector `1, 28, 210, 420, 59081`, odd only at the ends;
-   `n = 6` gives `{6, 4, 2, 0}` against `1, 15, 45, 15`, odd throughout.
-
-   **Consequence: the support question is vacuous mod 2.** Every chain polynomial
-   is `x^N` there, so its Hermite support is a function of `N` alone. Ask it in
-   characteristic zero or over `Z/2^e`.
-
-   *What is open, and it is the one thing the basis buys.* Triangular is not
-   diagonal, so a polynomial can have a zero monomial coefficient and a nonzero
-   Hermite one: `x^8 + c` has monomial support `{8, 0}` and Hermite support
-   `{8, 6, 4, 2, 0}`. Grouping primes by Hermite support is a genuinely different
-   equivalence relation, not a relabelling. Whether it determines the skeleton is
-   the question.
-
-   *Unknown utility, real structure.* Multiplication has explicit constants,
-
-       He_a * He_b = sum_k k! C(a,k) C(b,k) He_{a+b-2k}
-
-   which count perfect matchings. Composition here is `P -> P^n + c`, so it is an
-   iterated linearisation with combinatorial coefficients rather than an opaque
-   expansion, and the 2-adic valuation of `k! C(a,k) C(b,k)` is a Kummer question
-   again.
-
-   One caution against over-reading the basis. `He_n` is `x^n` with the Gaussian
-   moments subtracted, and it is an Appell sequence, so translations act by a
-   triangular binomial matrix. That is why the binomial expansions come out as
-   obvious combinations. But monomials are Appell too and translations act the
-   same way on them, so nothing is gained on the translation half of an edge.
-   What Hermite has that monomials do not is the centering, the orthogonality,
-   and the linearisation rule above.
+   An exact characterization of which fields occur, and which primes need them.
+   A proportion is not a characterization and neither is a bigger table.
 
 ## Generation hot path: remaining bookkeeping
 
