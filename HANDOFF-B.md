@@ -196,70 +196,66 @@ residues, so even `n` loses nothing and odd `n` loses a third of its exponents.
 
 ## Immediate Directions
 
-Three directions, in dependency order. Direction 1 is the interface everything
-else is written against; 2 needs nothing from 1 unless chains are represented as
-polynomials; 3 needs 1, and its query needs 2.
+Three directions in dependency order. The first is the interface everything else
+is written against. The second needs nothing from it unless chains end up
+represented as polynomials. The third needs the first, and its query needs the
+second.
 
-### Layout and conventions
+New code goes under `native/src/<layer>/` with headers under
+`native/include/primeparts/<layer>/` and namespace `primeparts::<layer>`; the
+layers introduced here are `algebra/`, `field/`, `pp/`, `query/` and `check/`.
+Every translation unit has a companion `<name>-lua.cc` carrying its Lua binding
+and nothing else, so that bindings never live in the file implementing the
+mathematics and stay findable on their own; a binding file that has accumulated
+logic should have been two files. Anything implemented is reachable from the `pp`
+Lua interface, and an object that cannot be constructed, printed, compared and
+composed from the REPL is not finished — the binding is part of a unit's
+contract rather than a later stage. Every quantity should be computable two ways,
+once structurally and once by brute force over a small case, with
+`check/witness.cc` pairing the two and comparing them and `check/brute.cc`
+holding the deliberately naive implementations.
 
-New code goes under `native/src/<layer>/`, headers under
-`native/include/primeparts/<layer>/`, namespace `primeparts::<layer>`. The
-layers introduced here are `algebra/`, `field/`, `pp/`, `query/`, `check/`.
-
-Every translation unit has a companion `<name>-lua.cc` holding its Lua binding
-and nothing else. Bindings do not live in the file that implements the
-mathematics. A binding file that accumulates logic should have been two files.
-
-Anything implemented is reachable from the `pp` Lua interface. An object that
-cannot be constructed, printed, compared and composed from the REPL is not
-finished. The binding is part of a unit's contract, not a later stage.
-
-Every quantity should be computable two ways — once structurally, once by brute
-force over a small case — and `check/witness.cc` is the registry that pairs them
-and compares. `check/brute.cc` holds the deliberately naive implementations.
-
-Scale is a correctness property here, not a performance goal. Every design must
-hold over arbitrary windows of primes, at least to 64 bits, with windows
-compared against one another. Nothing may depend on starting from the smallest
-prime, and no bound may be hardcoded where it could be a parameter. Where a
-computation must stop early, what was dropped is reported and excluded from
-every total derived from it; a truncated result presented as a result is a
-defect, not an approximation.
+Scale here is a correctness property and not a performance goal. Designs must
+hold over arbitrary windows of primes, at least to 64 bits, with windows compared
+against one another; nothing may depend on starting from the smallest prime, and
+no bound may be hardcoded where it could be a parameter. Where a computation has
+to stop early, what was dropped is reported and excluded from every total derived
+from it, because a truncated result presented as a result is a defect rather than
+an approximation.
 
 ### 1. The algebraic spine
 
 `algebra/ring.cc`, `algebra/polynomial.cc`, and their bindings.
 
-An element carries a pointer to the structure it belongs to, and operations
-dispatch through that structure rather than through the C++ type. `2` in `Z`,
-`2` in `Z/7`, and `2` in `Z_2` are distinct elements with distinct arithmetic and
-must never be interchangeable by accident. Moving a value between structures is
-an explicit, checked, fallible operation.
+An element carries the structure it belongs to, and operations dispatch through
+that structure rather than through the C++ type, so that `2` in `Z`, `2` in
+`Z/7` and `2` in `Z_2` are distinct elements with distinct arithmetic that can
+never stand in for one another by accident. Moving a value between structures is
+explicit, checked and able to fail, which means the interface has to say what a
+partial operation returns; it also has to say when coercion happens on its own,
+when it must be asked for, and what it means to resolve a common structure for
+two operands.
 
-What has to be settled, because it cannot be retrofitted:
+A functor is represented as one object carrying both its action on objects and
+its action on morphisms, and it is written against the interface rather than
+against any concrete structure — `Spec` applied to `Z/2^e` and to `F_q[t]` has to
+be a single implementation. A functor that cannot be stated on the interface is
+evidence the interface is wrong, and that is the failure this direction exists to
+prevent, since none of it can be retrofitted once other layers are written
+against it. Identity, printing and equality on the Lua side are part of the same
+settlement.
 
-- whether a structure owns or interns its elements, and what an element is
-  physically — handle plus parent pointer, with or without a small-value path;
-- when coercion happens implicitly, when it must be requested, and what resolving
-  a common structure for two operands means;
-- how a functor is represented, so that its action on objects and its action on
-  morphisms are one object rather than two functions. A functor is written
-  against the interface, never against a concrete structure: `Spec` applied to
-  `Z/2^e` and to `F_q[t]` must be one implementation;
-- what a partial operation returns, since coercion legitimately fails;
-- identity, printing, and equality on the Lua side.
+`Z` and `Z/n` are the only concrete structures needed on this pass. `Z/l^e` with
+its truncation and lift maps, and `Z[zeta_M]` with its Galois action, come later
+against the same interface and should not require changing it — that they slot in
+without disturbance is the test of whether the interface was right.
 
-Concrete structures needed on this pass: `Z` and `Z/n`. `Z/l^e` with its
-truncation and lift maps, and `Z[zeta_M]` with its Galois action, are later
-additions against the same interface and should not require changing it.
-
-GiNaC carries the symbolic representation — a polynomial is built as an
-expression regardless of where it lives — and FLINT is the arithmetic engine
-wherever the structure admits one, since GiNaC has no finite fields. Which of the
-two evaluates a given operation is an implementation detail behind one interface
-and must not surface in Lua.
-
-Nothing on this path may use a floating point number. A magnitude is not a value.
+GiNaC carries the symbolic representation, so a polynomial is built as an
+expression regardless of where its coefficients live, and FLINT is the arithmetic
+engine wherever the structure admits one, since GiNaC has no finite fields. Which
+of the two evaluates any given operation sits behind one interface and must not
+surface in Lua. Nothing on this path may use a floating point number; a magnitude
+is not a value.
 
 Done when a session in `pp` can construct polynomials over a structure named at
 runtime, reduce them into another structure, and print exact results.
@@ -269,38 +265,36 @@ runtime, reduce them into another structure, and print exact results.
 `pp/cone.cc`, `pp/word.cc`, `pp/sweep.cc`, `query/bind.cc`, and their bindings.
 
 For a set of primes selected by the usual predicates, produce the distinct chains
-reaching each, with the multiplicity of each. The facts that determine what
-"distinct" means:
+reaching each one together with the multiplicity of each. What makes two chains
+the same is fixed by the arithmetic. An `n = 1` edge is a translation, since
+`p = 2^m + q` adds `p - q`, so a run of them from a node `q` up to `p`
+contributes exactly `p - q` whatever route it takes through the intervening
+primes, and only `n >= 2` edges multiply the degree. Every chain polynomial is
+therefore `P = ( ... ((x + A_0)^{n_1} + c_1)^{n_2} + c_2 ... )^{n_k} + c_k` with
+every `n_i >= 2`, where `A_0` and each `c_i` is a sum of powers of two; the list
+`[n_1, ..., n_k]` is the skeleton and `N = prod n_i` is the degree. The object is
+indexed by where the `n >= 2` edges sit and not by routes, and the gap is not
+marginal: at `p = 987391` there are 5537 objects against 50450299988 routes, so
+any enumeration whose cost tracks routes is enumerating the wrong set and raising
+a cap will not convert one into the other.
 
-- An `n = 1` edge is a translation: `p = 2^m + q`, so it adds `p - q`. A run of
-  them from a node `q` up to `p` contributes exactly `p - q` whatever route it
-  takes. Only `n >= 2` edges multiply the degree.
-- So a chain polynomial is
-  `P = ( ... ((x + A_0)^{n_1} + c_1)^{n_2} + c_2 ... )^{n_k} + c_k` with every
-  `n_i >= 2`, where `A_0` and each `c_i` is a sum of powers of two. The list
-  `[n_1, ..., n_k]` is the skeleton and `N = prod n_i` is the degree.
-- The object is therefore indexed by where the `n >= 2` edges sit, not by routes.
-  At `p = 987391` that is 5537 objects against 50450299988 routes. Any
-  enumeration whose cost tracks routes is enumerating the wrong set, and raising
-  a cap does not convert one into the other.
-- Normalizing by the target, `S = P - p`, makes the carried state constant along
-  every `n = 1` edge, at every modulus, with no arithmetic. On an `n >= 2` edge
-  out of `q` it transforms as `S_p = (S_q + q)^n - q^n`, which involves `q` and
-  never `m`.
-- `p = 2^m + q^n > q` makes ascending prime order topological, so a node's state
-  can be built from its parents' in one pass rather than by walking down from
-  each target.
-- Bounds: a chain into `p` from a root at least 3 has `p > root^N`, so
-  `N < log_3 p`; on one edge `n < log_q p`, hence `n < log_5 p` unless `q = 3`.
+Two further facts shape the computation rather than the object. Normalizing by
+the target, `S = P - p`, makes the carried state constant along every `n = 1`
+edge at every modulus with no arithmetic at all, and on an `n >= 2` edge out of
+`q` it transforms as `S_p = (S_q + q)^n - q^n`, involving `q` and never `m`. And
+because `p = 2^m + q^n > q`, ascending prime order is topological, so a node's
+state can be built from its parents' in a single pass instead of by walking down
+from each target. For bounds, a chain into `p` from a root of at least 3 has
+`p > root^N` and hence `N < log_3 p`, while a single edge has `n < log_q p`,
+so `n < log_5 p` unless `q = 3`.
 
-The two tables are not alike and the difference is the point. `flat_parts` holds
+The two tables are not alike and that difference is the point. `flat_parts` holds
 one row per prime that has at least one `n = 1` parent, with `hit_mask` a bitmask
-over `m`; the parent is recovered by subtraction, `q = p - 2^m`, and
-`parts_expand.h` already does this expansion. `higher_parts` holds one row per
-`n >= 2` edge and stores `q_k` outright; there are on the order of 167000 such
-rows for the entire warehouse to `1.6e12`. Read what the tables hold rather than
-recomputing it — `MaskFn`-style injection points exist so a table-backed source
-can be supplied in place of recomputation.
+over `m`, and the parent is recovered by subtraction as `q = p - 2^m`, an
+expansion `parts_expand.h` already performs. `higher_parts` holds one row per
+`n >= 2` edge and stores `q_k` outright, and there are on the order of 167000
+such rows for the entire warehouse out to `1.6e12`. Read what the tables hold
+rather than recomputing it.
 
 Done when the chains into a prime near `10^12` can be listed from `pp`, and when
 the same query over a window returns per-prime results without materializing
@@ -310,29 +304,26 @@ anything proportional to the route count.
 
 `field/finite_field.cc`, `field/galois.cc`, and their bindings.
 
-Finite fields as first-class structures under direction 1: construction at a
-characteristic and degree passed in at runtime, the Frobenius endomorphism
-`x -> x^r`, a multiplicative generator with its discrete logarithm, norm and
-trace, the subfield lattice, and embeddings `F_{r^d} -> F_{r^{de}}`.
-
-Embeddings have to be chosen coherently across degrees. If they are not, a
-Frobenius orbit computed in one field does not correspond to the same orbit
-computed in an extension, and later work disagrees with itself without erroring.
+Finite fields as first-class structures under direction 1: constructed at a
+characteristic and degree passed in at runtime, with the Frobenius endomorphism
+`x -> x^r`, a multiplicative generator and its discrete logarithm, norm and
+trace, the subfield lattice, and embeddings `F_{r^d} -> F_{r^{de}}`. Those
+embeddings have to be chosen coherently across degrees, because otherwise a
+Frobenius orbit computed in one field will not correspond to the same orbit
+computed in an extension, and later work disagrees with itself without ever
+raising an error.
 
 The first consumer is the field a chain requires. A step `y -> y^n + c` comes
 apart over a field exactly when `n` divides `r^d - 1`, so the smallest field in
-which every step of a skeleton comes apart has degree
-
-    d = lcm_i ord_{n_i}(r)
-
+which every step of a skeleton comes apart has degree `d = lcm_i ord_{n_i}(r)`,
 which depends on the skeleton alone. This requires `gcd(n_i, r) = 1` for every
-block; where the characteristic divides an exponent the order is undefined and
-that step has no such field. Report the offending block rather than a number.
-
-Because it depends only on the skeleton, this is one exact query over the whole
-warehouse off `higher_parts`, not a per-target computation. The result wanted is
-a characterization of which degrees occur and which primes need them. A
-proportion is not a characterization and neither is a larger table.
+block, since where the characteristic divides an exponent the order is undefined
+and that step has no such field at all; report the offending block rather than a
+number. Because the degree depends only on the skeleton, asking it across the
+whole warehouse is a single exact query over `higher_parts` rather than a
+per-target computation. What is wanted from it is a characterization of which
+degrees occur and which primes need them — a proportion is not a
+characterization, and neither is a larger table.
 
 Done when the required degree can be asked of a single chain and of a queried
 set, and when the characteristic is a parameter at every call site.
