@@ -90,7 +90,7 @@ TEST(PpConeTest, Stats) {
     if (bits == 0) ++sources;
   }
   EXPECT_EQ(s.edges, edges);
-  EXPECT_EQ(s.sources, sources);
+  EXPECT_EQ(s.flat_sources, sources);
 }
 
 TEST(PpConeTest, Degenerate) {

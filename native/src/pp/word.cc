@@ -37,9 +37,12 @@ struct Enumerator {
   const HigherFn* higher = nullptr;
   WordOptions options;
   WordStats* stats = nullptr;
+  std::string* error = nullptr;
+  bool failed = false;
+  std::vector<Word> aborted;
   std::map<int64_t, std::vector<Word>> memo;
 
-  const std::vector<Word>& Into(int64_t p, int depth) {
+  const std::vector<Word>& Into(int64_t p) {
     auto it = memo.find(p);
     if (it != memo.end()) {
       return it->second;
@@ -55,7 +58,7 @@ struct Enumerator {
       const uint64_t tail = static_cast<uint64_t>(p - v);
       const std::vector<Ascent> up = (*higher)(v);
 
-      if ((*mask)(v) == 0 && up.empty()) {
+      if (up.empty() && (*mask)(v) == 0) {
         Word w;
         w.root = v;
         w.target = p;
@@ -65,13 +68,16 @@ struct Enumerator {
         }
       }
 
-      if (depth >= options.max_blocks) {
-        continue;
-      }
       for (const Ascent& a : up) {
+        if (a.q >= v) {
+          *error = "ascent from " + std::to_string(v) +
+                   " does not descend: " + std::to_string(a.q);
+          failed = true;
+          return aborted;
+        }
         ++stats->ascents;
         const uint64_t c = (uint64_t{1} << a.m) + tail;
-        for (const Word& base : Into(a.q, depth + 1)) {
+        for (const Word& base : Into(a.q)) {
           Word w = base;
           w.target = p;
           Block b;
@@ -81,6 +87,9 @@ struct Enumerator {
           if (seen.insert(Key(w)).second) {
             out.push_back(std::move(w));
           }
+        }
+        if (failed) {
+          return aborted;
         }
       }
     }
@@ -185,6 +194,11 @@ bool Enumerate(int64_t p, const MaskFn& mask, const HigherFn& higher,
   }
   *stats = WordStats{};
 
+  std::string discarded;
+  if (error == nullptr) {
+    error = &discarded;
+  }
+
   if (options.lift != Lift::kCanonical) {
     *error =
         "only the canonical lift is enumerable from the cone; the faithful "
@@ -200,8 +214,14 @@ bool Enumerate(int64_t p, const MaskFn& mask, const HigherFn& higher,
   en.higher = &higher;
   en.options = options;
   en.stats = stats;
+  en.error = error;
 
-  for (const Word& w : en.Into(p, 0)) {
+  const std::vector<Word>& words = en.Into(p);
+  if (en.failed) {
+    return false;
+  }
+
+  for (const Word& w : words) {
     if (stats->words >= options.max_words) {
       stats->capped = true;
       break;

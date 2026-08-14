@@ -74,7 +74,7 @@ std::vector<int64_t> Cone(int64_t p, const MaskFn& mask, ConeStats* stats) {
   std::vector<int64_t> frontier{p};
   seen.insert(p);
   int64_t edges = 0;
-  int64_t sources = 0;
+  int64_t flat_sources = 0;
 
   while (!frontier.empty()) {
     const int64_t v = frontier.back();
@@ -83,7 +83,7 @@ std::vector<int64_t> Cone(int64_t p, const MaskFn& mask, ConeStats* stats) {
 
     const uint64_t bits = mask(v);
     if (bits == 0) {
-      ++sources;
+      ++flat_sources;
       continue;
     }
     primeparts::ForEachPart(v, bits, [&](int32_t, int64_t q) {
@@ -98,7 +98,7 @@ std::vector<int64_t> Cone(int64_t p, const MaskFn& mask, ConeStats* stats) {
   if (stats != nullptr) {
     stats->nodes = static_cast<int64_t>(out.size());
     stats->edges = edges;
-    stats->sources = sources;
+    stats->flat_sources = flat_sources;
   }
   return out;
 }

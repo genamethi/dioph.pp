@@ -2,12 +2,14 @@
 
 #include <gtest/gtest.h>
 
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
 
 namespace {
 
+using primeparts::pp::Ascent;
 using primeparts::pp::Base;
 using primeparts::pp::Closes;
 using primeparts::pp::Composed;
@@ -18,9 +20,11 @@ using primeparts::pp::Enumerate;
 using primeparts::pp::Evaluate;
 using primeparts::pp::Fold;
 using primeparts::pp::FromMask;
+using primeparts::pp::HigherFn;
 using primeparts::pp::Key;
 using primeparts::pp::Levels;
 using primeparts::pp::Lift;
+using primeparts::pp::MaskFn;
 using primeparts::pp::Route;
 using primeparts::pp::Skeleton;
 using primeparts::pp::Step;
@@ -159,6 +163,49 @@ TEST(PpWordTest, Cap) {
       << err;
   EXPECT_EQ(seen, 2);
   EXPECT_TRUE(s.capped);
+}
+
+TEST(PpWordTest, SharedAscentTarget) {
+  const std::map<int64_t, std::vector<Ascent>> up = {
+      {100, {Ascent{1, 2, 50}, Ascent{2, 2, 30}}},
+      {50, {Ascent{3, 2, 30}}},
+      {30, {Ascent{4, 2, 10}}},
+  };
+  const MaskFn mask = [](int64_t) { return uint64_t{0}; };
+  const HigherFn higher = [&up](int64_t v) {
+    const auto it = up.find(v);
+    return it == up.end() ? std::vector<Ascent>{} : it->second;
+  };
+
+  std::vector<Word> got;
+  WordStats s;
+  std::string err;
+  ASSERT_TRUE(Enumerate(
+      100, mask, higher, WordOptions{},
+      [&](const Word& w) { got.push_back(w); }, &s, &err))
+      << err;
+
+  std::set<std::vector<int32_t>> skeletons;
+  for (const Word& w : got) {
+    EXPECT_EQ(w.root, 10);
+    EXPECT_EQ(w.target, 100);
+    skeletons.insert(Skeleton(w));
+  }
+  EXPECT_EQ(skeletons, (std::set<std::vector<int32_t>>{{2, 2}, {2, 2, 2}}));
+}
+
+TEST(PpWordTest, AscentMustDescend) {
+  const MaskFn mask = [](int64_t) { return uint64_t{0}; };
+  const HigherFn higher = [](int64_t v) {
+    return v == 100 ? std::vector<Ascent>{Ascent{1, 2, 100}}
+                    : std::vector<Ascent>{};
+  };
+
+  WordStats s;
+  std::string err;
+  EXPECT_FALSE(Enumerate(
+      100, mask, higher, WordOptions{}, [](const Word&) {}, &s, &err));
+  EXPECT_NE(err.find("descend"), std::string::npos);
 }
 
 TEST(PpWordTest, FaithfulRefused) {

@@ -23,7 +23,7 @@ std::vector<Ascent> ComputedHigher(int64_t p);
 struct ConeStats {
   int64_t nodes = 0;
   int64_t edges = 0;
-  int64_t sources = 0;
+  int64_t flat_sources = 0;
 };
 
 std::vector<int64_t> Cone(int64_t p, const MaskFn& mask, ConeStats* stats);

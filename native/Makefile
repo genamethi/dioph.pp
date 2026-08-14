@@ -376,8 +376,7 @@ pp-test: $(PP_TEST_BIN)
 	$(PP_TEST_BIN)
 
 test: $(TEST_SUITE_BIN) $(PP_TEST_BIN)
-	$(TEST_SUITE_BIN)
-	$(PP_TEST_BIN)
+	@rc=0; $(TEST_SUITE_BIN) || rc=1; $(PP_TEST_BIN) || rc=1; exit $$rc
 
 $(E2E_OBJ): e2e/e2e_test.cc include/primeparts/aligned_writer.h | $(BUILD_DIR)
 	$(CXX) $(GTEST_CPPFLAGS) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@

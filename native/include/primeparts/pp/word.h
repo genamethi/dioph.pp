@@ -59,7 +59,6 @@ std::string Key(const Word& w);
 struct WordOptions {
   Lift lift = Lift::kCanonical;
   int64_t max_words = 1000000;
-  int max_blocks = 16;
 };
 
 struct WordStats {
