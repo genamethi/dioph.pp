@@ -160,6 +160,13 @@ grep for it as written.
 New code under `native/src/<layer>/`, headers under
 `native/include/primeparts/<layer>/`, namespaces `primeparts::<layer>`.
 
+**Every translation unit below has a companion `<name>-lua.cc` holding its
+binding, and nothing else.** They are not listed twice. A binding never lives in
+the file that implements the mathematics: the objects are findable in one place,
+the surface is findable in another, and neither grows by editing the other. More
+files is the point — a binding file that has accumulated logic is a binding file
+that should have been two.
+
 ### algebra — exact arithmetic and the parent/element spine
 
 | TU | Mathematical purpose |
@@ -349,6 +356,22 @@ settled interface rather than extending it. Getting the interface wrong is the
 one mistake here that cannot be paid off incrementally, which is why this is
 almost entirely design and very little code.
 
+*Decides.* Whether a parent owns or interns its elements. How an element is
+represented — handle plus parent pointer, and whether small values dodge the
+allocation. When coercion is implicit and when it must be asked for, and what
+resolving a common parent means. How a functor is represented so that its action
+on objects and on morphisms are one object. What a partial operation returns,
+since coercion can legitimately fail. What identity, printing and equality mean
+on the Lua side. Where the GiNaC/FLINT boundary sits inside the polynomial
+interface.
+
+*Writes.* `Z` and `Z/n`. Polynomial arithmetic over both, delegating. Four
+metamethods. The witness registry with nothing registered.
+
+*Needs.* Nothing.
+
+*Unblocks.* Everything algebraic.
+
 Consumer: an exact calculator in the `pp` REPL. The warehouse is not involved
 yet.
 
@@ -366,6 +389,22 @@ Gauss sum magnitudes.
 ### C1 — The equation's objects, off the tables
 
 TUs: `pp/cone.cc`, `pp/word.cc`, `pp/sweep.cc`, `query/bind.cc`.
+
+*Decides.* What a word is as a value — skeleton plus constants, or a polynomial —
+and whether its constants carry the base formally or evaluated. How the cone is
+read: mask expansion against per-edge rows is the decision the schema is pushing
+you toward, and taking the other branch works to about `1e7`. Whether enumeration
+walks per target or ascends once across the queried set. How a truncated result
+is represented so it cannot be summed into a total. What the query surface hands
+back — rows, objects, or something deferred.
+
+*Writes.* The `ScanPlan` read of both tables, mask expansion, the ascending walk,
+the enumeration.
+
+*Needs.* Nothing algebraic. C0 only if words are held as polynomials rather than
+as skeleton-and-constants, which is itself the first decision above.
+
+*Unblocks.* C2's skeletons, C3's chains, and the tower.
 
 Consumer: words for a queried set of primes, with no cap that reports a truncated
 answer as an answer.
@@ -385,6 +424,21 @@ orders of magnitude and the registry records which is the object.
 ### C2 — Fields, and the field a chain needs
 
 TUs: `field/finite_field.cc`, `field/galois.cc`, `field/function_field.cc`.
+
+*Decides.* How a field is constructed, and this is the one that bites: embeddings
+`F_{r^d} -> F_{r^{de}}` have to be chosen coherently, or a Frobenius orbit
+computed in one field does not line up with the same orbit computed in another,
+and C5's decomposition silently disagrees with itself across degrees. Whether the
+discrete log is a table or an algorithm, which decides how large a field can get.
+How a character is named — an exponent against the chosen generator, or something
+that survives changing the generator.
+
+*Writes.* `ord_n(r)`, the subfield lattice, norm and trace, and the splitting
+degree query.
+
+*Needs.* C0. The query itself also needs C1's skeletons.
+
+*Unblocks.* C5 entirely.
 
 Consumer: the splitting degree of a skeleton, across the whole warehouse off
 `higher_parts` alone. `d = lcm_i ord_{n_i}(r)` is a function of the skeleton, so
@@ -408,6 +462,20 @@ skeleton.
 
 TUs: `scheme/affine.cc`, `scheme/morphism.cc`, `scheme/etale.cc`, `pp/chain.cc`.
 
+*Decides.* Whether a morphism is stored as a ring map or as the polynomial, which
+sets whether `Spec` is real or decorative. Whether the four presentations are one
+type with four readings or four types with conversions. How general the scheme
+layer pretends to be: the honest answer is that it handles the affine line and
+plane curves, and saying so in the interface is a decision rather than a
+limitation to hide. How a fiber product is presented when it is the object of
+interest and not an intermediate.
+
+*Writes.* Composition, degree, fibers by factorization, base change.
+
+*Needs.* C0 and C1.
+
+*Unblocks.* C4.
+
 Consumer: a chain as a morphism, its fibers, and two chains glued over a target.
 
 ```lua
@@ -424,6 +492,20 @@ degree at every point.
 ### C4 — Places, and ramification as a report
 
 TUs: `local/valuation.cc`, `local/place.cc`, `local/divisor.cc`.
+
+*Decides.* The shape of the local record, and that `(e, f)` with tame and
+separable all fall out of one factorization rather than three passes — this is
+where ramification either becomes a report or becomes three incompatible
+opinions. How the place at infinity is represented, given that it is where the
+Swan conductor lives and is not a point of the affine line. Whether completions
+are represented at all or only their residue fields.
+
+*Writes.* Factor `P(y) - c` over the residue field, read off the extension,
+assert `sum e_i f_i = deg`, and the divisor monoid.
+
+*Needs.* C3.
+
+*Unblocks.* C5's conductors and all of C6.
 
 Consumer: the local record at every place of a chain, and a conductor that is a
 sum rather than a formula.
@@ -443,6 +525,21 @@ ramified.
 
 TUs: `sheaf/lisse.cc`, `sheaf/character.cc`, `sheaf/operations.cc`,
 `sheaf/cohomology.cc`, `sheaf/lfunction.cc`, `check/brute.cc`.
+
+*Decides.* What a sheaf is as a value — rank, singular places with their local
+data, and something that evaluates traces — since none of the definitions are
+constructive and the representation is entirely your choice. How a failed
+decomposition is returned, because "splits over `F_{q^d}` with orbit size `s`" is
+a result and not an error, and a signature that can only say yes or no throws the
+interesting half away. Where eigenvalues live, which is `algebra/cyclotomic` or
+nowhere exact.
+
+*Writes.* The Kummer and Artin-Schreier constructors, rank arithmetic under
+pushforward, the Artin-Schreier fold, GOS, and Gauss sums.
+
+*Needs.* C0's cyclotomic parent, C2, C4.
+
+*Unblocks.* C6.
 
 Consumer: one layer decomposed, with exact Frobenius eigenvalues, and the
 composite's failure located.
@@ -471,6 +568,17 @@ graded layer. An odd base is required, and the base is a parameter.
 ### C6 — The global object
 
 TUs: `global/adele.cc`, `global/class_field.cc`.
+
+*Decides.* How a restricted product is represented when almost every component is
+trivial and the interesting ones are finite in number. How a rank-1 sheaf is
+carried to an idele class character, which is the whole content of the layer.
+Whether the Euler product is assembled eagerly or left as a formal object.
+
+*Writes.* Local components, the conductor sum, the Euler product.
+
+*Needs.* C4 and C5.
+
+*Unblocks.* Nothing — this is the end of the line.
 
 Consumer: additive and multiplicative sheaves presented as one kind of object,
 distinguished by local conductor, with the global invariant assembled from the
