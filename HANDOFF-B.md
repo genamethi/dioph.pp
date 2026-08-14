@@ -197,41 +197,39 @@ residues, so even `n` loses nothing and odd `n` loses a third of its exponents.
 ## Immediate Directions
 
 Three directions in dependency order. Each unit's Lua binding lives in a
-companion `*-lua.cc` and nowhere else; anything implemented is reachable from
-`pp`; anything computed structurally is also computed by brute force on a small
-case and the two compared. Designs hold over arbitrary windows to 64 bits and
-beyond, no bound is hardcoded that could be a parameter, and anything dropped is
+companion *-lua.cc and nowhere else; anything implemented is reachable from pp;
+anything computed structurally is also computed by brute force on a small case
+and the two compared. Designs hold over arbitrary windows to 64 bits and beyond,
+no bound is hardcoded that could be a parameter, and anything dropped is
 reported and excluded from every total derived from it.
 
-1. **The algebraic spine.** An element carries its structure and dispatches
-   through it, so `2` in `Z`, `Z/7` and `Z_2` never substitute for one another;
-   moving between structures is explicit and can fail. A functor is one object
-   carrying its action on objects and on morphisms, written against the
-   interface — `Spec` on `Z/2^e` and on `F_q[t]` is one implementation. `Z` and
-   `Z/n` suffice now; `Z/l^e` and `Z[zeta_M]` must slot in later without changing
-   the interface, which is the test of whether it was right. GiNaC holds the
-   symbolic representation, FLINT does the arithmetic where the structure admits
-   it since GiNaC has no finite fields, and which one answers never surfaces in
-   Lua. No floating point.
+The algebraic spine. An element carries its structure and dispatches through it,
+so 2 in Z, 2 in Z/7 and 2 in Z_2 never substitute for one another; moving
+between structures is explicit and can fail. A functor is one object carrying
+its action on objects and on morphisms, written against the interface — Spec on
+Z/2^e and on F_q[t] is one implementation. Z and Z/n suffice now; Z/l^e and
+Z[zeta_M] must slot in later without changing the interface, which is the test
+of whether it was right. GiNaC holds the symbolic representation, FLINT does the
+arithmetic where the structure admits it since GiNaC has no finite fields, and
+which one answers never surfaces in Lua. No floating point.
 
-2. **Chains from the warehouse.** For a queried set of primes, the distinct
-   chains into each with multiplicities. An `n = 1` edge adds `p - q`, so a run
-   of them contributes `p - q` by any route and only `n >= 2` edges raise the
-   degree: chains are indexed by where those sit, 5537 of them against
-   50450299988 routes at `p = 987391`. Normalizing by the target, `S = P - p`,
-   holds the state constant along `n = 1` edges at every modulus, and `p > q`
-   makes ascending order topological, so state builds from parents in one pass.
-   `flat_parts` is one mask row per prime with `q = p - 2^m`; `higher_parts` is
-   ~167000 rows for the whole warehouse. Read them rather than recomputing.
+Chains from the warehouse. For a queried set of primes, the distinct chains into
+each with multiplicities. An n = 1 edge adds p - q, so a run of them contributes
+p - q by any route and only n >= 2 edges raise the degree: chains are indexed by
+where those sit, 5537 of them against 50450299988 routes at p = 987391.
+Normalizing by the target, S = P - p, holds the state constant along n = 1 edges
+at every modulus, and p > q makes ascending order topological, so state builds
+from parents in one pass. flat_parts is one mask row per prime with q = p - 2^m;
+higher_parts is about 167000 rows for the whole warehouse. Read them rather than
+recomputing.
 
-3. **Fields.** Characteristic and degree passed in, Frobenius, a generator with
-   its discrete log, and embeddings chosen coherently across degrees or orbits
-   computed in different fields silently disagree. A step `y -> y^n + c` splits
-   when `n | r^d - 1`, so a skeleton needs `d = lcm_i ord_{n_i}(r)`, requiring
-   `gcd(n_i, r) = 1` — report the offending block otherwise. It depends on the
-   skeleton alone, so asking it warehouse-wide is one query over `higher_parts`.
-   An exact characterization of which degrees occur; not a proportion, not a
-   bigger table.
+Fields. Characteristic and degree passed in, Frobenius, a generator with its
+discrete log, and embeddings chosen coherently across degrees or orbits computed
+in different fields silently disagree. A step y -> y^n + c splits when n divides
+r^d - 1, so a skeleton needs d = lcm_i ord_{n_i}(r), requiring gcd(n_i, r) = 1 —
+report the offending block otherwise. It depends on the skeleton alone, so asking
+it warehouse-wide is one query over higher_parts. An exact characterization of
+which degrees occur; not a proportion, not a bigger table.
 
 ## Generation hot path: remaining bookkeeping
 
