@@ -47,7 +47,7 @@ and is what `pp-graph` reads through.
 
 Roughly in dependency order. Each is a starting point, not a spec.
 
-1. Implement pp-graph for graph analysis of structure leveraging Hermite
+1. [Abandoned] Implement pp-graph for graph analysis of structure leveraging Hermite
    polynomials.
 
    I want to explore the structure of these solutions based on properties like
@@ -90,14 +90,14 @@ Roughly in dependency order. Each is a starting point, not a spec.
    covering all primes under 64 bits (and hopefully beyond, really).
    Point is we don't want toy examples that are only workable on a bounded prefix.
 
-2. **Settle consumer server-side planning.** `rest_scan_plan` exists and works;
+2. [Partially done?] **Settle consumer server-side planning.** `rest_scan_plan` exists and works;
    `client::Session` dispatches on the advertised mode and `pp-graph` reads
    through it. `source_scan` / `query_service` still plan in-process from a local
    metadata path and never consult the advertisement — wire them to `Session`,
    or accept that in-process planning is the real path for them. `generate` is
    already a REST client on both resume reads, so the producer's REST-ness is
    not the gap; what it does not use is the *spec* planning routes.
-3. **One runner, one declared config.** Three parts of one thread.
+3. [Greenfield] **One runner, one declared config.** Three parts of one thread.
 
    (a) Too many binaries with their own entry points. Prefer two interfaces:
    TUI and CLI. A runner is the front door; per-binary entry points may stay

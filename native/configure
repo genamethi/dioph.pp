@@ -4,6 +4,7 @@ set -e
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 VENDOR="$ROOT/vendor"
 PREFIX="${PREFIX:-/usr/local}"
+STAGE="$ROOT/stage"
 JOBS=$(nproc 2>/dev/null || echo 4)
 CXX="${CXX:-g++}"
 
@@ -17,35 +18,35 @@ FORCE=
 DISTCLEAN=
 for arg in "$@"; do
   case "$arg" in
-    --sanitize) SANITIZE=1 ;;
-    --sanitize-vendor)
-      SANITIZE=1
-      SANITIZE_VENDOR=1
-      ;;
-    --vendor-flint) VENDOR_FLINT=1 ;;
-    --force) FORCE=1 ;;
-    --distclean) DISTCLEAN=1 ;;
-    *)
-      echo "unknown option: $arg (supported: --sanitize, --sanitize-vendor, --vendor-flint, --force, --distclean)"
-      exit 1
-      ;;
+  --sanitize) SANITIZE=1 ;;
+  --sanitize-vendor)
+    SANITIZE=1
+    SANITIZE_VENDOR=1
+    ;;
+  --vendor-flint) VENDOR_FLINT=1 ;;
+  --force) FORCE=1 ;;
+  --distclean) DISTCLEAN=1 ;;
+  *)
+    echo "unknown option: $arg (supported: --sanitize, --sanitize-vendor, --vendor-flint, --force, --distclean)"
+    exit 1
+    ;;
   esac
 done
 
 if [ -n "$DISTCLEAN" ]; then
-  rm -rf "$VENDOR/arrow/cpp/build" "$VENDOR/iceberg-cpp/build" "$ROOT/build" "$ROOT/config.mk"
+  rm -rf "$VENDOR/arrow/cpp/build" "$VENDOR/iceberg-cpp/build" "$ROOT/build" "$STAGE" "$ROOT/config.mk"
   if [ -f "$VENDOR/flint/Makefile" ]; then
     make -C "$VENDOR/flint" distclean >/dev/null 2>&1 || true
   fi
   find "$VENDOR/lmdb" -name '*.o' -delete 2>/dev/null || true
-  echo "distclean: removed vendor build trees, $ROOT/build and config.mk"
+  echo "distclean: removed vendor build trees, $ROOT/build, $STAGE and config.mk"
   echo "prefix artifacts under $PREFIX are untouched; rerun with --force to overwrite them"
   exit 0
 fi
 
 have_pc() {
   command -v pkg-config >/dev/null 2>&1 || return 1
-  PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PKG_CONFIG_PATH" pkg-config --exists "$1"
+  PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$STAGE$PREFIX/lib/pkgconfig:$PKG_CONFIG_PATH" pkg-config --exists "$1"
 }
 
 if [ -n "$SANITIZE_VENDOR" ] && [ "$PREFIX" = "/usr/local" ]; then
@@ -70,9 +71,9 @@ if command -v pacman >/dev/null 2>&1; then
   }
   PKGS="base-devel pkgconf cmake ninja git curl tar unzip boost \
 gmp mpfr pari primesieve primecount sqlite openssl \
-nlohmann-json3.12-dev \
+nlohmann-json \
 ginac notcurses \
-thrift brotli protobuf abseil-cpp re2 utf8proc lz4 zstd zlib bzip2"
+thrift brotli protobuf abseil-cpp re2 libutf8proc lz4 zstd zlib bzip2"
 
   if [ -n "$VENDOR_FLINT" ]; then
     PKGS="$PKGS autoconf automake libtool"
@@ -137,7 +138,7 @@ vendor_sync() {
     git -C "$REPO" submodule update --init -- "native/vendor/$1"
 }
 
-prefix_stamp() { echo "$PREFIX/lib/.pp-$1.sha"; }
+stamp_rel() { echo "lib/.pp-$1.sha"; }
 
 vendor_token() {
   vt=$(git -C "$VENDOR/$1" rev-parse HEAD)
@@ -145,22 +146,27 @@ vendor_token() {
   echo "$vt"
 }
 
-prefix_matches_vendor() {
-  [ -e "$VENDOR/$1/.git" ] || return 0
-  [ "$(cat "$(prefix_stamp "$1")" 2>/dev/null || true)" = "$(vendor_token "$1")" ]
+base_matches_vendor() {
+  # $1=base ("" for $PREFIX or "$STAGE" for the staged tree), $2=name
+  [ -e "$VENDOR/$2/.git" ] || return 0
+  [ "$(cat "$1$PREFIX/$(stamp_rel "$2")" 2>/dev/null || true)" = "$(vendor_token "$2")" ]
 }
 
+# $1=name, $2=marker path relative to a prefix root (e.g. lib/libarrow.a)
 needs_install() {
   [ -z "$FORCE" ] || return 0
-  [ -f "$2" ] || return 0
-  if prefix_matches_vendor "$1"; then return 1; fi
-  echo "$1 in $PREFIX does not match the vendored pin; rebuilding"
+  if [ -f "$PREFIX/$2" ] && base_matches_vendor "" "$1"; then return 1; fi
+  if [ -f "$STAGE$PREFIX/$2" ] && base_matches_vendor "$STAGE" "$1"; then
+    echo "$1 already staged in $STAGE$PREFIX; run 'make install' to deploy it"
+    return 1
+  fi
   return 0
 }
 
-stamp_prefix() {
+stamp_stage() {
   [ -e "$VENDOR/$1/.git" ] || return 0
-  vendor_token "$1" | $SUDO tee "$(prefix_stamp "$1")" >/dev/null
+  mkdir -p "$(dirname "$STAGE$PREFIX/$(stamp_rel "$1")")"
+  vendor_token "$1" >"$STAGE$PREFIX/$(stamp_rel "$1")"
 }
 
 nlohmann_version() {
@@ -188,15 +194,15 @@ else
   exit 1
 fi
 
-if [ -n "$VENDOR_FLINT" ] && needs_install flint "$PREFIX/lib/pkgconfig/flint.pc"; then
+if [ -n "$VENDOR_FLINT" ] && needs_install flint "lib/pkgconfig/flint.pc"; then
   vendor_sync flint
   cd "$VENDOR/flint"
   [ -x configure ] || ./bootstrap.sh
   ./configure --prefix="$PREFIX"
   make -j "$JOBS"
-  $SUDO make install
+  make install DESTDIR="$STAGE"
   cd "$ROOT"
-  stamp_prefix flint
+  stamp_stage flint
 elif have_pc flint; then
   echo "flint present"
 else
@@ -214,22 +220,36 @@ fi
 LUA_RELEASE=5.5.1
 LUA_VERSION=5.5
 
-if [ ! -x /usr/local/bin/lua ] ||
-  ! /usr/local/bin/lua -v 2>&1 | grep -q "Lua $LUA_RELEASE"; then
+lua_bin() {
+  # $1=base ("" for $PREFIX or "$STAGE" for the staged tree)
+  echo "$1$PREFIX/bin/lua"
+}
+lua_present() {
+  [ -x "$(lua_bin "$1")" ] && "$(lua_bin "$1")" -v 2>&1 | grep -q "Lua $LUA_RELEASE"
+}
+if lua_present "" || lua_present "$STAGE"; then
+  echo "lua $LUA_RELEASE present"
+else
   tmp=$(mktemp -d)
   cd "$tmp"
   curl -L -R -O "https://www.lua.org/ftp/lua-$LUA_RELEASE.tar.gz"
   tar zxf "lua-$LUA_RELEASE.tar.gz"
   cd "lua-$LUA_RELEASE"
   make all test
-  $SUDO make install
+  make install INSTALL_TOP="$STAGE$PREFIX"
   cd "$ROOT"
   rm -rf "$tmp"
-else
-  echo "lua $LUA_RELEASE present"
 fi
 
-if [ ! -x /usr/local/bin/luarocks ]; then
+LUA_BASE="$PREFIX"
+lua_present "" || LUA_BASE="$STAGE$PREFIX"
+
+luarocks_bin() { echo "$1$PREFIX/bin/luarocks"; }
+if [ -x "$(luarocks_bin "")" ] || [ -x "$(luarocks_bin "$STAGE")" ]; then
+  b=$(luarocks_bin "")
+  [ -x "$b" ] || b=$(luarocks_bin "$STAGE")
+  echo "luarocks $("$b" --version | head -1 | awk '{print $2}') present"
+else
   tmp=$(mktemp -d)
   cd "$tmp"
   tag=$(curl -fsSL https://api.github.com/repos/luarocks/luarocks/releases/latest |
@@ -241,17 +261,15 @@ if [ ! -x /usr/local/bin/luarocks ]; then
   curl -L -R -O "https://luarocks.org/releases/luarocks-$tag.tar.gz"
   tar zxf "luarocks-$tag.tar.gz"
   cd "luarocks-$tag"
-  ./configure --with-lua=/usr/local --lua-version="$LUA_VERSION"
+  ./configure --prefix="$PREFIX" --with-lua="$LUA_BASE" --lua-version="$LUA_VERSION"
   make
-  $SUDO make install
+  make install DESTDIR="$STAGE"
   cd "$ROOT"
   rm -rf "$tmp"
-else
-  echo "luarocks $(/usr/local/bin/luarocks --version | head -1 | awk '{print $2}') present"
 fi
 
 httplib_ok=
-for f in "$PREFIX/include/httplib.h" /usr/local/include/httplib.h /usr/include/httplib.h; do
+for f in "$PREFIX/include/httplib.h" "$STAGE$PREFIX/include/httplib.h" /usr/local/include/httplib.h /usr/include/httplib.h; do
   [ -f "$f" ] || continue
   grep -q 'inline Server::Server' "$f" && httplib_ok=1
   break
@@ -269,15 +287,15 @@ if [ -z "$httplib_ok" ]; then
     echo "fetched cpp-httplib $tag is not header-only"
     exit 1
   }
-  $SUDO mkdir -p "$PREFIX/include"
-  $SUDO cp "$tmp" "$PREFIX/include/httplib.h"
+  mkdir -p "$STAGE$PREFIX/include"
+  cp "$tmp" "$STAGE$PREFIX/include/httplib.h"
   rm -f "$tmp"
-  echo "cpp-httplib $tag (header-only) installed to $PREFIX/include"
+  echo "cpp-httplib $tag (header-only) staged to $STAGE$PREFIX/include"
 else
   echo "cpp-httplib header-only present"
 fi
 
-if needs_install arrow "$PREFIX/lib/libarrow.a"; then
+if needs_install arrow "lib/libarrow.a"; then
   vendor_sync arrow
   cd "$VENDOR/arrow/cpp"
   mkdir -p build
@@ -287,15 +305,16 @@ if needs_install arrow "$PREFIX/lib/libarrow.a"; then
     -DARROW_WITH_SNAPPY=ON -DARROW_BUILD_UTILITIES=ON -DARROW_TESTING=ON \
     $ARROW_SAN_FLAGS
   ninja -j "$JOBS"
-  $SUDO cmake --install .
+  DESTDIR="$STAGE" cmake --install .
   cd "$ROOT"
-  stamp_prefix arrow
+  stamp_stage arrow
 else
   echo "arrow static present"
 fi
 
-if [ ! -f "$PREFIX/include/arrow-gtest/gtest/gtest.h" ]; then
-  echo "arrow's bundled gtest missing ($PREFIX/include/arrow-gtest/gtest/gtest.h); rebuild arrow with -DARROW_TESTING=ON"
+if [ ! -f "$PREFIX/include/arrow-gtest/gtest/gtest.h" ] &&
+  [ ! -f "$STAGE$PREFIX/include/arrow-gtest/gtest/gtest.h" ]; then
+  echo "arrow's bundled gtest missing (arrow-gtest/gtest/gtest.h); rebuild arrow with -DARROW_TESTING=ON"
   exit 1
 fi
 echo "arrow-gtest bundle present"
@@ -319,20 +338,22 @@ if [ -n "$FETCHED_NLOHMANN" ] && [ "$FETCHED_NLOHMANN" != "$NLOHMANN_VERSION" ];
   rm -rf "$VENDOR/iceberg-cpp/build"
 fi
 
-if needs_install iceberg-cpp "$PREFIX/lib/libiceberg_sql_catalog.a"; then
+if needs_install iceberg-cpp "lib/libiceberg_sql_catalog.a"; then
   echo "building iceberg against nlohmann-json $NLOHMANN_VERSION"
   vendor_sync iceberg-cpp
   cd "$VENDOR/iceberg-cpp"
+  # arrow may only be staged (not yet deployed to $PREFIX); search the
+  # staged tree first so this build can find it either way.
   cmake -S . -B build -G Ninja \
-    -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_PREFIX_PATH="$PREFIX" \
+    -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_PREFIX_PATH="$STAGE$PREFIX;$PREFIX" \
     -DICEBERG_BUILD_BUNDLE=ON -DICEBERG_BUILD_SHARED=ON \
     -DICEBERG_SQL_SQLITE=ON -DICEBERG_BUILD_SQL_CATALOG=ON \
     -DICEBERG_BUILD_REST_INTEGRATION_TESTS=ON \
     $ICEBERG_SAN_FLAGS
   cmake --build build -j "$JOBS"
-  $SUDO cmake --install build
+  DESTDIR="$STAGE" cmake --install build
   cd "$ROOT"
-  stamp_prefix iceberg-cpp
+  stamp_stage iceberg-cpp
 else
   echo "iceberg present"
 fi
@@ -341,12 +362,16 @@ ICEBERG_SRC="$VENDOR/iceberg-cpp/src"
 FALLBACK=
 NEED="iceberg/catalog/session_catalog.h iceberg/catalog/session_context.h"
 need_cp=
-for h in $NEED; do [ -f "$PREFIX/include/$h" ] || need_cp=1; done
+for h in $NEED; do
+  [ -f "$PREFIX/include/$h" ] || [ -f "$STAGE$PREFIX/include/$h" ] || need_cp=1
+done
 if [ -n "$need_cp" ]; then
-  $SUDO mkdir -p "$PREFIX/include/iceberg/catalog" 2>/dev/null || true
-  $SUDO cp "$ICEBERG_SRC"/iceberg/catalog/*.h "$PREFIX/include/iceberg/catalog/" 2>/dev/null || true
-  for h in $NEED; do [ -f "$PREFIX/include/$h" ] || FALLBACK=1; done
-  [ -n "$FALLBACK" ] && echo "warn: could not install catalog headers to prefix; using vendored src include" || echo "catalog headers installed to prefix"
+  mkdir -p "$STAGE$PREFIX/include/iceberg/catalog" 2>/dev/null || true
+  cp "$ICEBERG_SRC"/iceberg/catalog/*.h "$STAGE$PREFIX/include/iceberg/catalog/" 2>/dev/null || true
+  for h in $NEED; do
+    [ -f "$STAGE$PREFIX/include/$h" ] || FALLBACK=1
+  done
+  [ -n "$FALLBACK" ] && echo "warn: could not stage catalog headers; using vendored src include" || echo "catalog headers staged to $STAGE$PREFIX/include"
 else
   echo "iceberg catalog headers present"
 fi
@@ -379,7 +404,10 @@ else
   echo "duckdb iceberg + substrait extensions installed"
 fi
 
-if [ ! -f "$PREFIX/include/duckdb.hpp" ] || [ ! -f "$PREFIX/lib/libduckdb.so" ]; then
+if { [ -f "$PREFIX/include/duckdb.hpp" ] && [ -f "$PREFIX/lib/libduckdb.so" ]; } ||
+  { [ -f "$STAGE$PREFIX/include/duckdb.hpp" ] && [ -f "$STAGE$PREFIX/lib/libduckdb.so" ]; }; then
+  echo "libduckdb present"
+else
   DUCKDB_VER="$("$DUCKDB" --version 2>/dev/null | awk '{print $1}')"
   [ -n "$DUCKDB_VER" ] || {
     echo "could not resolve duckdb version for libduckdb bundle"
@@ -400,18 +428,17 @@ if [ ! -f "$PREFIX/include/duckdb.hpp" ] || [ ! -f "$PREFIX/lib/libduckdb.so" ];
     exit 1
   }
   (cd "$tmp" && unzip -oq libduckdb.zip)
-  $SUDO cp -p "$tmp/libduckdb.so" "$tmp/libduckdb_static.a" "$PREFIX/lib/"
-  $SUDO cp -p "$tmp/duckdb.hpp" "$tmp/duckdb.h" "$PREFIX/include/"
-  $SUDO ldconfig 2>/dev/null || true
+  mkdir -p "$STAGE$PREFIX/lib" "$STAGE$PREFIX/include"
+  cp -p "$tmp/libduckdb.so" "$tmp/libduckdb_static.a" "$STAGE$PREFIX/lib/"
+  cp -p "$tmp/duckdb.hpp" "$tmp/duckdb.h" "$STAGE$PREFIX/include/"
   rm -rf "$tmp"
-  echo "libduckdb $DUCKDB_VER installed to $PREFIX"
-else
-  echo "libduckdb present"
+  echo "libduckdb $DUCKDB_VER staged to $STAGE$PREFIX"
 fi
 
 {
   echo "# generated by native/configure"
   echo "PREFIX := $PREFIX"
+  echo "STAGE := $STAGE"
   [ -n "$FALLBACK" ] && echo "ICEBERG_FALLBACK_CPPFLAGS := -I$ICEBERG_SRC"
   [ -n "$SANITIZE" ] && echo "SANITIZE := -fsanitize=address,undefined -fno-omit-frame-pointer"
 } >"$ROOT/config.mk"
@@ -422,4 +449,7 @@ case ":$PATH:" in
 *) echo "warn: install dir $INSTALL_PATH not in PATH (installed binaries won't be found until you add it)" ;;
 esac
 
-echo "done. build:  make -C $ROOT   install:  make -C $ROOT install"
+if [ -d "$STAGE$PREFIX" ]; then
+  echo "runtime deps staged under $STAGE$PREFIX, not yet deployed to $PREFIX"
+fi
+echo "next: make -C $ROOT install   (sudo is requested only for the $PREFIX deps; binaries go to $INSTALL_PATH as $(id -un))"

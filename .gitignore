@@ -105,6 +105,7 @@ pixi.lock
 # patches/, PATCHES.md, README.md under native/vendor are tracked. Only ignore
 # the generated configure output and Lua-from-source build leftovers.
 native/config.mk
+native/stage/
 native/.local/
 native/data/tmp/
 native/bin/nth_prime_boundaries
