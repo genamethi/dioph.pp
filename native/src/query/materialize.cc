@@ -21,7 +21,7 @@
 #include "primeparts/catalog/pp_iceberg_rest.h"
 #include "primeparts/schemas.h"
 #include "primeparts/writer.h"
-
+//There's no clear reason for this TU to be here.
 namespace primeparts::query {
 
 namespace {

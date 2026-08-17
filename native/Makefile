@@ -235,7 +235,7 @@ $(BUILD_DIR)/lua_presets.o: src/tui/lua_presets.cc include/primeparts/tui/lua_pr
 $(BUILD_DIR)/lua_query_module.o: src/query/lua_query_module.cc include/primeparts/query/lua_query_module.h include/primeparts/query/query_service.h include/primeparts/core.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(LUA_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/pp_main.o: src/query/pp_main.cc include/primeparts/query/lua_query_module.h include/primeparts/query/query_service.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/config.h | $(BUILD_DIR)
+$(BUILD_DIR)/pp_main.o: src/pp_main.cc include/primeparts/query/lua_query_module.h include/primeparts/query/query_service.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/config.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(LUA_CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/materialize.o: src/query/materialize.cc include/primeparts/query/materialize.h include/primeparts/writer.h include/primeparts/catalog/pp_iceberg_rest.h | $(BUILD_DIR)
