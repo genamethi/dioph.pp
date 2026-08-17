@@ -95,8 +95,8 @@ scan (new QueryService method, mirrors ScanByK on the partitions table).
 - `query.is_prime(n) -> bool`, `query.is_obstructed(p) -> bool` (k(p)==0).
 
 ### Catalog / dataset
-- `query.extent() -> { max_p=, count= }` — dataset bounds (manifest aggregates,
-  via the catalog — the `ui_iceberg` reads re-pointed onto the seam).
+-`query.extent() -> { max_p=, count= }` — dataset bounds (manifest aggregates)
+  
 - `query.reload()` — re-read presets/config (the `pp.reload` the preset TODO
   references).
 
@@ -104,6 +104,7 @@ scan (new QueryService method, mirrors ScanByK on the partitions table).
 - `CountRange(p_lo, p_hi) -> {total, k0}` (planned).
 - `ScanPartitions(filter) -> edges` (partitions-table scan; reuse the SourceTableReader
   + Expressions filter path, on `partitions`).
+## Convenient but not necesary
 - thin wrappers over the existing C number-theory core (`pp_prime_pi`,
   `pp_nth_prime`, `pp_next_prime`, `pp_is_prime_power_*`) exposed to Lua.
 
