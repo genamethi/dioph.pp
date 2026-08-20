@@ -2,8 +2,7 @@
 //
 // A query preset — the saved/loaded shape shared between the TUI (which parses
 // and serializes these as Lua tables in scripts/lua/) and the reader/query
-// layer (which validates them against the catalog schema). See the embedded-Lua
-// plan and markdown/arch/tui_app_design.md.
+// layer (which validates them against the catalog schema).
 
 #pragma once
 

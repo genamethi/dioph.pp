@@ -1,6 +1,6 @@
 // primeparts/query/lua_query_module.h
 //
-// The reader/catalog `query` Lua module (see markdown/arch/lua_query_api.md).
+// The reader/catalog `query` Lua module.
 // Installs a global `query` table into a caller-provided lua_State, bound to a
 // QueryService. Defined by the reader; hosted by whoever owns the lua_State
 // (the TUI's interactive mode, preset run functions, or a standalone shell).
