@@ -8,6 +8,7 @@
 #include "primeparts/writer.h"
 
 #include <arrow/api.h>
+#include <primecount.h>
 
 #include <atomic>
 #include <cerrno>
@@ -626,7 +627,7 @@ bool materialize_group(ChunkPool* pool, const Options& options,
   int64_t primes = group_primes(options);
   if (primes > remaining) primes = remaining;
 
-  const int64_t span_end = pp_nth_prime(cursor->next_idx + primes);
+  const int64_t span_end = primecount_nth_prime(cursor->next_idx + primes);
   if (span_end <= 0) {
     *error = "nth_prime failed at rank " +
              std::to_string(cursor->next_idx + primes);
@@ -1158,7 +1159,7 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
     GroupCursor cursor;
     cursor.next_idx = start_idx;
     cursor.end_idx = start_idx + options.count;
-    cursor.next_prime = pp_nth_prime(start_idx);
+    cursor.next_prime = primecount_nth_prime(start_idx);
     if (cursor.next_prime <= 0) {
       set_last_error("nth_prime failed at rank " + std::to_string(start_idx));
       log_line(callbacks, "%s", g_last_error.c_str());

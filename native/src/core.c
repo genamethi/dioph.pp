@@ -105,50 +105,6 @@ void pp_set_nth_prime_threads(int threads)
     }
 }
 
-int64_t pp_prime_pi(int64_t n)
-{
-    if (n < 0) {
-        return -1;
-    }
-    return primecount_pi(n);
-}
-
-int64_t pp_nth_prime(int64_t n)
-{
-    if (n <= 0) {
-        return -1;
-    }
-    return primecount_nth_prime(n);
-}
-
-int64_t pp_next_prime(int64_t n)
-{
-    uint64_t p;
-
-    if (n < 0) {
-        return -1;
-    }
-    p = primesieve_nth_prime(1, (uint64_t)n);
-    if (p == PRIMESIEVE_ERROR || p > (uint64_t)INT64_MAX) {
-        return -1;
-    }
-    return (int64_t)p;
-}
-
-int64_t pp_previous_prime(int64_t n)
-{
-    uint64_t p;
-
-    if (n <= 2) {
-        return -1;
-    }
-    p = primesieve_nth_prime(-1, (uint64_t)n);
-    if (p == PRIMESIEVE_ERROR || p > (uint64_t)INT64_MAX) {
-        return -1;
-    }
-    return (int64_t)p;
-}
-
 static int floor_log2_u64(uint64_t x)
 {
 #if defined(__GNUC__) || defined(__clang__)
@@ -710,8 +666,8 @@ int pp_process_rank_batch(int64_t start_idx, int64_t count, pp_batch_result *out
         return status;
     }
 
-    first_prime = pp_nth_prime(start_idx);
-    end_prime = pp_nth_prime(start_idx + count);
+    first_prime = primecount_nth_prime(start_idx);
+    end_prime = primecount_nth_prime(start_idx + count);
     if (first_prime <= 0 || end_prime <= 0) {
         return PP_ERR_LIBRARY;
     }
@@ -757,8 +713,8 @@ int pp_count_rank_batch(int64_t start_idx, int64_t count, pp_count_result *out)
         return status;
     }
 
-    first_prime = pp_nth_prime(start_idx);
-    end_prime = pp_nth_prime(start_idx + count);
+    first_prime = primecount_nth_prime(start_idx);
+    end_prime = primecount_nth_prime(start_idx + count);
     if (first_prime <= 0 || end_prime <= 0) {
         return PP_ERR_LIBRARY;
     }

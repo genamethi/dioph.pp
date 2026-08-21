@@ -13,6 +13,7 @@
 #include "iceberg/expression/literal.h"
 
 #include <flint/ulong_extras.h>
+#include <primecount.h>
 
 #include <atomic>
 #include <chrono>
@@ -73,7 +74,7 @@ class PrimeRankCheck : public Check {
       st.have_file = true;
       const uint64_t p0 = static_cast<uint64_t>(p[0]);
       n_primes_jump_after(st.iter, p0 - 1);
-      st.anchor = pp_prime_pi(static_cast<int64_t>(p0));
+      st.anchor = primecount_pi(static_cast<int64_t>(p0));
       st.index = 0;
     }
 

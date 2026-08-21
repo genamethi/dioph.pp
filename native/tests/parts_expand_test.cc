@@ -1,6 +1,7 @@
 #include "primeparts/parts_expand.h"
 
 #include <gtest/gtest.h>
+#include <primecount.h>
 
 #include <map>
 #include <numeric>
@@ -251,7 +252,7 @@ TEST_F(PartsExpandTest, FoldMatchesKnownTuples) {
 }
 
 TEST_F(PartsExpandTest, RoundTripsAcrossTheInt32Boundary) {
-  const int64_t rank = pp_prime_pi(int64_t{1} << 31);
+  const int64_t rank = primecount_pi(int64_t{1} << 31);
   ASSERT_GT(rank, 5000);
 
   pp_batch_result r;

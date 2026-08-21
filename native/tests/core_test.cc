@@ -1,6 +1,8 @@
 #include "primeparts/core.h"
 
 #include <gtest/gtest.h>
+#include <primecount.h>
+#include <primesieve.h>
 
 namespace {
 
@@ -11,9 +13,9 @@ class CoreTest : public ::testing::Test {
 };
 
 TEST_F(CoreTest, PrimeHelpers) {
-  EXPECT_EQ(pp_prime_pi(7), 4);
-  EXPECT_EQ(pp_nth_prime(10), 29);
-  EXPECT_EQ(pp_previous_prime(10), 7);
+  EXPECT_EQ(primecount_pi(7), 4);
+  EXPECT_EQ(primecount_nth_prime(10), 29);
+  EXPECT_EQ(primesieve_nth_prime(-1, 10), 7u);
 }
 
 TEST_F(CoreTest, PrimePower) {
