@@ -74,6 +74,7 @@ LUA_RUN_DIR := $(BUILD_DIR)/lua
 LUA_TREE_SH := ../scripts/luarocks-tree.sh
 ROCKS_MANIFEST := ../scripts/lua/rocks.lua
 LUAROCKS_PRESET := ../scripts/lua/luarocks.preset.lua
+PP_LIBS := ../scripts/lua/help.lua
 ROCKS_STAMP := $(LUA_RUN_DIR)/.rocks
 WRITER_OBJ := $(BUILD_DIR)/writer.o
 ALIGNED_WRITER_OBJ := $(BUILD_DIR)/aligned_writer.o
@@ -152,6 +153,7 @@ install: install-deps all $(EXAMPLE_CONFIG_LUA)
 	$(AS_REAL_USER) cp -r $(LUA_RUN_DIR)/rocks "$(PP_LUA_PATH)/"
 	$(AS_REAL_USER) cp $(LUAROCKS_PRESET) "$(PP_LUA_PATH)/etc/luarocks.preset.lua"
 	$(AS_REAL_USER) cp $(LUA_RUN_DIR)/etc/luarocks.lua "$(PP_LUA_PATH)/etc/luarocks.lua"
+	$(AS_REAL_USER) cp $(PP_LIBS) "$(PP_LUA_PATH)/libs/"
 	@if [ ! -f "$(PP_LUA_PATH)/etc/config.lua" ]; then \
 	  $(AS_REAL_USER) cp $(EXAMPLE_CONFIG_LUA) "$(PP_LUA_PATH)/etc/config.lua"; \
 	  echo "seeded $(PP_LUA_PATH)/etc/config.lua"; \
