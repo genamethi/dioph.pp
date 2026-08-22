@@ -98,7 +98,7 @@ return nil, "line " .. line .. ": not a permitted config construct"
 std::vector<fs::path> LuaRoots() {
   const fs::path dir = ExeDir();
   if (dir.empty()) return {};
-  return {dir / ".." / "share" / "pp" / "lua", dir / "lua"};
+  return {dir / ".." / "share" / "pp", dir / "lua"};
 }
 
 void SetRocksPath(lua_State* L) {
@@ -463,9 +463,9 @@ fs::path Resolve(const fs::path& requested, std::string* error) {
     return {};
   }
   for (const fs::path& root : roots)
-    if (const fs::path p = root / "pp" / "config.lua"; Exists(p)) return p;
+    if (const fs::path p = root / "etc" / "config.lua"; Exists(p)) return p;
 
-  const fs::path seeded = roots.back() / "pp" / "config.lua";
+  const fs::path seeded = roots.back() / "etc" / "config.lua";
   if (!WriteExample(seeded, error)) return {};
   return seeded;
 }
@@ -476,7 +476,7 @@ bool Load(const fs::path& requested, Conf* out, std::string* error) {
                  !Exists(XdgConfig()) && !Exists(HomeConfig());
   if (seeding)
     for (const fs::path& root : LuaRoots())
-      if (Exists(root / "pp" / "config.lua")) seeding = false;
+      if (Exists(root / "etc" / "config.lua")) seeding = false;
   out->path = Resolve(requested, error);
   if (out->path.empty()) return false;
   out->generated = seeding;

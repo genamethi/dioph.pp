@@ -28,7 +28,7 @@ NOTCURSES_LDLIBS ?= $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --l
 NOTCURSES_CPPFLAGS ?= $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --cflags notcurses-core 2>/dev/null || PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --cflags notcurses 2>/dev/null)
 NOTCURSES_RPATH ?= -Wl,-rpath,$(PREFIX)/lib
 
-LUA_CPPFLAGS ?= -Ivendor/lua/src -I$(STAGE_PREFIX)/include -I$(PREFIX)/include
+LUA_CPPFLAGS ?= -I$(STAGE_PREFIX)/include -I$(PREFIX)/include
 LUA_LDLIBS ?= $(call pick_lib,liblua.a) -lm -ldl
 SOL2_CPPFLAGS ?= -Ivendor/sol2
 PP_LUA_OBJS = $(BUILD_DIR)/pp_lua_main.o $(BUILD_DIR)/lppinit.o $(BUILD_DIR)/lppconv.o \
@@ -121,7 +121,7 @@ REAL_HOME := $(if $(SUDO_USER),$(shell getent passwd $(SUDO_USER) | cut -d: -f6)
 AS_REAL_USER := $(if $(SUDO_USER),sudo -u $(SUDO_USER))
 
 PP_INSTALL_PATH ?= $(REAL_HOME)/.local/bin
-PP_LUA_PATH ?= $(abspath $(PP_INSTALL_PATH)/../share/pp/lua)
+PP_LUA_PATH ?= $(abspath $(PP_INSTALL_PATH)/../share/pp)
 
 CATALOGD_UNIT_NAME := primeparts-catalogd.service
 SYSTEMD_USER_DIR := $(REAL_HOME)/.local/share/systemd/user
@@ -147,14 +147,14 @@ install-deps:
 	fi
 
 install: install-deps all $(EXAMPLE_CONFIG_LUA)
-	$(AS_REAL_USER) mkdir -p "$(PP_INSTALL_PATH)" "$(PP_LUA_PATH)/pp" "$(PP_LUA_PATH)/etc"
+	$(AS_REAL_USER) mkdir -p "$(PP_INSTALL_PATH)" "$(PP_LUA_PATH)/etc" "$(PP_LUA_PATH)/libs"
 	$(AS_REAL_USER) cp $(INSTALL_BINS) "$(PP_INSTALL_PATH)/"
 	$(AS_REAL_USER) cp -r $(LUA_RUN_DIR)/rocks "$(PP_LUA_PATH)/"
 	$(AS_REAL_USER) cp $(LUAROCKS_PRESET) "$(PP_LUA_PATH)/etc/luarocks.preset.lua"
 	$(AS_REAL_USER) cp $(LUA_RUN_DIR)/etc/luarocks.lua "$(PP_LUA_PATH)/etc/luarocks.lua"
-	@if [ ! -f "$(PP_LUA_PATH)/pp/config.lua" ]; then \
-	  $(AS_REAL_USER) cp $(EXAMPLE_CONFIG_LUA) "$(PP_LUA_PATH)/pp/config.lua"; \
-	  echo "seeded $(PP_LUA_PATH)/pp/config.lua"; \
+	@if [ ! -f "$(PP_LUA_PATH)/etc/config.lua" ]; then \
+	  $(AS_REAL_USER) cp $(EXAMPLE_CONFIG_LUA) "$(PP_LUA_PATH)/etc/config.lua"; \
+	  echo "seeded $(PP_LUA_PATH)/etc/config.lua"; \
 	fi
 	@echo "installed $(words $(INSTALL_BINS)) binaries to $(PP_INSTALL_PATH) as $(REAL_USER)"
 
