@@ -28,7 +28,8 @@ NOTCURSES_LDLIBS ?= $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --l
 NOTCURSES_CPPFLAGS ?= $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --cflags notcurses-core 2>/dev/null || PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --cflags notcurses 2>/dev/null)
 NOTCURSES_RPATH ?= -Wl,-rpath,$(PREFIX)/lib
 
-LUA_CPPFLAGS ?= -I$(STAGE_PREFIX)/include -I$(PREFIX)/include
+LUA_VERSION ?= 5.5
+LUA_CPPFLAGS ?= -I$(STAGE_PREFIX)/include/lua/$(LUA_VERSION) -I$(STAGE_PREFIX)/include -I$(PREFIX)/include
 LUA_LDLIBS ?= $(call pick_lib,liblua.a) -lm -ldl
 SOL2_CPPFLAGS ?= -Ivendor/sol2
 PP_LUA_OBJS = $(BUILD_DIR)/pp_lua_main.o $(BUILD_DIR)/lppinit.o $(BUILD_DIR)/lppconv.o \

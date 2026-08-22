@@ -115,7 +115,7 @@ LocalCatalog MakeLocalCatalogWithStore(const fs::path& warehouse,
   std::shared_ptr<iceberg::sql::CatalogStore> store = store_r.value();
   iceberg::sql::SqlCatalogConfig cfg;
   cfg.name = kCatalogName;
-  cfg.warehouse_location = warehouse.string();
+  cfg.warehouse_location = fs::absolute(warehouse).lexically_normal().string();
   auto cat_r = iceberg::sql::SqlCatalog::Make(cfg, LocalIO(), store);
   if (!cat_r.has_value()) {
     if (error) *error = "SqlCatalog::Make: " + cat_r.error().message;
@@ -359,7 +359,8 @@ std::shared_ptr<iceberg::Table> EnsureTable(
     return nullptr;
   }
 
-  const fs::path table_dir = NamespaceDir(warehouse, ns) / table_name;
+  const fs::path table_dir =
+      fs::absolute(NamespaceDir(warehouse, ns) / table_name).lexically_normal();
   std::error_code ec;
   fs::create_directories(table_dir / "metadata", ec);
   std::unordered_map<std::string, std::string> properties{
@@ -382,7 +383,10 @@ bool MoveStagedFilesInto(
     const std::vector<std::shared_ptr<iceberg::DataFile>>& files,
     std::string* error) {
   const fs::path data_dir =
-      fs::path(common::StripFileScheme(std::string(table->location()))) / "data";
+      fs::absolute(fs::path(common::StripFileScheme(std::string(
+                       table->location()))) /
+                   "data")
+          .lexically_normal();
   const fs::path staging_root = StagingDataDir(warehouse, ns, table_name);
   for (const auto& f : files) {
     const fs::path src = common::StripFileScheme(f->file_path);

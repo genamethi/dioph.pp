@@ -7,6 +7,7 @@ BUILD=$2
 STAGE_PREFIX=$3
 PP_LUA_PATH=$4
 LUA_RELEASE="${LUA_RELEASE:-5.5.1}"
+LUA_VERSION="${LUA_VERSION:-${LUA_RELEASE%.*}}"
 JOBS="${JOBS:-$(nproc 2>/dev/null || echo 4)}"
 
 SRC="$VENDOR/lua"
@@ -27,7 +28,7 @@ fi
 mkdir -p "$BUILD"
 sed "s|@PP_LUA_PATH@|$PP_LUA_PATH|g" "$PATCH_IN" >"$PATCH"
 
-token="lua-$LUA_RELEASE $(sha256sum <"$PATCH" | cut -d' ' -f1)"
+token="lua-$LUA_RELEASE $(cat "$PATCH" "${BASH_SOURCE[0]}" | sha256sum | cut -d' ' -f1)"
 if [ "$(cat "$STAMP" 2>/dev/null || true)" = "$token" ]; then
   echo "lua $LUA_RELEASE staged in $STAGE_PREFIX"
   exit 0
@@ -41,6 +42,11 @@ patch -d "$WORK" -p1 <"$PATCH"
 make -C "$WORK" -j"$JOBS" all
 make -C "$WORK" test
 make -C "$WORK" install INSTALL_TOP="$STAGE_PREFIX"
+
+INC="$STAGE_PREFIX/include/lua/$LUA_VERSION"
+rm -rf "$INC"
+install -d "$INC"
+install -m 644 "$WORK"/src/*.h "$INC/"
 
 mkdir -p "$(dirname "$STAMP")"
 echo "$token" >"$STAMP"

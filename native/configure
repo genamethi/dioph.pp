@@ -233,7 +233,7 @@ fi
 LUA_RELEASE=5.5.1
 LUA_VERSION=5.5
 
-LUA_RELEASE="$LUA_RELEASE" JOBS="$JOBS" \
+LUA_RELEASE="$LUA_RELEASE" LUA_VERSION="$LUA_VERSION" JOBS="$JOBS" \
   "$REPO/scripts/lua-stage.sh" "$VENDOR" "$ROOT/build" "$STAGE$PREFIX" "$PP_LUA_PATH"
 
 LUA_BASE="$STAGE$PREFIX"
@@ -437,6 +437,7 @@ fi
   echo "PREFIX := $PREFIX"
   echo "STAGE := $STAGE"
   echo "PP_LUA_PATH := $PP_LUA_PATH"
+  echo "LUA_VERSION := $LUA_VERSION"
   [ -n "$FALLBACK" ] && echo "ICEBERG_FALLBACK_CPPFLAGS := -I$ICEBERG_SRC"
   [ -n "$SANITIZE" ] && echo "SANITIZE := -fsanitize=address,undefined -fno-omit-frame-pointer"
   [ -n "$VENDOR_LTO" ] || echo "LTOFLAGS :="
