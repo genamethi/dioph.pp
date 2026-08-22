@@ -10,8 +10,10 @@
 #include <vector>
 
 #include "primeparts/query/query_preset.h"
+#include "primeparts/scan/row_filter.h"
 
 namespace iceberg {
+
 struct Namespace;
 }
 
@@ -29,6 +31,31 @@ struct PartitionTuple {
   int32_t m_k = 0;
   int32_t n_k = 0;
   int64_t q_k = 0;
+};
+
+struct PartitionRow {
+  int64_t p = 0;
+  int32_t m_k = 0;
+  int32_t n_k = 0;
+  int64_t q_k = 0;
+};
+
+inline constexpr int64_t kPartitionMinP = 3;
+inline constexpr int64_t kPartitionMinQ = 3;
+inline constexpr int64_t kPartitionMinM = 1;
+inline constexpr int64_t kPartitionMinN = 1;
+
+struct PartitionQuery {
+  scan::Interval p{.lo = kPartitionMinP};
+  scan::Interval q{.lo = kPartitionMinQ};
+  scan::Interval m{.lo = kPartitionMinM};
+  scan::Interval n{.lo = kPartitionMinN};
+
+  bool Validate(std::string* error) const;
+
+  bool ConstrainsParts() const;
+
+  scan::RowFilter Filter() const;
 };
 
 struct ScanHit {
@@ -102,6 +129,14 @@ class QueryService {
   std::vector<PartitionTuple> LookupPartitions(int64_t p, int32_t k,
                                                std::string* error,
                                                const ScanControl& ctl = {});
+  std::vector<PartitionTuple> LookupPartitions(int64_t p, int32_t k,
+                                               const PartitionQuery& constraints,
+                                               std::string* error,
+                                               const ScanControl& ctl = {});
+
+  std::vector<PartitionRow> ScanPartitions(const PartitionQuery& query,
+                                           int64_t limit, std::string* error,
+                                           const ScanControl& ctl = {});
 
   std::vector<ScanHit> ScanByK(int32_t k, int64_t p_lo, int64_t p_hi,
                                int64_t limit, std::string* error,
@@ -132,6 +167,16 @@ class QueryService {
                      std::string* error, const ScanControl& ctl = {});
 
  private:
+  struct PartitionCount {
+    int64_t flat_rows = 0;
+    int64_t higher_rows = 0;
+    int64_t trusted_total = -1;
+  };
+
+  bool ScanPartitionRows(const scan::RowFilter& filter, int64_t limit,
+                         std::vector<PartitionRow>* out, PartitionCount* count,
+                         std::string* error, const ScanControl& ctl);
+
   struct Impl;
   std::unique_ptr<Impl> impl_;
   explicit QueryService(std::unique_ptr<Impl> impl);

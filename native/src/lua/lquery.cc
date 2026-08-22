@@ -1,7 +1,9 @@
 #include "primeparts/lua/lquery.h"
 
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <sol/sol.hpp>
@@ -15,12 +17,22 @@ using primeparts::lua::BoolOr;
 using primeparts::lua::Check;
 using primeparts::lua::IntOr;
 using primeparts::lua::OptInt;
+using primeparts::lua::OptInterval;
 using primeparts::lua::ReqInt;
 using primeparts::lua::ReqStr;
 using primeparts::lua::RequireCatalog;
 using primeparts::lua::Spec;
 using primeparts::lua::StrArray;
 using primeparts::lua::StrOr;
+
+constexpr int64_t kDefaultLimit = 1000000;
+
+void Pin(const sol::table& spec, const char* key, primeparts::scan::Interval* range) {
+  if (const std::optional<int64_t> v = OptInt(spec, key)) {
+    range->lo = *v;
+    range->hi = *v;
+  }
+}
 
 int64_t Bits(int64_t p) {
   return static_cast<int64_t>(
@@ -45,11 +57,12 @@ sol::table Pget(sol::this_state ts, sol::optional<sol::table> arg) {
   sol::table out = lua.create_table();
   if (!info) return out;
 
-  const std::optional<int64_t> q_k = OptInt(spec, "q_k");
-  const std::optional<int64_t> m_k = OptInt(spec, "m_k");
-  const std::optional<int64_t> n_k = OptInt(spec, "n_k");
+  primeparts::query::PartitionQuery constraints;
+  Pin(spec, "q_k", &constraints.q);
+  Pin(spec, "m_k", &constraints.m);
+  Pin(spec, "n_k", &constraints.n);
   const std::vector<primeparts::query::PartitionTuple> parts =
-      qs.LookupPartitions(p, info->k, &error);
+      qs.LookupPartitions(p, info->k, constraints, &error);
   Check(error, kFn);
 
   out["p"] = info->p;
@@ -58,9 +71,6 @@ sol::table Pget(sol::this_state ts, sol::optional<sol::table> arg) {
   sol::table rows = lua.create_table();
   int idx = 1;
   for (const primeparts::query::PartitionTuple& t : parts) {
-    if (q_k && t.q_k != *q_k) continue;
-    if (m_k && t.m_k != *m_k) continue;
-    if (n_k && t.n_k != *n_k) continue;
     sol::table row = lua.create_table(0, 3);
     row["m"] = t.m_k;
     row["n"] = t.n_k;
@@ -71,6 +81,48 @@ sol::table Pget(sol::this_state ts, sol::optional<sol::table> arg) {
   return out;
 }
 
+void ReadInterval(const sol::table& spec, const char* key,
+                  primeparts::scan::Interval* range, const char* fn) {
+  if (const std::optional<std::pair<int64_t, int64_t>> iv =
+          OptInterval(spec, key, fn)) {
+    range->lo = iv->first;
+    range->hi = iv->second;
+  }
+}
+
+sol::table Partition(sol::this_state ts, sol::optional<sol::table> arg) {
+  static const char kFn[] = "query.partition";
+  sol::state_view lua(ts);
+  const sol::table spec = Spec(ts, arg);
+  primeparts::query::QueryService& qs = RequireCatalog(kFn);
+
+  primeparts::query::PartitionQuery q;
+  ReadInterval(spec, "p", &q.p, kFn);
+  ReadInterval(spec, "q", &q.q, kFn);
+  ReadInterval(spec, "m", &q.m, kFn);
+  ReadInterval(spec, "n", &q.n, kFn);
+
+  int64_t limit = IntOr(spec, "limit", kDefaultLimit);
+  if (limit <= 0) limit = kDefaultLimit;
+
+  std::string error;
+  const std::vector<primeparts::query::PartitionRow> rows =
+      qs.ScanPartitions(q, limit, &error);
+  Check(error, kFn);
+
+  sol::table out = lua.create_table(static_cast<int>(rows.size()), 0);
+  int idx = 1;
+  for (const primeparts::query::PartitionRow& r : rows) {
+    sol::table row = lua.create_table(0, 4);
+    row["p"] = r.p;
+    row["m"] = r.m_k;
+    row["n"] = r.n_k;
+    row["q"] = r.q_k;
+    out[idx++] = row;
+  }
+  return out;
+}
+
 sol::table Kget(sol::this_state ts, sol::optional<sol::table> arg) {
   static const char kFn[] = "query.kget";
   sol::state_view lua(ts);
@@ -78,8 +130,8 @@ sol::table Kget(sol::this_state ts, sol::optional<sol::table> arg) {
   const int64_t k = ReqInt(spec, "k", kFn);
   primeparts::query::QueryService& qs = RequireCatalog(kFn);
 
-  int64_t limit = IntOr(spec, "limit", 10);
-  if (limit <= 0) limit = 10;
+  int64_t limit = IntOr(spec, "limit", kDefaultLimit);
+  if (limit <= 0) limit = kDefaultLimit;
 
   std::string error;
   const std::vector<primeparts::query::ScanHit> hits = qs.ScanByK(
@@ -226,6 +278,7 @@ extern "C" int luaopen_query(lua_State *L) {
   sol::table query = lua.create_table();
   query.set_function("pget", &Pget);
   query.set_function("kget", &Kget);
+  query.set_function("partition", &Partition);
   query.set_function("hist", &Hist);
   query.set_function("materialize", &Materialize);
   query.set_function("read", &Read);

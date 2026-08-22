@@ -4,6 +4,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <sol/sol.hpp>
@@ -11,6 +12,7 @@
 #include "primeparts/config.h"
 
 namespace primeparts::query {
+
 class QueryService;
 }
 
@@ -45,6 +47,10 @@ std::string StrOr(const sol::table& t, const char* key, std::string dflt);
 int64_t ReqInt(const sol::table& t, const char* key, const char* fn);
 std::string ReqStr(const sol::table& t, const char* key, const char* fn);
 std::vector<std::string> StrArray(const sol::table& t, const char* key);
+
+std::optional<std::pair<int64_t, int64_t>> OptInterval(const sol::table& t,
+                                                       const char* key,
+                                                       const char* fn);
 
 [[noreturn]] void Fail(const char* fn, const std::string& msg);
 [[noreturn]] void Unimplemented(const char* fn, const std::string& needs);

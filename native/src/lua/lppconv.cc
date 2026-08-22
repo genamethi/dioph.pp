@@ -6,6 +6,7 @@
 #include "primeparts/query/query_service.h"
 
 namespace primeparts::lua {
+
 namespace {
 
 Connection g_conn;
@@ -84,6 +85,24 @@ std::vector<std::string> StrArray(const sol::table& t, const char* key) {
     if (sol::optional<std::string> s = (*arr)[i]) out.push_back(*s);
   }
   return out;
+}
+
+std::optional<std::pair<int64_t, int64_t>> OptInterval(const sol::table& t,
+                                                       const char* key,
+                                                       const char* fn) {
+  const auto shape = [&]() {
+    Fail(fn, std::string(key) + " must be an interval, {lo, hi}");
+  };
+  sol::optional<sol::table> iv = t[key];
+  if (!iv) {
+    if (t[key].valid()) shape();
+    return std::nullopt;
+  }
+  if (iv->size() != 2) shape();
+  sol::optional<int64_t> lo = (*iv)[1];
+  sol::optional<int64_t> hi = (*iv)[2];
+  if (!lo || !hi) shape();
+  return std::pair<int64_t, int64_t>{*lo, *hi};
 }
 
 void Fail(const char* fn, const std::string& msg) {

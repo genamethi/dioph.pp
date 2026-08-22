@@ -83,7 +83,8 @@ HIGHER_SWEEP_OBJ := $(BUILD_DIR)/higher_sweep.o
 SOURCE_SCAN_OBJ := $(BUILD_DIR)/source_scan.o
 TABLE_TRAITS_OBJ := $(BUILD_DIR)/table_traits.o
 SCAN_PLANNER_OBJ := $(BUILD_DIR)/scan_planner.o
-SCAN_OBJS := $(TABLE_TRAITS_OBJ) $(SCAN_PLANNER_OBJ)
+ROW_FILTER_OBJ := $(BUILD_DIR)/row_filter.o
+SCAN_OBJS := $(TABLE_TRAITS_OBJ) $(SCAN_PLANNER_OBJ) $(ROW_FILTER_OBJ)
 PP_ICEBERG_REST_OBJ := $(BUILD_DIR)/pp_iceberg_rest.o
 PP_LMDB_STORE_OBJ := $(BUILD_DIR)/pp_lmdb_store.o
 LMDB_LIB := $(BUILD_DIR)/liblmdb.a
@@ -225,7 +226,7 @@ $(HIGHER_SWEEP_OBJ): src/higher_sweep.c include/primeparts/higher_sweep.h includ
 $(SOURCE_SCAN_OBJ): src/source_scan.cc include/primeparts/source_scan.h include/primeparts/scan/scan_planner.h include/primeparts/scan/scan_plan.h include/primeparts/scan/column_binder.h include/primeparts/common/arrow_init.h include/primeparts/common/uri.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/query_service.o: src/query/query_service.cc include/primeparts/partition_math.h include/primeparts/query/query_service.h include/primeparts/source_scan.h include/primeparts/catalog/pp_iceberg_rest.h | $(BUILD_DIR)
+$(BUILD_DIR)/query_service.o: src/query/query_service.cc include/primeparts/partition_math.h include/primeparts/query/query_service.h include/primeparts/scan/row_filter.h include/primeparts/scan/column_binder.h include/primeparts/source_scan.h include/primeparts/catalog/pp_iceberg_rest.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 TUI_APP_HDR := include/primeparts/tui/tui_app.h include/primeparts/query/query_service.h include/primeparts/tui/lua_presets.h include/primeparts/config.h
@@ -252,7 +253,7 @@ $(BUILD_DIR)/lppinit.o: src/lua/lppinit.cc include/primeparts/lua/lppinit.h incl
 	$(CXX) $(CPPFLAGS) $(LUA_CPPFLAGS) $(SOL2_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/lppconv.o: src/lua/lppconv.cc include/primeparts/lua/lppconv.h include/primeparts/query/query_service.h include/primeparts/config.h | $(BUILD_DIR)
-	$(CXX) $(CPPFLAGS) $(LUA_CPPFLAGS) $(SOL2_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+	$(CXX) $(CPPFLAGS) $(LUA_CPPFLAGS) $(SOL2_CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/lconf.o: src/lua/lconf.cc include/primeparts/lua/lconf.h include/primeparts/lua/lppconv.h include/primeparts/config.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(LUA_CPPFLAGS) $(SOL2_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
@@ -260,8 +261,8 @@ $(BUILD_DIR)/lconf.o: src/lua/lconf.cc include/primeparts/lua/lconf.h include/pr
 $(BUILD_DIR)/lnt.o: src/lua/lnt.cc include/primeparts/lua/lnt.h include/primeparts/lua/lppconv.h include/primeparts/core.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(LUA_CPPFLAGS) $(SOL2_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/lquery.o: src/lua/lquery.cc include/primeparts/lua/lquery.h include/primeparts/lua/lppconv.h include/primeparts/query/query_service.h | $(BUILD_DIR)
-	$(CXX) $(CPPFLAGS) $(LUA_CPPFLAGS) $(SOL2_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+$(BUILD_DIR)/lquery.o: src/lua/lquery.cc include/primeparts/lua/lquery.h include/primeparts/lua/lppconv.h include/primeparts/query/query_service.h include/primeparts/scan/row_filter.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(LUA_CPPFLAGS) $(SOL2_CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/lrestclient.o: src/lua/lrestclient.cc include/primeparts/lua/lrestclient.h include/primeparts/lua/lppconv.h include/primeparts/query/query_service.h include/primeparts/catalog/pp_iceberg_rest.h include/primeparts/config.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(LUA_CPPFLAGS) $(SOL2_CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
@@ -326,6 +327,9 @@ $(PP_CATALOGD_MAIN_OBJ): src/catalog/pp_catalogd_main.cc include/primeparts/cata
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(TABLE_TRAITS_OBJ): src/scan/table_traits.cc include/primeparts/scan/table_traits.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(ROW_FILTER_OBJ): src/scan/row_filter.cc include/primeparts/scan/row_filter.h include/primeparts/scan/column_binder.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(SCAN_PLANNER_OBJ): src/scan/scan_planner.cc include/primeparts/scan/scan_planner.h include/primeparts/scan/scan_plan.h include/primeparts/scan/table_traits.h | $(BUILD_DIR)

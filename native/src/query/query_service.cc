@@ -40,35 +40,12 @@ namespace primeparts::query {
 
 namespace {
 
-struct WidenedColumn {
-  const int64_t* i64 = nullptr;
-  const int32_t* i32 = nullptr;
+using scan::WidenedColumn;
 
-  int64_t Value(int64_t row) const { return i64 ? i64[row] : i32[row]; }
-
-  static bool Bind(const arrow::RecordBatch& batch, const std::string& name,
-                   WidenedColumn* out, std::string* error) {
-    *out = WidenedColumn{};
-    auto col = batch.GetColumnByName(name);
-    if (!col) {
-      if (error) *error = "column not in batch: " + name;
-      return false;
-    }
-    if (col->type_id() == arrow::Type::INT64) {
-      out->i64 = scan::BindInt64(batch, name, error);
-      return out->i64 != nullptr;
-    }
-    if (col->type_id() == arrow::Type::INT32) {
-      out->i32 = scan::BindInt32(batch, name, error);
-      return out->i32 != nullptr;
-    }
-    if (error) {
-      *error = "column " + name + " is not an integer type: " +
-               col->type()->ToString();
-    }
-    return false;
-  }
-};
+const std::vector<std::string>& PartitionValueNames() {
+  static const std::vector<std::string> names = {"p", "m_k", "n_k", "q_k"};
+  return names;
+}
 
 bool RequireSorted(const primeparts::SourceTableReader& reader,
                    const std::string& table, const char* what,
@@ -92,6 +69,25 @@ struct QueryService::Impl {
   iceberg::Namespace ns;
   std::vector<std::string> schema_fields;
   bool schema_loaded = false;
+
+  bool Resolve(const std::string& table, fs::path* meta,
+               std::shared_ptr<iceberg::Schema>* schema, std::string* error) {
+    auto t = catalog->LoadTable(iceberg::TableIdentifier{.ns = ns, .name = table});
+    if (!t.has_value()) {
+      if (error) *error = "LoadTable(" + table + "): " + t.error().message;
+      return false;
+    }
+    if (schema) {
+      auto sch = t.value()->schema();
+      if (!sch.has_value()) {
+        if (error) *error = "schema(" + table + "): " + sch.error().message;
+        return false;
+      }
+      *schema = sch.value();
+    }
+    if (meta) *meta = fs::path(std::string(t.value()->metadata_file_location()));
+    return true;
+  }
 
   fs::path ResolveMeta(const std::string& table, std::string* error) {
     auto t = catalog->LoadTable(iceberg::TableIdentifier{.ns = ns, .name = table});
@@ -168,94 +164,237 @@ std::vector<PartitionTuple> QueryService::LookupPartitions(
 
 std::vector<PartitionTuple> QueryService::LookupPartitions(
     int64_t p, int32_t k, std::string* error, const ScanControl& ctl) {
+  return LookupPartitions(p, k, PartitionQuery{}, error, ctl);
+}
+
+std::vector<PartitionTuple> QueryService::LookupPartitions(
+    int64_t p, int32_t k, const PartitionQuery& constraints, std::string* error,
+    const ScanControl& ctl) {
   std::vector<PartitionTuple> out;
-  auto filter = iceberg::Expressions::Equal("p", iceberg::Literal::Long(p));
+  if (!constraints.Validate(error)) return out;
+
+  scan::RowFilter filter = constraints.Filter();
+  filter.Require("p", scan::Interval{.lo = p, .hi = p});
+  if (filter.Unsatisfiable()) return out;
+
+  std::vector<PartitionRow> rows;
+  PartitionCount count;
+  count.trusted_total = k;
+  const bool counting = !constraints.ConstrainsParts();
+  if (!ScanPartitionRows(filter, 0, &rows, counting ? &count : nullptr, error,
+                         ctl)) {
+    return {};
+  }
+
+  if (counting && k >= 0) {
+    const int64_t expected = k - count.flat_rows;
+    if (expected != count.higher_rows) {
+      if (error) {
+        *error = "parts: p=" + std::to_string(p) + " k=" + std::to_string(k) +
+                 " implies " + std::to_string(expected) +
+                 " higher_parts rows but found " +
+                 std::to_string(count.higher_rows);
+      }
+      return {};
+    }
+  }
+
+  out.reserve(rows.size());
+  for (const PartitionRow& r : rows) {
+    out.push_back(
+        PartitionTuple{.m_k = r.m_k, .n_k = r.n_k, .q_k = r.q_k});
+  }
+  std::sort(out.begin(), out.end(),
+            [](const PartitionTuple& a, const PartitionTuple& b) {
+              return a.m_k < b.m_k;
+            });
+  return out;
+}
+
+bool PartitionQuery::Validate(std::string* error) const {
+  const struct {
+    const char* name;
+    const scan::Interval& range;
+    int64_t min;
+  } bounds[] = {{"p", p, kPartitionMinP},
+                {"q", q, kPartitionMinQ},
+                {"m", m, kPartitionMinM},
+                {"n", n, kPartitionMinN}};
+  for (const auto& b : bounds) {
+    if (b.range.Empty()) {
+      if (error) {
+        *error = std::string("partition query: ") + b.name + " interval {" +
+                 std::to_string(b.range.lo) + ", " + std::to_string(b.range.hi) +
+                 "} runs backwards";
+      }
+      return false;
+    }
+    if (b.range.lo < b.min) {
+      if (error) {
+        *error = std::string("partition query: ") + b.name + " starts at " +
+                 std::to_string(b.range.lo) + " but the smallest " + b.name +
+                 " a partition can have is " + std::to_string(b.min);
+      }
+      return false;
+    }
+  }
+  return true;
+}
+
+bool PartitionQuery::ConstrainsParts() const {
+  const PartitionQuery all;
+  return m.lo != all.m.lo || m.hi != all.m.hi || n.lo != all.n.lo ||
+         n.hi != all.n.hi || q.lo != all.q.lo || q.hi != all.q.hi;
+}
+
+scan::RowFilter PartitionQuery::Filter() const {
+  scan::RowFilter filter;
+  filter.Require("p", p);
+  filter.Require("m_k", m);
+  filter.Require("n_k", n);
+  filter.Require("q_k", q);
+  return filter;
+}
+
+bool QueryService::ScanPartitionRows(const scan::RowFilter& filter,
+                                     int64_t limit,
+                                     std::vector<PartitionRow>* out,
+                                     PartitionCount* count,
+                                     std::string* error,
+                                     const ScanControl& ctl) {
+  const int64_t trusted_total = count ? count->trusted_total : -1;
+  if (count) *count = PartitionCount{.trusted_total = trusted_total};
+  const scan::Interval* n_range = filter.Find("n_k");
+  const bool scan_flat =
+      count != nullptr || n_range == nullptr || n_range->Contains(1);
+  bool scan_higher =
+      count != nullptr || n_range == nullptr || n_range->hi >= 2;
+  const auto room = [&]() {
+    return limit <= 0 || static_cast<int64_t>(out->size()) < limit;
+  };
+  const auto fail = [&](const std::string& msg) {
+    if (error) *error = msg;
+    return false;
+  };
+
+  scan::RowFilter p_only;
+  if (const scan::Interval* p_range = filter.Find("p")) {
+    p_only.Require("p", *p_range);
+  }
+
   std::string e;
 
-  uint64_t mask = 0;
-  {
-    fs::path meta = impl_->ResolveMeta("flat_parts", error);
-    if (meta.empty()) return out;
-    auto reader = primeparts::SourceTableReader::OpenMetadata(
-        meta, {"p", "hit_mask"}, filter, &e);
-    if (!reader) {
-      if (error) *error = "open flat_parts: " + e;
-      return out;
+  if (scan_flat && room()) {
+    fs::path meta;
+    std::shared_ptr<iceberg::Schema> schema;
+    if (!impl_->Resolve("flat_parts", &meta, &schema, error)) return false;
+    std::shared_ptr<iceberg::Expression> expr;
+    if (!p_only.Pushdown(*schema, &expr, &e)) return fail("flat_parts: " + e);
+
+    scan::ValueRowFilter keep;
+    if (!keep.Bind(filter, PartitionValueNames(), &e)) {
+      return fail("flat_parts: " + e);
     }
+
+    auto reader = primeparts::SourceTableReader::OpenMetadata(
+        meta, {"p", "hit_mask"}, expr, &e);
+    if (!reader) return fail("open flat_parts: " + e);
+    if (!RequireSorted(*reader, "flat_parts", "a partition scan", error)) {
+      return false;
+    }
+    const int64_t total = reader->planned_records();
+
+    int64_t scanned = 0;
+    scan::BoundRowFilter in_range;
     std::shared_ptr<arrow::RecordBatch> batch;
-    while (true) {
-      if (ctl.cancel && ctl.cancel->load()) return out;
-      if (!reader->Next(&batch, &e)) {
-        if (error) *error = "scan flat_parts: " + e;
-        return out;
-      }
+    while (room()) {
+      if (ctl.cancel && ctl.cancel->load()) return true;
+      if (!reader->Next(&batch, &e)) return fail("scan flat_parts: " + e);
       if (!batch) break;
       const int64_t* pa = scan::BindInt64(*batch, "p", &e);
       const int64_t* ha = scan::BindInt64(*batch, "hit_mask", &e);
-      if (!pa || !ha) {
-        if (error) *error = "flat_parts batch: " + e;
-        return out;
+      if (!pa || !ha || !in_range.Bind(p_only, *batch, &e)) {
+        return fail("flat_parts batch: " + e);
       }
-      for (int64_t i = 0; i < batch->num_rows(); ++i) {
-        if (pa[i] == p) mask = static_cast<uint64_t>(ha[i]);
+      for (int64_t i = 0; i < batch->num_rows() && room(); ++i) {
+        if (!in_range.Test(i)) continue;
+        const int64_t p = pa[i];
+        const uint64_t mask = static_cast<uint64_t>(ha[i]);
+        if (count) count->flat_rows += MaskCount(mask);
+        ForEachPart(p, mask, [&](int32_t m, int64_t q) {
+          if (!room()) return;
+          const int64_t values[] = {p, m, 1, q};
+          if (!keep.Test(values)) return;
+          out->push_back(PartitionRow{.p = p, .m_k = m, .n_k = 1, .q_k = q});
+        });
       }
+      scanned += batch->num_rows();
+      if (ctl.progress) ctl.progress(scanned, total);
+    }
+
+    if (trusted_total >= 0 && trusted_total - count->flat_rows == 0) {
+      scan_higher = false;
     }
   }
-  ForEachPart(p, mask, [&](int32_t m, int64_t q) {
-    out.push_back(PartitionTuple{.m_k = m, .n_k = 1, .q_k = q});
-  });
 
-  const int32_t expected = k >= 0 ? k - MaskCount(mask) : -1;
-  if (expected == 0) return out;
+  if (scan_higher && room()) {
+    fs::path meta;
+    std::shared_ptr<iceberg::Schema> schema;
+    if (!impl_->Resolve("higher_parts", &meta, &schema, error)) return false;
+    const scan::RowFilter& prune = count ? p_only : filter;
+    std::shared_ptr<iceberg::Expression> expr;
+    if (!prune.Pushdown(*schema, &expr, &e)) return fail("higher_parts: " + e);
 
-  const size_t flat_rows = out.size();
-  {
-    fs::path meta = impl_->ResolveMeta("higher_parts", error);
-    if (meta.empty()) return out;
     auto reader = primeparts::SourceTableReader::OpenMetadata(
-        meta, {"p", "m_k", "n_k", "q_k"}, filter, &e);
-    if (!reader) {
-      if (error) *error = "open higher_parts: " + e;
-      return out;
+        meta, {"p", "m_k", "n_k", "q_k"}, expr, &e);
+    if (!reader) return fail("open higher_parts: " + e);
+    if (!RequireSorted(*reader, "higher_parts", "a partition scan", error)) {
+      return false;
     }
+    const int64_t total = reader->planned_records();
+
+    int64_t scanned = 0;
+    scan::BoundRowFilter in_range;
+    scan::BoundRowFilter keep;
     std::shared_ptr<arrow::RecordBatch> batch;
-    while (true) {
-      if (ctl.cancel && ctl.cancel->load()) return out;
-      if (!reader->Next(&batch, &e)) {
-        if (error) *error = "scan higher_parts: " + e;
-        return out;
-      }
+    while (room()) {
+      if (ctl.cancel && ctl.cancel->load()) return true;
+      if (!reader->Next(&batch, &e)) return fail("scan higher_parts: " + e);
       if (!batch) break;
       const int64_t* pa = scan::BindInt64(*batch, "p", &e);
       const int32_t* ma = scan::BindInt32(*batch, "m_k", &e);
       const int32_t* na = scan::BindInt32(*batch, "n_k", &e);
       const int64_t* qa = scan::BindInt64(*batch, "q_k", &e);
-      if (!pa || !ma || !na || !qa) {
-        if (error) *error = "higher_parts batch: " + e;
-        return out;
+      if (!pa || !ma || !na || !qa || !in_range.Bind(p_only, *batch, &e) ||
+          !keep.Bind(filter, *batch, &e)) {
+        return fail("higher_parts batch: " + e);
       }
-      for (int64_t i = 0; i < batch->num_rows(); ++i) {
-        if (pa[i] != p) continue;
-        out.push_back(PartitionTuple{.m_k = ma[i], .n_k = na[i], .q_k = qa[i]});
+      for (int64_t i = 0; i < batch->num_rows() && room(); ++i) {
+        if (!in_range.Test(i)) continue;
+        if (count) ++count->higher_rows;
+        if (!keep.Test(i)) continue;
+        out->push_back(PartitionRow{
+            .p = pa[i], .m_k = ma[i], .n_k = na[i], .q_k = qa[i]});
       }
+      scanned += batch->num_rows();
+      if (ctl.progress) ctl.progress(scanned, total);
     }
   }
 
-  if (expected >= 0 &&
-      static_cast<size_t>(expected) != out.size() - flat_rows) {
-    if (error) {
-      *error = "parts: p=" + std::to_string(p) + " k=" + std::to_string(k) +
-               " implies " + std::to_string(expected) +
-               " higher_parts rows but found " +
-               std::to_string(out.size() - flat_rows);
-    }
-    return {};
-  }
+  return true;
+}
 
-  std::sort(out.begin(), out.end(),
-            [](const PartitionTuple& a, const PartitionTuple& b) {
-              return a.m_k < b.m_k;
-            });
+std::vector<PartitionRow> QueryService::ScanPartitions(
+    const PartitionQuery& query, int64_t limit, std::string* error,
+    const ScanControl& ctl) {
+  std::vector<PartitionRow> out;
+  if (!query.Validate(error)) return out;
+  if (limit <= 0) return out;
+
+  const scan::RowFilter filter = query.Filter();
+  if (filter.Unsatisfiable()) return out;
+
+  if (!ScanPartitionRows(filter, limit, &out, nullptr, error, ctl)) return {};
   return out;
 }
 
