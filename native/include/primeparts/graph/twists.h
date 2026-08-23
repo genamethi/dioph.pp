@@ -19,6 +19,10 @@ struct TwistRow {
 class TwistTable {
  public:
   static std::unique_ptr<TwistTable> Build(int64_t hi, std::string* error);
+  static std::unique_ptr<TwistTable> FromRows(std::vector<TwistRow> rows,
+                                              int64_t hi, std::string* error);
+
+  const char* Origin() const { return origin_; }
 
   int64_t Hi() const { return hi_; }
   std::size_t Count() const { return rows_.size(); }
@@ -30,8 +34,11 @@ class TwistTable {
 
  private:
   int64_t hi_ = 0;
+  const char* origin_ = "enumerated";
   std::vector<TwistRow> rows_;
   std::vector<TwistRow> by_q_;
+
+  void Index();
 };
 
 }  // namespace primeparts::graph

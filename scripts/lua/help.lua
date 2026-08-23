@@ -134,8 +134,13 @@ graph.forms{p: int, depth: int = 8, limit: int = 1000, sources: bool = false,
   -- 77 forms, degree to 10, every one exact.]],
   twists = [[
 graph.twists{hi: int} -> TwistTable
-  Every p = 2^m + q^n with n >= 2 and p < hi. These carry all the degree.
-  :hi() :count() :has(p) :at(p) :into(q) :rows(limit)]],
+graph.twists{rows: [{p, m, n, q}], hi: int = max p} -> TwistTable
+  Every p = 2^m + q^n with n >= 2. These carry all the degree; a chain's
+  degree is the product of n over its twist edges and nothing else.
+  hi enumerates directly; rows builds from a scan, so
+    graph.twists{rows = query.partition{p = {3, 1e6}, n = {2, 63}}}
+  reads higher_parts instead. Both agree row for row.
+  :hi() :origin() :count() :has(p) :at(p) :into(q) :rows(limit)]]
   sym = [[graph.sym(name: string) -> Expr]],
   int = [[graph.int(v: int) -> Expr]],
   pow2 = [[graph.pow2(m: int) -> Expr   2^m, held unexpanded]],

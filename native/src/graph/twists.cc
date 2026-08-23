@@ -50,18 +50,38 @@ std::unique_ptr<TwistTable> TwistTable::Build(int64_t hi, std::string* error) {
   }
   primesieve_free_iterator(&it);
 
-  std::sort(table->rows_.begin(), table->rows_.end(),
-            [](const TwistRow& a, const TwistRow& b) {
-              if (a.p != b.p) return a.p < b.p;
-              return a.m < b.m;
-            });
-  table->by_q_ = table->rows_;
-  std::sort(table->by_q_.begin(), table->by_q_.end(),
-            [](const TwistRow& a, const TwistRow& b) {
-              if (a.q != b.q) return a.q < b.q;
-              return a.p < b.p;
-            });
+  table->Index();
   return table;
+}
+
+std::unique_ptr<TwistTable> TwistTable::FromRows(std::vector<TwistRow> rows,
+                                                 int64_t hi,
+                                                 std::string* error) {
+  for (const TwistRow& r : rows) {
+    if (r.n < 2) {
+      *error = "row for p=" + std::to_string(r.p) + " has n=" +
+               std::to_string(r.n) + "; a twist needs n >= 2";
+      return nullptr;
+    }
+  }
+  auto table = std::unique_ptr<TwistTable>(new TwistTable());
+  table->hi_ = hi;
+  table->origin_ = "catalog";
+  table->rows_ = std::move(rows);
+  table->Index();
+  return table;
+}
+
+void TwistTable::Index() {
+  std::sort(rows_.begin(), rows_.end(), [](const TwistRow& a, const TwistRow& b) {
+    if (a.p != b.p) return a.p < b.p;
+    return a.m < b.m;
+  });
+  by_q_ = rows_;
+  std::sort(by_q_.begin(), by_q_.end(), [](const TwistRow& a, const TwistRow& b) {
+    if (a.q != b.q) return a.q < b.q;
+    return a.p < b.p;
+  });
 }
 
 bool TwistTable::Has(int64_t p) const {

@@ -289,8 +289,32 @@ std::shared_ptr<TwistTable> Twists(sol::this_state ts,
                                    sol::optional<sol::table> arg) {
   static const char kFn[] = "graph.twists";
   const sol::table spec = Spec(ts, arg);
-  const int64_t hi = ReqInt(spec, "hi", kFn);
   std::string error;
+
+  sol::optional<sol::table> rows = spec["rows"];
+  if (rows) {
+    std::vector<primeparts::graph::TwistRow> parsed;
+    int64_t hi = IntOr(spec, "hi", 0);
+    for (std::size_t i = 1; i <= rows->size(); ++i) {
+      sol::optional<sol::table> row = (*rows)[i];
+      if (!row) Fail(kFn, "rows[" + std::to_string(i) + "] is not a table");
+      const int64_t rp = (*row)["p"].get_or(int64_t{0});
+      const int64_t rn = (*row)["n"].get_or(int64_t{0});
+      if (rn < 2) continue;
+      parsed.push_back(primeparts::graph::TwistRow{
+          .p = rp,
+          .m = static_cast<int32_t>((*row)["m"].get_or(int64_t{0})),
+          .n = static_cast<int32_t>(rn),
+          .q = (*row)["q"].get_or(int64_t{0})});
+      if (rp > hi) hi = rp;
+    }
+    std::unique_ptr<TwistTable> table =
+        TwistTable::FromRows(std::move(parsed), hi, &error);
+    if (!table) Fail(kFn, error);
+    return std::shared_ptr<TwistTable>(table.release());
+  }
+
+  const int64_t hi = ReqInt(spec, "hi", kFn);
   std::unique_ptr<TwistTable> table = TwistTable::Build(hi, &error);
   if (!table) Fail(kFn, error);
   return std::shared_ptr<TwistTable>(table.release());
@@ -383,6 +407,7 @@ void BindTwists(sol::table& graph) {
   graph.new_usertype<TwistTable>(
       "TwistTable", sol::no_constructor,
       "hi", &TwistTable::Hi,
+      "origin", [](const TwistTable& self) { return std::string(self.Origin()); },
       "count", [](const TwistTable& self) {
         return static_cast<int64_t>(self.Count());
       },
