@@ -1,4 +1,5 @@
 #include "primeparts/core.h"
+#include "primeparts/pp_covering.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -407,66 +408,118 @@ static int power_of_three_exponent(uint64_t q, int32_t *exponent)
     return 0;
 }
 
+static int pp_cov_pow_exponent(unsigned qi, uint64_t q, int32_t *exponent)
+{
+    int bits = 64 - __builtin_clzll(q);
+    int n = pp_cov_pow_at_bits[qi][bits];
+
+    if (n > 0 && pp_cov_pow[qi][n] == q) {
+        *exponent = (int32_t)n;
+        return 1;
+    }
+    return 0;
+}
+
+static uint64_t pp_cov_tile(uint64_t word, unsigned field, uint64_t lim)
+{
+    uint64_t x = ((word >> (PP_COV_FIELD * field)) & PP_COV_FIELD_MASK) << 1;
+
+    x |= x << 12;
+    x |= x << 24;
+    x |= x << 48;
+    return x & lim;
+}
+
+#define PP_COV_POW_LOOP(qi)                                              \
+    do {                                                                 \
+        uint64_t bits_ = pp_cov_tile(word, (qi), lim);                   \
+        while (bits_ != 0) {                                             \
+            int m_ = __builtin_ctzll(bits_);                             \
+            uint64_t q_ = p - ((uint64_t)1 << m_);                       \
+            int32_t e_ = 0;                                              \
+                                                                         \
+            bits_ &= bits_ - 1;                                          \
+            if (q_ < 2) {                                                \
+                continue;                                                \
+            }                                                            \
+            if (pp_cov_pow_exponent((qi), q_, &e_)) {                    \
+                if (e_ == 1) {                                           \
+                    flat_mask |= (uint64_t)1 << m_;                      \
+                } else {                                                 \
+                    status = write_higher(result, p, (int32_t)m_, e_,    \
+                                          pp_cov_q[(qi)]);               \
+                    if (status != PP_OK) {                               \
+                        return status;                                   \
+                    }                                                    \
+                }                                                        \
+                k++;                                                     \
+            }                                                            \
+        }                                                                \
+    } while (0)
+
 static int process_prime(pp_batch_result *result, pp_higher_table *higher, uint64_t p)
 {
     int max_m;
-    int m;
     int status;
-    int killed_parity;
-    int has_higher;
     int32_t k = 0;
     uint64_t flat_mask = 0;
-    uint64_t power;
+    uint64_t word;
+    uint64_t lim;
+    uint64_t bits;
+    size_t hs;
+    size_t he;
 
     max_m = floor_log2_u64(p);
-    killed_parity = (p % 3 == 2);
-    power = 2;
+    word = pp_cov_masks[p % PP_COV_MOD];
+    lim = max_m >= 63 ? ~(uint64_t)0 : (((uint64_t)1 << (max_m + 1)) - 1);
+    lim &= ~(uint64_t)1;
+
     pp_higher_seek(higher, p);
-    has_higher = higher->cursor < higher->count
-        && (uint64_t)higher->hits[higher->cursor].p == p;
+    hs = higher->cursor;
+    he = hs;
+    while (he < higher->count && (uint64_t)higher->hits[he].p == p) {
+        he++;
+    }
 
-    for (m = 1; m <= max_m; m++) {
-        uint64_t q_candidate = p - power;
-        uint64_t base = 0;
-        int32_t exponent = 0;
+    PP_COV_POW_LOOP(0);
+    PP_COV_POW_LOOP(1);
+    PP_COV_POW_LOOP(2);
+    PP_COV_POW_LOOP(3);
 
-        power <<= 1;
+    bits = pp_cov_tile(word, PP_COV_NQ, lim);
+    while (bits != 0) {
+        int m = __builtin_ctzll(bits);
+        uint64_t q_candidate = p - ((uint64_t)1 << m);
+        const pp_higher_hit *hit = NULL;
+        size_t t;
+
+        bits &= bits - 1;
         if (q_candidate < 2) {
             continue;
         }
-        if ((m & 1) == killed_parity) {
-            if (power_of_three_exponent(q_candidate, &exponent)) {
-                base = 3;
-            }
-        } else {
-            const pp_higher_hit *hit = has_higher
-                ? pp_higher_take(higher, p, (int32_t)m)
-                : NULL;
-
-            if (hit != NULL) {
-                base = (uint64_t)hit->q;
-                exponent = hit->n;
-            } else if (n_is_prime((ulong)q_candidate)) {
-                base = q_candidate;
-                exponent = 1;
+        for (t = hs; t < he; t++) {
+            if (higher->hits[t].m == (int32_t)m) {
+                hit = &higher->hits[t];
+                break;
             }
         }
-        if (exponent <= 0) {
-            continue;
-        }
-        if (exponent == 1) {
-            flat_mask |= (uint64_t)1 << m;
-        } else {
-            status = write_higher(result, p, (int32_t)m, exponent, base);
+        if (hit != NULL) {
+            status = write_higher(result, p, (int32_t)m, hit->n,
+                                  (uint64_t)hit->q);
             if (status != PP_OK) {
                 return status;
             }
+            k++;
+        } else if (n_is_prime((ulong)q_candidate)) {
+            flat_mask |= (uint64_t)1 << m;
+            k++;
         }
-        k++;
     }
 
     return write_prime(result, p, k, flat_mask);
 }
+
+#undef PP_COV_POW_LOOP
 
 static int count_prime(pp_higher_table *higher, uint64_t p, int64_t *partition_count)
 {

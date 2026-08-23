@@ -1130,7 +1130,7 @@ int run_generation(const Options& options, const pp_gen_callbacks* callbacks, pp
     const std::vector<TableDecl> decls{
         TableDecl{"primes", p_schema, p_spec, {"p"}},
         TableDecl{"flat_parts", f_schema, f_spec, {"p"}},
-        TableDecl{"higher_parts", h_schema, h_spec, {"p", "m_k"}},
+        TableDecl{"higher_parts", h_schema, h_spec, {"p"}},
     };
 
     std::vector<BoundTable> tables;
