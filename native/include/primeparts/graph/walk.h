@@ -32,6 +32,22 @@ struct Frontier {
 bool Reach(Oracle& oracle, int64_t p, int32_t depth, int64_t max_nodes,
            const TwistTable* twists, Frontier* out, std::string* error);
 
+struct Block {
+  int32_t n = 0;
+  int64_t c = 0;
+};
+
+struct Word {
+  int64_t a0 = 0;
+  std::vector<Block> blocks;
+  int64_t terminal = 0;
+
+  int64_t Degree() const;
+  int32_t Grade() const;
+  int64_t OddDegree() const;
+  std::string Key() const;
+};
+
 struct Chain {
   std::vector<Part> edges;
   int64_t terminal = 0;
@@ -39,14 +55,24 @@ struct Chain {
   int64_t degree = 1;
 };
 
+Word WordOf(const Chain& chain);
+Expr WordForm(const Word& word, const std::string& symbol);
+
 struct ChainSet {
   std::vector<Chain> chains;
   bool truncated = false;
   int64_t oracle_calls = 0;
 };
 
-bool Chains(Oracle& oracle, int64_t p, int32_t depth, int64_t limit,
-            bool sources_only, ChainSet* out, std::string* error);
+struct ChainOpts {
+  int32_t depth = 8;
+  int64_t limit = 1000;
+  bool sources_only = false;
+  std::vector<int64_t> targets;
+};
+
+bool Chains(Oracle& oracle, int64_t p, const ChainOpts& opts, ChainSet* out,
+            std::string* error);
 
 Expr ChainForm(const std::vector<Part>& edges, const std::string& symbol);
 

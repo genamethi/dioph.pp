@@ -64,6 +64,47 @@ sol::table CoeffTable(sol::state_view lua, const std::vector<Coeff>& coeffs) {
   return out;
 }
 
+
+std::vector<int64_t> IdArray(const sol::table& t, const char* key) {
+  std::vector<int64_t> out;
+  sol::optional<sol::table> arr = t[key];
+  if (!arr) return out;
+  for (std::size_t i = 1; i <= arr->size(); ++i) {
+    if (sol::optional<int64_t> v = (*arr)[i]) {
+      out.push_back(*v);
+      continue;
+    }
+    if (sol::optional<sol::table> row = (*arr)[i]) {
+      if (sol::optional<int64_t> v = (*row)["p"]) out.push_back(*v);
+      else if (sol::optional<int64_t> v2 = (*row)["terminal"]) out.push_back(*v2);
+    }
+  }
+  return out;
+}
+
+sol::table WordTable(sol::state_view lua, const primeparts::graph::Word& w) {
+  sol::table out = lua.create_table(0, 6);
+  out["a0"] = w.a0;
+  out["terminal"] = w.terminal;
+  out["degree"] = w.Degree();
+  out["grade"] = w.Grade();
+  out["odd_degree"] = w.OddDegree();
+  sol::table blocks = lua.create_table(static_cast<int>(w.blocks.size()), 0);
+  sol::table skel = lua.create_table(static_cast<int>(w.blocks.size()), 0);
+  int idx = 1;
+  for (const primeparts::graph::Block& b : w.blocks) {
+    sol::table row = lua.create_table(0, 2);
+    row["n"] = b.n;
+    row["c"] = b.c;
+    blocks[idx] = row;
+    skel[idx] = b.n;
+    idx++;
+  }
+  out["blocks"] = blocks;
+  out["skeleton"] = skel;
+  return out;
+}
+
 sol::table PartTable(sol::state_view lua, const std::vector<Part>& parts) {
   sol::table out = lua.create_table(static_cast<int>(parts.size()), 0);
   int idx = 1;
@@ -147,13 +188,14 @@ sol::table Reach(sol::this_state ts, sol::optional<sol::table> arg) {
 bool CollectChains(const sol::table& spec, const char* fn, int64_t* p,
                    ChainSet* set, std::string* symbol) {
   *p = ReqInt(spec, "p", fn);
-  const auto depth = static_cast<int32_t>(IntOr(spec, "depth", kDefaultDepth));
-  const int64_t limit = IntOr(spec, "limit", kDefaultLimit);
-  const bool sources = BoolOr(spec, "sources", false);
+  primeparts::graph::ChainOpts opts;
+  opts.depth = static_cast<int32_t>(IntOr(spec, "depth", kDefaultDepth));
+  opts.limit = IntOr(spec, "limit", kDefaultLimit);
+  opts.sources_only = BoolOr(spec, "sources", false);
+  opts.targets = IdArray(spec, "targets");
   *symbol = StrOr(spec, "symbol", "x");
   std::string error;
-  if (!primeparts::graph::Chains(SharedOracle(), *p, depth, limit, sources, set,
-                                 &error)) {
+  if (!primeparts::graph::Chains(SharedOracle(), *p, opts, set, &error)) {
     Fail(fn, error);
   }
   return true;
@@ -202,11 +244,12 @@ sol::table Forms(sol::this_state ts, sol::optional<sol::table> arg) {
   int idx = 1;
   for (const Chain& chain : set.chains) {
     Expr form = primeparts::graph::ChainForm(chain.edges, symbol);
-    const std::string key = chain.twist_count == 0 ? std::string() : form.Expand().Text();
+    const primeparts::graph::Word word = primeparts::graph::WordOf(chain);
+    const std::string key = word.Key();
     if (distinct) {
       bool dup = false;
       for (std::size_t s = 0; s < seen.size(); ++s) {
-        if (seen[s].first == chain.terminal && seen[s].second == key) {
+        if (seen[s].second == key) {
           seen_count[s]++;
           dup = true;
           break;
@@ -222,6 +265,7 @@ sol::table Forms(sol::this_state ts, sol::optional<sol::table> arg) {
     row["twists"] = chain.twist_count;
     row["degree"] = chain.degree;
     row["edges"] = PartTable(lua, chain.edges);
+    row["word"] = WordTable(lua, word);
     row["expr"] = form;
     row["exact"] = form.Subs(symbol, chain.terminal).EqualsInt(p);
     row["paths"] = 1;

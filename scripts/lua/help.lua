@@ -114,15 +114,24 @@ graph.reach{p: int, depth: int = 8, max_nodes: int = 1000000, twists: TwistTable
       nodes: int, calls: int, complete: bool}
   Breadth-first over ancestors. complete = false means max_nodes stopped it.]],
   chains = [[
-graph.chains{p: int, depth: int = 8, limit: int = 1000, sources: bool = false}
+graph.chains{p: int, depth: int = 8, limit: int = 1000, sources: bool = false,
+             targets: [int] | [{p}] = nil}
   -> [{terminal, length, twists, degree, edges}], .meta = {truncated, calls}
-  sources = true keeps only chains ending at a k = 0 prime.]],
+  sources = true keeps only chains ending at a k = 0 prime.
+  targets = stop at these instead, and prune every branch below the least
+  of them. Takes query.kget{k=0} rows directly.]],
   forms = [[
 graph.forms{p: int, depth: int = 8, limit: int = 1000, sources: bool = false,
-            symbol: string = "x", distinct: bool = true}
-  -> [{terminal, degree, twists, paths, edges, expr: Expr, exact: bool}]
-  distinct collapses chains giving the same polynomial; paths counts them.
-  All-flat chains give x + (p - terminal), so they collapse to one form.]],
+            targets: [int] | [{p}] = nil, symbol: string = "x",
+            distinct: bool = true}
+  -> [{terminal, degree, twists, paths, edges, word, expr: Expr, exact: bool}]
+  word = {a0, blocks: [{n, c}], skeleton, degree, grade, odd_degree, terminal}
+  is the canonical form P = (..((x+a0)^n1 + c1)^n2 + c2..); distinct keys on
+  it, and paths counts the chains that reduced to it.
+  All-flat chains give x + (p - terminal), so they collapse to one form.
+
+  graph.forms{p = 65537, depth = 20, targets = query.kget{k = 0, limit = 10}}
+  -- 77 forms, degree to 10, every one exact.]],
   twists = [[
 graph.twists{hi: int} -> TwistTable
   Every p = 2^m + q^n with n >= 2 and p < hi. These carry all the degree.
