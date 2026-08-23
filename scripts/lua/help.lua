@@ -103,7 +103,48 @@ irc.upper_bound{table: string, field: string}
   move_staged = "irc.move_staged(spec: table?) -> !unimplemented",
 }
 
-local modules = {"nt", "query", "irc"}
+M.graph = {
+  order = {"parts", "reach", "chains", "forms", "twists", "sym", "int", "pow2", "he"},
+  parts = [[
+graph.parts{p: int} -> {p: int, k: int, partitions: [{m, n, q}]}
+  Local. p = 2^m + q^n over all m. No catalog.]],
+  reach = [[
+graph.reach{p: int, depth: int = 8, max_nodes: int = 1000000, twists: TwistTable?}
+  -> {levels: [{depth, count, nodes}], twists: [{p, depth}],
+      nodes: int, calls: int, complete: bool}
+  Breadth-first over ancestors. complete = false means max_nodes stopped it.]],
+  chains = [[
+graph.chains{p: int, depth: int = 8, limit: int = 1000, sources: bool = false}
+  -> [{terminal, length, twists, degree, edges}], .meta = {truncated, calls}
+  sources = true keeps only chains ending at a k = 0 prime.]],
+  forms = [[
+graph.forms{p: int, depth: int = 8, limit: int = 1000, sources: bool = false,
+            symbol: string = "x", distinct: bool = true}
+  -> [{terminal, degree, twists, paths, edges, expr: Expr, exact: bool}]
+  distinct collapses chains giving the same polynomial; paths counts them.
+  All-flat chains give x + (p - terminal), so they collapse to one form.]],
+  twists = [[
+graph.twists{hi: int} -> TwistTable
+  Every p = 2^m + q^n with n >= 2 and p < hi. These carry all the degree.
+  :hi() :count() :has(p) :at(p) :into(q) :rows(limit)]],
+  sym = [[graph.sym(name: string) -> Expr]],
+  int = [[graph.int(v: int) -> Expr]],
+  pow2 = [[graph.pow2(m: int) -> Expr   2^m, held unexpanded]],
+  he = [[graph.he(n: int) -> Poly   probabilists He_n]],
+}
+
+M.Expr = [[
+Expr   symbolic, held unexpanded (GiNaC)
+  + - * ^ between Exprs; tostring
+  :text() :expand() :symbols() :degree(sym) :subs(sym, int) :value()
+  :poly(sym) -> Poly     :he(sym) -> [{i, c}] Hermite coefficients]]
+
+M.Poly = [[
+Poly   exact integer univariate (FLINT)
+  + - * and == between Polys; tostring
+  :degree() :text() :mono() :he() :eval(x) :mod(n)]]
+
+local modules = {"nt", "query", "irc", "graph"}
 
 -- A node renders one entry or a whole module; help.x.y and help(x.y) both
 -- resolve to the same node.

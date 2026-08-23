@@ -10,6 +10,7 @@ extern "C" {
 
 #include "primeparts/config.h"
 #include "primeparts/lua/lconf.h"
+#include "primeparts/lua/lgraph.h"
 #include "primeparts/lua/lnt.h"
 #include "primeparts/lua/lppconv.h"
 #include "primeparts/lua/lquery.h"
@@ -24,6 +25,7 @@ const luaL_Reg kPpLibs[] = {
     {"nt", luaopen_nt},
     {"query", luaopen_query},
     {"irc", luaopen_irc},
+    {"graph", luaopen_graph},
     {nullptr, nullptr},
 };
 

@@ -1,0 +1,62 @@
+We know a few things.
+
+(1) Hermite polynomials - As an orthogonal (triangular) basis, any
+integer could be represented this way. However, I want to strive
+to keep these relations in terms of them despite the tendency to
+simplify. I.e., I'm hoping to see relations in terms of common
+operations based on the indices of He_n.
+
+There's an abundance of ways to go about this:
+
+  For the uninitiated p, q prime, m, n >= 1. p = 2^m + q^n.
+
+  Each p has k partitions. For each of the k partitions we can
+  trace each path branching fully to the each source.
+
+  Each ancestor for p, lands eventually on a k = 0 prime by
+  necessicity. The preceding generation for p in the above is q
+  each of these q's branch out k ways, and to keep the ancestry
+  of each we would want a vector with some canonical ordering,
+  probably by magnitude. Whether we do that or not is immaterial.
+
+  Let's just choose one grandparent of p, call it q_1. So that,
+  q_1 -> q_0 -> p if `->` indicates "is a parent of". So, q_0 is just
+  one of our k solutions, but here the index is not over the partitions,
+  but over the generations. So we'd be indexing over ancestors and siblings.
+
+  We could just as easily think about this as the dual. It's really
+  arbitrary the k = 0 may be roots or leaves, I don't care. 
+
+  What I do care about is that these are solutions as follows:
+
+  p = 2^m_0 + q_0^n_0 = 2^m_0 + (2^m_1 + q_1^n_1)^n_0
+
+  When expanded this gives a clear linear combination of Hermite
+  polynomials in q_1 (probablists is what we usually go with but I don't
+  know if that's the best choice, really). Again, we resist the
+  tendency to rewrite or simplify. There are some obvious things.
+  If n_i = 1 then we get p = 2^m_0 + 2^m_1 + 2^m_2 + ... + 2^m_i + q_1.
+
+  As it turns out, most of the time n = 1. This was the real motivation
+  for the flat_parts versus higher parts tables (that and the flat parts
+  is just way faster to recover q, so we save by not storing it).
+
+  Now, we could choose to combine different sources into a single expression.
+  Or take different representations from different levels of depth for each
+  q. This is where my questions aren't very well formed.
+
+  But consider where we get the most structure and can get the most information
+  from the coefficients (none of this so far gives us a lot of information about
+  primality after all). For each originating node for p, we can write
+  these values as x_0, x_1, ..., x_s these are all k = 0 primes. Then we can
+  take a system of these as relations that p satisfies and study their congruences
+  in tanasdfasfasfd;lasjf
+
+  I want to hand a single p value, then get the full subtree related to that
+  p value. Be able to express them in terms of x_i as just given.
+
+  That's one picture.
+
+  Let's start there. Otherwise, we can easily just write full chains in terms
+  a single source and the combined degree. That's a simple an easy picture that
+  we get pretty quickly without enumerating again (we can just use the iceberg tables.)

@@ -33,7 +33,8 @@ LUA_CPPFLAGS ?= -I$(STAGE_PREFIX)/include/lua/$(LUA_VERSION) -I$(STAGE_PREFIX)/i
 LUA_LDLIBS ?= $(call pick_lib,liblua.a) -lm -ldl
 SOL2_CPPFLAGS ?= -Ivendor/sol2
 PP_LUA_OBJS = $(BUILD_DIR)/pp_lua_main.o $(BUILD_DIR)/lppinit.o $(BUILD_DIR)/lppconv.o \
-  $(BUILD_DIR)/lconf.o $(BUILD_DIR)/lnt.o $(BUILD_DIR)/lquery.o $(BUILD_DIR)/lrestclient.o
+  $(BUILD_DIR)/lconf.o $(BUILD_DIR)/lnt.o $(BUILD_DIR)/lquery.o $(BUILD_DIR)/lrestclient.o \
+  $(BUILD_DIR)/lgraph.o
 
 READLINE_LDLIBS ?= -lreadline
 
@@ -102,6 +103,8 @@ PARTITION_STATS_OBJ := $(BUILD_DIR)/partition_stats.o
 ICEBERG_SRC_CPPFLAGS := -Ivendor/iceberg-cpp/src
 VERIFY_OBJ := $(BUILD_DIR)/verify.o
 VERIFY_MAIN_OBJ := $(BUILD_DIR)/verify_main.o
+GRAPH_OBJS := $(BUILD_DIR)/g_parts.o $(BUILD_DIR)/g_poly.o $(BUILD_DIR)/g_expr.o \
+  $(BUILD_DIR)/g_twists.o $(BUILD_DIR)/g_walk.o
 
 TEST_SUITE_BIN := $(BUILD_DIR)/primeparts-tests
 TEST_SUITE_OBJS := $(BUILD_DIR)/core_test.o $(BUILD_DIR)/writer_test.o \
@@ -364,8 +367,8 @@ $(BUILD_DIR)/primeparts-verify: $(VERIFY_MAIN_OBJ) $(VERIFY_OBJ) $(CORE_OBJ) $(H
 $(BUILD_DIR)/primeparts-tui: $(BUILD_DIR)/tui_main.o $(BUILD_DIR)/tui_runquery.o $(BUILD_DIR)/tui_generate.o $(BUILD_DIR)/tui_config.o $(CONFIG_OBJS) $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(BUILD_DIR)/lua_presets.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $(NOTCURSES_RPATH) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(NOTCURSES_LDLIBS) $(LUA_LDLIBS) -lsqlite3 -pthread -o $@
 
-$(BUILD_DIR)/pp: $(PP_LUA_OBJS) $(CONFIG_OBJS) $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(CORE_OBJ) $(HIGHER_SWEEP_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(LMDB_LIB)
-	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(LUA_LDLIBS) $(READLINE_LDLIBS) -lsqlite3 -pthread -o $@
+$(BUILD_DIR)/pp: $(GRAPH_OBJS) $(PP_LUA_OBJS) $(CONFIG_OBJS) $(BUILD_DIR)/query_service.o $(BUILD_DIR)/materialize.o $(WRITER_OBJ) $(SCHEMAS_OBJ) $(CORE_OBJ) $(HIGHER_SWEEP_OBJ) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(LMDB_LIB)
+	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(LUA_LDLIBS) $(GINAC_LDLIBS) $(READLINE_LDLIBS) -lsqlite3 -pthread -o $@
 
 $(BUILD_DIR)/%_test.o: tests/%_test.cc | $(BUILD_DIR)
 	$(CXX) $(GTEST_CPPFLAGS) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(GINAC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
@@ -410,3 +413,25 @@ pp-fixture-warehouse: $(BUILD_DIR)/pp-fixture-warehouse
 
 
 
+
+GRAPH_HDRS := include/primeparts/graph/bigint.h include/primeparts/graph/parts.h \
+  include/primeparts/graph/poly.h include/primeparts/graph/expr.h \
+  include/primeparts/graph/twists.h include/primeparts/graph/walk.h
+
+$(BUILD_DIR)/g_parts.o: src/graph/parts.cc include/primeparts/graph/parts.h include/primeparts/core.h include/primeparts/pp_covering.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/g_poly.o: src/graph/poly.cc include/primeparts/graph/poly.h src/graph/fmpz_bigint.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/g_expr.o: src/graph/expr.cc include/primeparts/graph/expr.h include/primeparts/graph/poly.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(GINAC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/g_twists.o: src/graph/twists.cc include/primeparts/graph/twists.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/g_walk.o: src/graph/walk.cc $(GRAPH_HDRS) | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(GINAC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/lgraph.o: src/lua/lgraph.cc include/primeparts/lua/lgraph.h include/primeparts/lua/lppconv.h $(GRAPH_HDRS) | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(LUA_CPPFLAGS) $(SOL2_CPPFLAGS) $(GINAC_CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
