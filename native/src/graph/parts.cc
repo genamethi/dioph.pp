@@ -71,8 +71,8 @@ class CachedOracle final : public Oracle {
 
 bool DynamicParts(int64_t p, std::vector<Part>* out, std::string* error) {
   out->clear();
-  if (p < 2) {
-    *error = "p must be at least 2";
+  if (p < 3) {
+    *error = "p must be at least 3";
     return false;
   }
 

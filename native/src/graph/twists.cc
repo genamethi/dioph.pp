@@ -55,6 +55,12 @@ std::unique_ptr<TwistTable> TwistTable::Build(int64_t hi, std::string* error) {
               if (a.p != b.p) return a.p < b.p;
               return a.m < b.m;
             });
+  table->by_q_ = table->rows_;
+  std::sort(table->by_q_.begin(), table->by_q_.end(),
+            [](const TwistRow& a, const TwistRow& b) {
+              if (a.q != b.q) return a.q < b.q;
+              return a.p < b.p;
+            });
   return table;
 }
 
@@ -72,9 +78,9 @@ std::vector<TwistRow> TwistTable::At(int64_t p) const {
 
 std::vector<TwistRow> TwistTable::Into(int64_t q) const {
   std::vector<TwistRow> out;
-  for (const TwistRow& r : rows_) {
-    if (r.q == q) out.push_back(r);
-  }
+  auto it = std::lower_bound(by_q_.begin(), by_q_.end(), q,
+                             [](const TwistRow& a, int64_t v) { return a.q < v; });
+  for (; it != by_q_.end() && it->q == q; ++it) out.push_back(*it);
   return out;
 }
 

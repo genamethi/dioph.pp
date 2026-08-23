@@ -202,7 +202,7 @@ sol::table Forms(sol::this_state ts, sol::optional<sol::table> arg) {
   int idx = 1;
   for (const Chain& chain : set.chains) {
     Expr form = primeparts::graph::ChainForm(chain.edges, symbol);
-    const std::string key = form.Expand().Text();
+    const std::string key = chain.twist_count == 0 ? std::string() : form.Expand().Text();
     if (distinct) {
       bool dup = false;
       for (std::size_t s = 0; s < seen.size(); ++s) {

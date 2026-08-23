@@ -31,6 +31,7 @@ class TwistTable {
  private:
   int64_t hi_ = 0;
   std::vector<TwistRow> rows_;
+  std::vector<TwistRow> by_q_;
 };
 
 }  // namespace primeparts::graph
