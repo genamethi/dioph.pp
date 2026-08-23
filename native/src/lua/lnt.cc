@@ -96,6 +96,31 @@ sol::table GenParts(int64_t p, sol::this_state ts) {
   return out;
 }
 
+/* I'll implement this later.
+ * it's just q powered up to n and m such that p = 2^m + q^n
+ * doesn't surpass the sixty four bit limit.
+ * Don't throw anything out. Just be smart.
+sol::table InverseGen(int64_t q, sol::this_state ts) {
+
+
+  sol::state_view lua(ts);
+  sol::table out = lua.create_table();
+  out["q"] = q;
+  out["k"] = k;
+  sol::table rows = lua.create_table(static_cast<int>(parts.size()), 0);
+  int idx = 1;
+  for (const Part& part : parts) {
+    sol::table row = lua.create_table(0, 3);
+    row["m"] = part.m;
+    row["n"] = part.n;
+    row["p"] = part.p;
+    rows[idx++] = row;
+  }
+  out["partitions"] = rows;
+  return out;
+
+} */
+
 }  // namespace
 
 extern "C" int luaopen_nt(lua_State *L) {
@@ -108,6 +133,7 @@ extern "C" int luaopen_nt(lua_State *L) {
   nt.set_function("is_prime", &IsPrime);
   nt.set_function("is_prime_power", &IsPrimePower);
   nt.set_function("genparts", &GenParts);
+  //nt.set_function("invgp", &InverseGen);
   nt.push();
   return 1;
 }

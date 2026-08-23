@@ -79,6 +79,10 @@ LuaPresets::LuaPresets() : st_(std::make_unique<LuaState>()) {
   lua_setglobal(st_->L, "query");
 }
 
+void LuaPresets::SetSearchPath(const primeparts::config::Conf& conf) {
+  primeparts::config::SetSearchPath(st_->L, conf);
+}
+
 LuaPresets::~LuaPresets() {
   if (st_->L != nullptr) lua_close(st_->L);
 }

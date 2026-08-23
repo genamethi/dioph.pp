@@ -101,21 +101,6 @@ std::vector<fs::path> LuaRoots() {
   return {dir / ".." / "share" / "pp", dir / "lua"};
 }
 
-void SetRocksPath(lua_State* L) {
-  std::string cpath;
-  for (const fs::path& root : LuaRoots()) {
-    if (!cpath.empty()) cpath += ";";
-    cpath += (root / "rocks" / "lib" / "lua" /
-              (LUA_VERSION_MAJOR "." LUA_VERSION_MINOR) / "?.so")
-                 .string();
-  }
-  if (cpath.empty()) return;
-  lua_getglobal(L, "package");
-  lua_pushstring(L, cpath.c_str());
-  lua_setfield(L, -2, "cpath");
-  lua_pop(L, 1);
-}
-
 bool Validate(lua_State* L, const std::string& text, const std::string& file,
               std::string* error) {
   if (luaL_loadbuffer(L, kValidator, sizeof(kValidator) - 1, "=config-check") !=
@@ -146,6 +131,60 @@ std::string ExpandTilde(const std::string& value) {
   if (value.size() == 1) return home;
   if (value[1] != '/') return value;
   return std::string(home) + value.substr(1);
+}
+
+#define PP_LUA_VDIR LUA_VERSION_MAJOR "." LUA_VERSION_MINOR
+
+const char kRootToken[] = "$PPROOT";
+
+const char kDefaultLuaPath[] =
+    "$PPROOT/../libs/?.lua;"
+    "$PPROOT/../libs/?/init.lua;"
+    "$PPROOT/../rocks/share/lua/" PP_LUA_VDIR "/?.lua;"
+    "$PPROOT/../rocks/share/lua/" PP_LUA_VDIR "/?/init.lua";
+
+const char kDefaultLuaCPath[] =
+    "$PPROOT/../libs/?.so;"
+    "$PPROOT/../rocks/lib/lua/" PP_LUA_VDIR "/?.so";
+
+std::string ExpandRoot(const std::string& value, const fs::path& dir) {
+  const std::string root = (dir.empty() ? fs::path(".") : dir).string();
+  std::string out;
+  std::size_t start = 0;
+  while (start <= value.size()) {
+    const std::size_t end = value.find(';', start);
+    std::string entry =
+        value.substr(start, end == std::string::npos ? std::string::npos
+                                                     : end - start);
+    if (!entry.empty()) {
+      entry = ExpandTilde(entry);
+      for (std::size_t at = entry.find(kRootToken); at != std::string::npos;
+           at = entry.find(kRootToken, at + root.size()))
+        entry.replace(at, sizeof(kRootToken) - 1, root);
+      entry = fs::path(entry).lexically_normal().string();
+      if (!out.empty()) out += ";";
+      out += entry;
+    }
+    if (end == std::string::npos) break;
+    start = end + 1;
+  }
+  return out;
+}
+
+void PrependField(lua_State* L, const char* field, const std::string& value) {
+  if (value.empty()) return;
+  lua_getglobal(L, "package");
+  lua_getfield(L, -1, field);
+  const char* cur = lua_tostring(L, -1);
+  std::string merged = value;
+  if (cur != nullptr && *cur != '\0') {
+    merged += ";";
+    merged += cur;
+  }
+  lua_pop(L, 1);
+  lua_pushlstring(L, merged.data(), merged.size());
+  lua_setfield(L, -2, field);
+  lua_pop(L, 1);
 }
 
 struct Reader {
@@ -260,6 +299,9 @@ bool ReadConf(lua_State* L, const std::string& file, Conf* out,
   if (open) r.EndSection();
 
   out->core.warehouse = ExpandTilde(out->core.warehouse);
+  const fs::path dir = out->path.parent_path();
+  out->lua.path = ExpandRoot(out->lua.path, dir);
+  out->lua.cpath = ExpandRoot(out->lua.cpath, dir);
   return r.ok;
 }
 
@@ -324,6 +366,9 @@ const Field kFields[] = {
     PP_I64(tui, default_limit, "default_limit", 10)
     PP_STR(tui, log_format, "log_format", "flat", kLogFormats)
     PP_BOOL(tui, autosave, "autosave", false)
+
+    PP_STR(lua, path, "path", kDefaultLuaPath, nullptr)
+    PP_STR(lua, cpath, "cpath", kDefaultLuaCPath, nullptr)
 };
 
 #undef PP_STR
@@ -495,7 +540,13 @@ bool Load(const fs::path& requested, Conf* out, std::string* error) {
 
   lua_State* L = luaL_newstate();
   luaL_openlibs(L);
-  SetRocksPath(L);
+  {
+    Conf boot;
+    const fs::path dir = out->path.parent_path();
+    boot.lua.path = ExpandRoot(kDefaultLuaPath, dir);
+    boot.lua.cpath = ExpandRoot(kDefaultLuaCPath, dir);
+    SetSearchPath(L, boot);
+  }
 
   if (!Validate(L, text, file, error)) {
     lua_close(L);
@@ -533,6 +584,11 @@ bool Load(const fs::path& requested, Conf* out, std::string* error) {
       std::fprintf(stderr, "%s\n", append_error.c_str());
   }
   return true;
+}
+
+void SetSearchPath(lua_State* L, const Conf& conf) {
+  PrependField(L, "path", conf.lua.path);
+  PrependField(L, "cpath", conf.lua.cpath);
 }
 
 void Announce(const Conf& conf) {

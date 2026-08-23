@@ -98,6 +98,7 @@ static void print_usage (const char *badoption) {
   lua_writestringerror(
   "usage: %s [options] [script [args]]\n"
   "Available options are:\n"
+  "  -c path   config file ('--config path' also accepted)\n"
   "  -e stat   execute string 'stat'\n"
   "  -i        enter interactive mode after executing 'script'\n"
   "  -l mod    require library 'mod' into global 'mod'\n"
@@ -768,9 +769,36 @@ static int pmain (lua_State *L) {
 }
 
 
+/*
+** Consumes '-c path' / '--config path' from 'argv' before Lua sees it, so the
+** interpreter's own option handling is untouched. Stops at the first
+** non-option, at '-' and at '--', and steps over the values of '-e' and '-l'.
+*/
+static void pp_extract_config (int *argc, char **argv) {
+  int i = 1;
+  while (i < *argc && argv[i] != NULL) {
+    const char *a = argv[i];
+    if (a[0] != '-' || a[1] == '\0') return;  /* not an option, or '-' */
+    if (a[1] == '-' && a[2] == '\0') return;  /* '--' */
+    if (strcmp(a, "-c") == 0 || strcmp(a, "--config") == 0) {
+      if (i + 1 >= *argc || argv[i + 1] == NULL) return;
+      pp_set_config_path(argv[i + 1]);
+      memmove(&argv[i], &argv[i + 2],
+              (size_t)(*argc - i - 1) * sizeof(char *));
+      *argc -= 2;
+      continue;
+    }
+    if ((a[1] == 'e' || a[1] == 'l') && a[2] == '\0') i++;
+    i++;
+  }
+}
+
+
 int main (int argc, char **argv) {
   int status, result;
-  lua_State *L = luaL_newstate();  /* create state */
+  lua_State *L;
+  pp_extract_config(&argc, argv);
+  L = luaL_newstate();  /* create state */
   if (L == NULL) {
     l_message(argv[0], "cannot create state: not enough memory");
     return EXIT_FAILURE;

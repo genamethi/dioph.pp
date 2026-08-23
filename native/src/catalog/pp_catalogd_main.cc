@@ -11,7 +11,7 @@ namespace {
 void Usage() {
   std::fprintf(stderr,
     "pp-catalogd — native Iceberg REST Catalog server\n\n"
-    "  --config PATH     config file (default: ./config.lua, then\n"
+    "  -c, --config PATH config file (default: ./config.lua, then\n"
     "                    $XDG_CONFIG_HOME/primeparts/config.lua, then\n"
     "                    ~/.config/primeparts/config.lua, else seeded next\n"
     "                    to this binary)\n"
@@ -48,7 +48,7 @@ int main(int argc, char** argv) {
       }
       return argv[++i];
     };
-    if (f == "--config") config_path = next("--config");
+    if (f == "--config" || f == "-c") config_path = next(f.c_str());
     else if (f == "--warehouse") warehouse = next("--warehouse");
     else if (f == "--host") host = next("--host");
     else if (f == "--port") port = std::atoi(next("--port").c_str());

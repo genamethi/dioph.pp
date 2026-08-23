@@ -391,13 +391,13 @@ int main(int argc, char** argv) {
       }
       return argv[++i];
     };
-    if (arg == "--config") config_path = next("--config");
+    if (arg == "--config" || arg == "-c") config_path = next(arg.c_str());
     else if (arg == "--warehouse") warehouse = next("--warehouse");
     else if (arg == "--rest-uri") rest_uri = next("--rest-uri");
     else if (arg == "--namespace") ns_name = next("--namespace");
     else if (arg == "-h" || arg == "--help") {
       std::fprintf(stderr,
-                   "usage: primeparts-tui [--config PATH] [--warehouse DIR]\n"
+                   "usage: primeparts-tui [-c|--config PATH] [--warehouse DIR]\n"
                    "                      [--rest-uri URI] [--namespace NS]\n"
                    "                      [WAREHOUSE]\n");
       return 0;
@@ -415,6 +415,7 @@ int main(int argc, char** argv) {
     return 2;
   }
   primeparts::config::Announce(app.conf);
+  app.lua.SetSearchPath(app.conf);
   app.config_path = app.conf.path.string();
   app.presets_path = config_presets_path().string();
   if (warehouse.empty()) warehouse = app.conf.core.warehouse;

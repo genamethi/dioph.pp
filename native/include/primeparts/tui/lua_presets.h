@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "primeparts/config.h"
 #include "primeparts/query/query_preset.h"
 
 namespace primeparts::tui {
@@ -20,6 +21,8 @@ class LuaPresets {
   ~LuaPresets();
   LuaPresets(const LuaPresets&) = delete;
   LuaPresets& operator=(const LuaPresets&) = delete;
+
+  void SetSearchPath(const primeparts::config::Conf& conf);
 
   std::vector<QueryPreset> Load(const fs::path& file,
                                 std::vector<std::string>* errors);

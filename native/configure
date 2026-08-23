@@ -234,9 +234,7 @@ LUA_RELEASE=5.5.1
 LUA_VERSION=5.5
 
 LUA_RELEASE="$LUA_RELEASE" LUA_VERSION="$LUA_VERSION" JOBS="$JOBS" \
-  "$REPO/scripts/lua-stage.sh" "$VENDOR" "$ROOT/build" "$STAGE$PREFIX" "$PP_LUA_PATH"
-
-LUA_BASE="$STAGE$PREFIX"
+  "$REPO/scripts/lua-stage.sh" "$VENDOR" "$ROOT/build" "$STAGE$PREFIX"
 
 luarocks_bin() { echo "$1$PREFIX/bin/luarocks"; }
 if [ -x "$(luarocks_bin "")" ] || [ -x "$(luarocks_bin "$STAGE")" ]; then
@@ -255,12 +253,34 @@ else
   curl -L -R -O "https://luarocks.org/releases/luarocks-$tag.tar.gz"
   tar zxf "luarocks-$tag.tar.gz"
   cd "luarocks-$tag"
-  ./configure --prefix="$PREFIX" --with-lua="$LUA_BASE" --lua-version="$LUA_VERSION"
+  ./configure --prefix="$PREFIX" --with-lua="$STAGE$PREFIX" \
+    --lua-version="$LUA_VERSION"
   make
   make install DESTDIR="$STAGE"
   cd "$ROOT"
   rm -rf "$tmp"
 fi
+
+# luarocks records the --with-lua tree in its sysconfig and in the wrapper
+# shebangs. That tree is the DESTDIR staging dir, which does not exist on a
+# deployed machine, so strip it back to $PREFIX before install-deps copies it.
+# Runs unconditionally: a tree staged by an earlier configure carries it too.
+strip_stage_refs() {
+  [ -d "$STAGE$PREFIX" ] || return 0
+  leaked=$(grep -rlI -- "$STAGE" "$STAGE$PREFIX/bin" "$STAGE$PREFIX/etc" 2>/dev/null || true)
+  [ -n "$leaked" ] || return 0
+  echo "$leaked" | while IFS= read -r f; do
+    sed -i "s|$STAGE||g" "$f"
+    echo "stripped staging prefix from ${f#$STAGE}"
+  done
+  still=$(grep -rlI -- "$STAGE" "$STAGE$PREFIX/bin" "$STAGE$PREFIX/etc" 2>/dev/null || true)
+  if [ -n "$still" ]; then
+    echo "staging path still present after strip:"
+    echo "$still"
+    exit 1
+  fi
+}
+strip_stage_refs
 
 httplib_ok=
 for f in "$PREFIX/include/httplib.h" "$STAGE$PREFIX/include/httplib.h" /usr/local/include/httplib.h /usr/include/httplib.h; do

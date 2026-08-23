@@ -8,6 +8,8 @@ extern "C" {
 
 void pp_openlibs(lua_State *L);
 
+void pp_set_config_path(const char *path);
+
 #ifdef __cplusplus
 }
 #endif

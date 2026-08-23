@@ -235,6 +235,7 @@ pp --warehouse DIR ...          # else $PRIMEPARTS_WAREHOUSE_ROOT / staging defa
 ## Building / testing the Lua path
 
 `primeparts-tui` and the Lua smokes link embedded Lua (notcurses-core from the
-configure prefix, Lua 5.5 from the system). They build as part of `make all`
+configure prefix, Lua 5.5 built from `native/vendor/lua` and linked statically).
+They build as part of `make all`
 (TUI) and `make smoke` (`primeparts-lua-presets-smoke`,
 `primeparts-lua-query-smoke`). See `BUILD.md`.

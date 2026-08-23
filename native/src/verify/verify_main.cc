@@ -56,7 +56,7 @@ void Usage(const char* argv0) {
     "  --threads N        shard threads (default: conf.verify.threads, 0 = hw)\n"
     "  --max-examples N   violating rows to record\n"
     "                     (default: conf.verify.max_examples)\n"
-    "  --config PATH      config file (default: ./config.lua, then XDG, then\n"
+    "  -c, --config PATH  config file (default: ./config.lua, then XDG, then\n"
     "                     ~/.config/primeparts/config.lua, else seeded next to\n"
     "                     this binary)\n"
     "  --warehouse DIR    warehouse root (default: conf.core.warehouse)\n"
@@ -174,7 +174,7 @@ int main(int argc, char** argv) {
       {"help", no_argument, nullptr, 'h'},
       {nullptr, 0, nullptr, 0}};
   int o;
-  while ((o = getopt_long(argc, argv, "t:L:H:n:T:j:e:w:r:N:o:h", long_opts,
+  while ((o = getopt_long(argc, argv, "t:L:H:n:T:j:e:w:r:N:o:c:h", long_opts,
                           nullptr)) != -1) {
     switch (o) {
       case 't': opts.table = optarg; break;
@@ -188,7 +188,7 @@ int main(int argc, char** argv) {
       case 'r': opts.rest_uri = optarg; break;
       case 'N': opts.ns_name = optarg; break;
       case 'o': opts.log_path = optarg; break;
-      case 1000: opts.config_path = optarg; break;
+      case 'c': case 1000: opts.config_path = optarg; break;
       case 'h': Usage(argv[0]); return 0;
       default: Usage(argv[0]); return 2;
     }

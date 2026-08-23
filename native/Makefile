@@ -21,7 +21,7 @@ LTOFLAGS ?= -flto=auto
 CPPFLAGS += -Iinclude -I$(STAGE_PREFIX)/include -I$(PREFIX)/include
 CFLAGS += -std=c11 -D_POSIX_C_SOURCE=200809L -O3 -g -fPIC -Wall -Wextra -Wpedantic $(LTOFLAGS) $(SANITIZE)
 CXXFLAGS += -std=c++23 -O3 -g -fPIC -Wall -Wextra -Wpedantic $(LTOFLAGS) $(SANITIZE)
-LDFLAGS += -L$(STAGE_PREFIX)/lib -L$(PREFIX)/lib -Wl,-rpath,$(abspath $(PREFIX)/lib) -Wl,-rpath,$(STAGE_PREFIX)/lib -rdynamic $(LTOFLAGS) $(SANITIZE)
+LDFLAGS += -L$(STAGE_PREFIX)/lib -L$(PREFIX)/lib -Wl,-rpath,$(abspath $(PREFIX)/lib) -rdynamic $(LTOFLAGS) $(SANITIZE)
 EXE_LDFLAGS += -no-pie
 LDLIBS += $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --libs primecount primesieve gmp flint) -lpari -lm
 NOTCURSES_LDLIBS ?= $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --libs notcurses-core 2>/dev/null || PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) $(PKG_CONFIG) --libs notcurses 2>/dev/null)
@@ -74,7 +74,8 @@ CONFIG_OBJS := $(CONFIG_OBJ)
 LUA_RUN_DIR := $(BUILD_DIR)/lua
 LUA_TREE_SH := ../scripts/luarocks-tree.sh
 ROCKS_MANIFEST := ../scripts/lua/rocks.lua
-LUAROCKS_PRESET := ../scripts/lua/luarocks.preset.lua
+LUAROCKS_PRESET_IN := ../scripts/lua/luarocks.preset.lua.in
+LUAROCKS_PRESET := $(LUA_RUN_DIR)/etc/luarocks.preset.lua
 PP_LIBS := ../scripts/lua/help.lua
 ROCKS_STAMP := $(LUA_RUN_DIR)/.rocks
 WRITER_OBJ := $(BUILD_DIR)/writer.o
@@ -197,6 +198,10 @@ $(CONFIG_OBJ): src/config.cc include/primeparts/config.h | $(BUILD_DIR)
 
 rocks: $(ROCKS_STAMP)
 
+$(LUAROCKS_PRESET): $(LUAROCKS_PRESET_IN) | $(BUILD_DIR)
+	@mkdir -p $(dir $@)
+	sed -e 's|@PREFIX@|$(PREFIX)|g' -e 's|@LUA_VERSION@|$(LUA_VERSION)|g' $< > $@
+
 $(ROCKS_STAMP): $(ROCKS_MANIFEST) $(LUAROCKS_PRESET) $(LUA_TREE_SH) $(STAGE)$(PREFIX)/bin | $(BUILD_DIR)
 	RUN_DIR=$(LUA_RUN_DIR) ROCKS_MANIFEST=$(ROCKS_MANIFEST) \
 	  PRESET_CONFIG=$(LUAROCKS_PRESET) $(LUA_TREE_SH) "$(STAGE)$(PREFIX)/bin"
@@ -246,7 +251,7 @@ $(BUILD_DIR)/tui_generate.o: src/tui/tui_generate.cc $(TUI_APP_HDR) | $(BUILD_DI
 $(BUILD_DIR)/tui_config.o: src/tui/tui_config.cc $(TUI_APP_HDR) | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(NOTCURSES_CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/lua_presets.o: src/tui/lua_presets.cc include/primeparts/tui/lua_presets.h include/primeparts/query/query_preset.h | $(BUILD_DIR)
+$(BUILD_DIR)/lua_presets.o: src/tui/lua_presets.cc include/primeparts/tui/lua_presets.h include/primeparts/query/query_preset.h include/primeparts/config.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(LUA_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/pp_lua_main.o: src/lua/lua.c include/primeparts/lua/lppinit.h | $(BUILD_DIR)
@@ -369,7 +374,7 @@ $(TEST_SUITE_BIN): $(TEST_SUITE_OBJS) $(TEST_SUITE_LIBOBJS)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(ICEBERG_LDLIBS) $(GINAC_LDLIBS) $(GTEST_LDLIBS) -pthread -o $@
 
 test: $(TEST_SUITE_BIN)
-	$(TEST_SUITE_BIN)
+	LD_LIBRARY_PATH=$(STAGE_PREFIX)/lib:$$LD_LIBRARY_PATH $(TEST_SUITE_BIN)
 
 $(E2E_OBJ): e2e/e2e_test.cc include/primeparts/aligned_writer.h | $(BUILD_DIR)
 	$(CXX) $(GTEST_CPPFLAGS) $(CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
@@ -378,7 +383,7 @@ $(E2E_BIN): $(E2E_OBJ) $(E2E_LIBOBJS)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(GTEST_LDLIBS) -lsqlite3 -pthread -o $@
 
 e2e: $(E2E_BIN) $(BUILD_DIR)/primeparts-catalogd
-	$(E2E_BIN)
+	LD_LIBRARY_PATH=$(STAGE_PREFIX)/lib:$$LD_LIBRARY_PATH $(E2E_BIN)
 
 clean:
 	rm -rf $(BUILD_DIR)

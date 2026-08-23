@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+struct lua_State;
+
 namespace primeparts::config {
 
 namespace fs = std::filesystem;
@@ -66,6 +68,11 @@ struct Tui {
   bool autosave = false;
 };
 
+struct Lua {
+  std::string path;
+  std::string cpath;
+};
+
 struct Conf {
   fs::path path;
   bool touched = false;
@@ -78,6 +85,7 @@ struct Conf {
   Query query;
   Graph graph;
   Tui tui;
+  Lua lua;
 };
 
 struct Field {
@@ -106,5 +114,7 @@ bool Load(const fs::path& requested, Conf* out, std::string* error);
 bool AppendDefaults(Conf* conf, std::string* error);
 
 void Announce(const Conf& conf);
+
+void SetSearchPath(lua_State* L, const Conf& conf);
 
 }  // namespace primeparts::config

@@ -1,0 +1,7 @@
+lua_version = "@LUA_VERSION@"
+lua_interpreter = "lua"
+variables = {
+  LUA_BINDIR = "@PREFIX@/bin",
+  LUA_INCDIR = "@PREFIX@/include",
+  LUA_LIBDIR = "@PREFIX@/lib",
+}
