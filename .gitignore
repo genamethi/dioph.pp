@@ -28,6 +28,7 @@ tags
 # Distribution / packaging
 .Python
 build/
+build-profile/
 develop-eggs/
 dist/
 downloads/
