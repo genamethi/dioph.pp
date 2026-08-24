@@ -29,7 +29,7 @@ nt.genparts(p: int)
   invgp = [[
 nt.invgp(q: int, hi: int = 2^63-1)
   -> {q: int, k: int, partitions: [{m: int, n: int, p: int}]}
-  ! q prime, q >= 3, hi >= q]],
+  ! q >= 3]],
 }
 
 M.query = {

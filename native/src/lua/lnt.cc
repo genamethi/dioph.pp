@@ -154,11 +154,8 @@ sol::table InvGenParts(int64_t q, sol::optional<int64_t> hi,
                        sol::this_state ts) {
   static const char kFn[] = "nt.invgp";
   if (q < 3) primeparts::lua::Fail(kFn, "q must be at least 3");
-  if (!n_is_prime(static_cast<ulong>(q)))
-    primeparts::lua::Fail(kFn, "q must be prime");
 
   const int64_t cap = hi.value_or(INT64_MAX);
-  if (cap < q) primeparts::lua::Fail(kFn, "hi must be at least q");
 
   std::vector<primeparts::nt::Edge> edges;
   primeparts::nt::InvOf(static_cast<uint64_t>(q), static_cast<uint64_t>(cap),
