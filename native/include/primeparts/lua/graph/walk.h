@@ -4,9 +4,9 @@
 #include <string>
 #include <vector>
 
-#include "primeparts/graph/expr.h"
-#include "primeparts/graph/parts.h"
-#include "primeparts/graph/twists.h"
+#include "primeparts/lua/graph/expr.h"
+#include "primeparts/lua/graph/parts.h"
+#include "primeparts/lua/graph/twists.h"
 
 namespace primeparts::graph {
 

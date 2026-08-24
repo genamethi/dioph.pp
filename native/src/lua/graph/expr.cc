@@ -1,4 +1,4 @@
-#include "primeparts/graph/expr.h"
+#include "primeparts/lua/graph/expr.h"
 
 #include <ginac/ginac.h>
 

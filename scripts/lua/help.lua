@@ -104,47 +104,68 @@ irc.upper_bound{table: string, field: string}
 }
 
 M.graph = {
-  order = {"parts", "reach", "chains", "forms", "twists", "sym", "int", "pow2", "he"},
-  parts = [[
-graph.parts{p: int} -> {p: int, k: int, partitions: [{m, n, q}]}
-  Local. p = 2^m + q^n over all m. No catalog.]],
-  reach = [[
-graph.reach{p: int, depth: int = 8, max_nodes: int = 1000000, twists: TwistTable?}
-  -> {levels: [{depth, count, nodes}], twists: [{p, depth}],
-      nodes: int, calls: int, complete: bool}
-  Breadth-first over ancestors. complete = false means max_nodes stopped it.]],
-  chains = [[
-graph.chains{p: int, depth: int = 8, limit: int = 1000, sources: bool = false,
-             targets: [int] | [{p}] = nil}
-  -> [{terminal, length, twists, degree, edges}], .meta = {truncated, calls}
-  sources = true keeps only chains ending at a k = 0 prime.
-  targets = stop at these instead, and prune every branch below the least
-  of them. Takes query.kget{k=0} rows directly.]],
-  forms = [[
-graph.forms{p: int, depth: int = 8, limit: int = 1000, sources: bool = false,
-            targets: [int] | [{p}] = nil, symbol: string = "x",
-            distinct: bool = true}
-  -> [{terminal, degree, twists, paths, edges, word, expr: Expr, exact: bool}]
-  word = {a0, blocks: [{n, c}], skeleton, degree, grade, odd_degree, terminal}
-  is the canonical form P = (..((x+a0)^n1 + c1)^n2 + c2..); distinct keys on
-  it, and paths counts the chains that reduced to it.
-  All-flat chains give x + (p - terminal), so they collapse to one form.
+  order = {"parts", "walk", "twists", "expr", "poly"},
+  parts = "graph.parts -> module   of, calls, source",
+  walk = "graph.walk -> module   reach, chains, forms",
+  twists = "graph.twists -> module   build, TwistTable",
+  expr = "graph.expr -> module   sym, int, pow2, Expr",
+  poly = "graph.poly -> module   he, x, const, pow2, Poly",
+}
 
-  graph.forms{p = 65537, depth = 20, targets = query.kget{k = 0, limit = 10}}
-  -- 77 forms, degree to 10, every one exact.]],
-  twists = [[
-graph.twists{hi: int} -> TwistTable
-graph.twists{rows: [{p, m, n, q}], hi: int = max p} -> TwistTable
-  Every p = 2^m + q^n with n >= 2. These carry all the degree; a chain's
-  degree is the product of n over its twist edges and nothing else.
-  hi enumerates directly; rows builds from a scan, so
-    graph.twists{rows = query.partition{p = {3, 1e6}, n = {2, 63}}}
-  reads higher_parts instead. Both agree row for row.
-  :hi() :origin() :count() :has(p) :at(p) :into(q) :rows(limit)]]
-  sym = [[graph.sym(name: string) -> Expr]],
-  int = [[graph.int(v: int) -> Expr]],
-  pow2 = [[graph.pow2(m: int) -> Expr   2^m, held unexpanded]],
-  he = [[graph.he(n: int) -> Poly   probabilists He_n]],
+M["graph.parts"] = {
+  order = {"of", "calls", "source"},
+  of = [[
+graph.parts.of{p: int} | graph.parts{p: int}
+  -> {p: int, k: int, partitions: [{m: int, n: int, q: int}]}]],
+  calls = "graph.parts.calls() -> int",
+  source = "graph.parts.source() -> string",
+}
+
+M["graph.walk"] = {
+  order = {"reach", "chains", "forms"},
+  reach = [[
+graph.walk.reach{p: int, depth: int = 8, max_nodes: int = 1000000,
+                 twists: TwistTable?}
+  -> {levels: [{depth: int, count: int, nodes: [int]}],
+      twists: [{p: int, depth: int}],
+      nodes: int, calls: int, complete: bool}]],
+  chains = [[
+graph.walk.chains{p: int, depth: int = 8, limit: int = 1000,
+                  sources: bool = false, targets: [int] | [{p: int}] = nil}
+  -> [{terminal: int, length: int, twists: int, degree: int,
+       edges: [{m, n, q}]}], .meta = {truncated: bool, calls: int}]],
+  forms = [[
+graph.walk.forms{p: int, depth: int = 8, limit: int = 1000,
+                 sources: bool = false, targets: [int] | [{p: int}] = nil,
+                 symbol: string = "x", distinct: bool = true}
+  -> [{terminal: int, length: int, twists: int, degree: int,
+       edges: [{m, n, q}], paths: int, expr: Expr, exact: bool,
+       word: {a0: int, blocks: [{n: int, c: int}], skeleton: [int],
+              degree: int, grade: int, odd_degree: int, terminal: int}}]
+     .meta = {truncated: bool, calls: int, symbol: string}]],
+}
+
+M["graph.twists"] = {
+  order = {"build"},
+  build = [[
+graph.twists.build{hi: int} -> TwistTable
+graph.twists.build{rows: [{p, m, n, q}], hi: int = max p} -> TwistTable
+graph.twists{...} -> TwistTable]],
+}
+
+M["graph.expr"] = {
+  order = {"sym", "int", "pow2"},
+  sym = "graph.expr.sym(name: string) -> Expr",
+  int = "graph.expr.int(v: int) -> Expr",
+  pow2 = "graph.expr.pow2(m: int) -> Expr",
+}
+
+M["graph.poly"] = {
+  order = {"he", "x", "const", "pow2"},
+  he = "graph.poly.he(n: int) -> Poly",
+  x = "graph.poly.x() -> Poly",
+  const = "graph.poly.const(c: int) -> Poly",
+  pow2 = "graph.poly.pow2(m: int) -> Poly",
 }
 
 M.Expr = [[
@@ -156,9 +177,15 @@ Expr   symbolic, held unexpanded (GiNaC)
 M.Poly = [[
 Poly   exact integer univariate (FLINT)
   + - * and == between Polys; tostring
-  :degree() :text() :mono() :he() :eval(x) :mod(n)]]
+  :degree() :zero() :text() :mono() :he() :eval(x) :pow(e) :mod(n)]]
+
+M.TwistTable = [[
+TwistTable   the n >= 2 edges below hi
+  :hi() :origin() :count() :has(p) :at(p) :into(q) :rows(limit)]]
 
 local modules = {"nt", "query", "irc", "graph"}
+local submodules = {"graph.parts", "graph.walk", "graph.twists", "graph.expr",
+                    "graph.poly"}
 
 -- A node renders one entry or a whole module; help.x.y and help(x.y) both
 -- resolve to the same node.
@@ -170,9 +197,14 @@ local entry_mt = {
 
 local function entry(text) return setmetatable({text = text}, entry_mt) end
 
+local nodes = {}
+
 local module_mt = {
   __index = function(self, key)
-    local text = M[rawget(self, "name")][key]
+    local name = rawget(self, "name")
+    local child = nodes[name .. "." .. key]
+    if child then return child end
+    local text = M[name][key]
     if type(text) == "string" then return entry(text) end
     return nil
   end,
@@ -185,13 +217,28 @@ local module_mt = {
   __name = "help",
 }
 
+local function resolve(name)
+  local mod = _G
+  for part in name:gmatch("[^.]+") do
+    if type(mod) ~= "table" then return nil end
+    mod = mod[part]
+  end
+  return mod
+end
+
 local help = {}
 local byvalue = {}
 
 for _, name in ipairs(modules) do
-  local node = setmetatable({name = name}, module_mt)
-  help[name] = node
-  local mod = _G[name]
+  nodes[name] = setmetatable({name = name}, module_mt)
+  help[name] = nodes[name]
+end
+for _, name in ipairs(submodules) do
+  nodes[name] = setmetatable({name = name}, module_mt)
+end
+
+for name, node in pairs(nodes) do
+  local mod = resolve(name)
   if type(mod) == "table" then
     byvalue[mod] = node
     for key, text in pairs(M[name]) do

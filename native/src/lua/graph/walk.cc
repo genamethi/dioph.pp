@@ -1,4 +1,4 @@
-#include "primeparts/graph/walk.h"
+#include "primeparts/lua/graph/walk.h"
 
 #include <algorithm>
 #include <cstdint>

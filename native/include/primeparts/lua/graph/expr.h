@@ -5,8 +5,8 @@
 #include <string>
 #include <vector>
 
-#include "primeparts/graph/bigint.h"
-#include "primeparts/graph/poly.h"
+#include "primeparts/lua/graph/bigint.h"
+#include "primeparts/lua/graph/poly.h"
 
 namespace primeparts::graph {
 

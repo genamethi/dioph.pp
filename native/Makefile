@@ -104,7 +104,9 @@ ICEBERG_SRC_CPPFLAGS := -Ivendor/iceberg-cpp/src
 VERIFY_OBJ := $(BUILD_DIR)/verify.o
 VERIFY_MAIN_OBJ := $(BUILD_DIR)/verify_main.o
 GRAPH_OBJS := $(BUILD_DIR)/g_parts.o $(BUILD_DIR)/g_poly.o $(BUILD_DIR)/g_expr.o \
-  $(BUILD_DIR)/g_twists.o $(BUILD_DIR)/g_walk.o
+  $(BUILD_DIR)/g_twists.o $(BUILD_DIR)/g_walk.o \
+  $(BUILD_DIR)/lg_common.o $(BUILD_DIR)/lg_parts.o $(BUILD_DIR)/lg_poly.o \
+  $(BUILD_DIR)/lg_expr.o $(BUILD_DIR)/lg_twists.o $(BUILD_DIR)/lg_walk.o
 
 TEST_SUITE_BIN := $(BUILD_DIR)/primeparts-tests
 TEST_SUITE_OBJS := $(BUILD_DIR)/core_test.o $(BUILD_DIR)/writer_test.o \
@@ -414,24 +416,45 @@ pp-fixture-warehouse: $(BUILD_DIR)/pp-fixture-warehouse
 
 
 
-GRAPH_HDRS := include/primeparts/graph/bigint.h include/primeparts/graph/parts.h \
-  include/primeparts/graph/poly.h include/primeparts/graph/expr.h \
-  include/primeparts/graph/twists.h include/primeparts/graph/walk.h
+GRAPH_HDRS := include/primeparts/lua/graph/bigint.h include/primeparts/lua/graph/parts.h \
+  include/primeparts/lua/graph/poly.h include/primeparts/lua/graph/expr.h \
+  include/primeparts/lua/graph/twists.h include/primeparts/lua/graph/walk.h
 
-$(BUILD_DIR)/g_parts.o: src/graph/parts.cc include/primeparts/graph/parts.h include/primeparts/core.h include/primeparts/pp_covering.h | $(BUILD_DIR)
+$(BUILD_DIR)/g_parts.o: src/lua/graph/parts.cc include/primeparts/lua/graph/parts.h include/primeparts/lua/lnt.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/g_poly.o: src/graph/poly.cc include/primeparts/graph/poly.h src/graph/fmpz_bigint.h | $(BUILD_DIR)
+$(BUILD_DIR)/g_poly.o: src/lua/graph/poly.cc include/primeparts/lua/graph/poly.h src/lua/graph/fmpz_bigint.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/g_expr.o: src/graph/expr.cc include/primeparts/graph/expr.h include/primeparts/graph/poly.h | $(BUILD_DIR)
+$(BUILD_DIR)/g_expr.o: src/lua/graph/expr.cc include/primeparts/lua/graph/expr.h include/primeparts/lua/graph/poly.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(GINAC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/g_twists.o: src/graph/twists.cc include/primeparts/graph/twists.h | $(BUILD_DIR)
+$(BUILD_DIR)/g_twists.o: src/lua/graph/twists.cc include/primeparts/lua/graph/twists.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/g_walk.o: src/graph/walk.cc $(GRAPH_HDRS) | $(BUILD_DIR)
+$(BUILD_DIR)/g_walk.o: src/lua/graph/walk.cc $(GRAPH_HDRS) | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(GINAC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/lgraph.o: src/lua/lgraph.cc include/primeparts/lua/lgraph.h include/primeparts/lua/lppconv.h $(GRAPH_HDRS) | $(BUILD_DIR)
-	$(CXX) $(CPPFLAGS) $(LUA_CPPFLAGS) $(SOL2_CPPFLAGS) $(GINAC_CPPFLAGS) $(ICEBERG_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+GRAPH_LUA_CPPFLAGS := $(CPPFLAGS) $(LUA_CPPFLAGS) $(SOL2_CPPFLAGS) $(GINAC_CPPFLAGS) $(ICEBERG_CPPFLAGS)
+GRAPH_LUA_HDRS := src/lua/graph/lcommon.h include/primeparts/lua/lppconv.h $(GRAPH_HDRS)
+
+$(BUILD_DIR)/lg_common.o: src/lua/graph/lcommon.cc $(GRAPH_LUA_HDRS) | $(BUILD_DIR)
+	$(CXX) $(GRAPH_LUA_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/lg_parts.o: src/lua/graph/lparts.cc $(GRAPH_LUA_HDRS) | $(BUILD_DIR)
+	$(CXX) $(GRAPH_LUA_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/lg_poly.o: src/lua/graph/lpoly.cc $(GRAPH_LUA_HDRS) | $(BUILD_DIR)
+	$(CXX) $(GRAPH_LUA_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/lg_expr.o: src/lua/graph/lexpr.cc $(GRAPH_LUA_HDRS) | $(BUILD_DIR)
+	$(CXX) $(GRAPH_LUA_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/lg_twists.o: src/lua/graph/ltwists.cc $(GRAPH_LUA_HDRS) | $(BUILD_DIR)
+	$(CXX) $(GRAPH_LUA_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/lg_walk.o: src/lua/graph/lwalk.cc $(GRAPH_LUA_HDRS) | $(BUILD_DIR)
+	$(CXX) $(GRAPH_LUA_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/lgraph.o: src/lua/lgraph.cc include/primeparts/lua/lgraph.h $(GRAPH_LUA_HDRS) | $(BUILD_DIR)
+	$(CXX) $(GRAPH_LUA_CPPFLAGS) $(CXXFLAGS) -c $< -o $@

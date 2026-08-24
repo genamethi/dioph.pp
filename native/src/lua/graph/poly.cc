@@ -1,4 +1,4 @@
-#include "primeparts/graph/poly.h"
+#include "primeparts/lua/graph/poly.h"
 
 #include <flint/fmpz.h>
 #include <flint/fmpz_poly.h>

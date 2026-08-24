@@ -4,7 +4,7 @@
 
 #include <flint/fmpz.h>
 
-#include "primeparts/graph/bigint.h"
+#include "primeparts/lua/graph/bigint.h"
 
 namespace primeparts::graph {
 

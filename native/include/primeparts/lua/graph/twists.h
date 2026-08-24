@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-#include "primeparts/graph/parts.h"
+#include "primeparts/lua/graph/parts.h"
 
 namespace primeparts::graph {
 

@@ -16,11 +16,7 @@
 
 namespace {
 
-struct Part {
-  int64_t m;
-  int64_t n;
-  int64_t q;
-};
+using primeparts::nt::Part;
 
 bool ResBit(const uint64_t* words, int modulus, uint64_t x) {
   const unsigned r = static_cast<unsigned>(x % static_cast<unsigned>(modulus));
@@ -71,43 +67,6 @@ uint64_t Tile(uint64_t word, unsigned field, uint64_t lim) {
   return x & lim;
 }
 
-void PartsOf(uint64_t p, std::vector<Part>* out) {
-  const int max_m = 63 - __builtin_clzll(p);
-  const uint64_t word = pp_cov_masks[p % PP_COV_MOD];
-  uint64_t lim = max_m >= 63 ? ~UINT64_C(0)
-                             : ((UINT64_C(1) << (max_m + 1)) - 1);
-  lim &= ~UINT64_C(1);
-
-  for (unsigned qi = 0; qi < PP_COV_NQ; ++qi) {
-    uint64_t field = Tile(word, qi, lim);
-    while (field != 0) {
-      const int m = __builtin_ctzll(field);
-      const uint64_t q = p - (UINT64_C(1) << m);
-      int32_t exp = 0;
-      field &= field - 1;
-      if (q < 2) continue;
-      if (CovExp(qi, q, &exp)) {
-        out->push_back({m, exp, static_cast<int64_t>(pp_cov_q[qi])});
-      }
-    }
-  }
-
-  uint64_t rest = Tile(word, PP_COV_NQ, lim);
-  while (rest != 0) {
-    const int m = __builtin_ctzll(rest);
-    const uint64_t q = p - (UINT64_C(1) << m);
-    uint64_t base = 0;
-    int32_t exp = 0;
-    rest &= rest - 1;
-    if (q < 2) continue;
-    if (n_is_prime(static_cast<ulong>(q))) {
-      out->push_back({m, 1, static_cast<int64_t>(q)});
-    } else if (Ppow(q, &base, &exp)) {
-      out->push_back({m, exp, static_cast<int64_t>(base)});
-    }
-  }
-}
-
 int64_t Pi(int64_t n) { return primecount_pi(n); }
 
 int64_t NthPrime(int64_t n) { return primecount_nth_prime(n); }
@@ -142,20 +101,20 @@ sol::table GenParts(int64_t p, sol::this_state ts) {
   const uint64_t input = static_cast<uint64_t>(p);
   if (p < 3) primeparts::lua::Fail("nt.genparts", "p must be at least 3");
 
-  std::vector<Part> parts;
-  PartsOf(input, &parts);
-  const int64_t k = static_cast<int64_t>(parts.size());
+  Part parts[primeparts::nt::kMaxParts];
+  const int k = primeparts::nt::PartsOf(input, parts);
 
-  std::sort(parts.begin(), parts.end(),
+  std::sort(parts, parts + k,
             [](const Part& a, const Part& b) { return a.m < b.m; });
 
   sol::state_view lua(ts);
   sol::table out = lua.create_table();
   out["p"] = p;
   out["k"] = k;
-  sol::table rows = lua.create_table(static_cast<int>(parts.size()), 0);
+  sol::table rows = lua.create_table(k, 0);
   int idx = 1;
-  for (const Part& part : parts) {
+  for (int i = 0; i < k; ++i) {
+    const Part& part = parts[i];
     sol::table row = lua.create_table(0, 3);
     row["m"] = part.m;
     row["n"] = part.n;
@@ -177,9 +136,10 @@ sol::table InverseGen(int64_t q, sol::this_state ts) {
   sol::table out = lua.create_table();
   out["q"] = q;
   out["k"] = k;
-  sol::table rows = lua.create_table(static_cast<int>(parts.size()), 0);
+  sol::table rows = lua.create_table(k, 0);
   int idx = 1;
-  for (const Part& part : parts) {
+  for (int i = 0; i < k; ++i) {
+    const Part& part = parts[i];
     sol::table row = lua.create_table(0, 3);
     row["m"] = part.m;
     row["n"] = part.n;
@@ -192,6 +152,49 @@ sol::table InverseGen(int64_t q, sol::this_state ts) {
 } */
 
 }  // namespace
+
+namespace primeparts::nt {
+
+int PartsOf(uint64_t p, Part* out) {
+  int count = 0;
+  const int max_m = 63 - __builtin_clzll(p);
+  const uint64_t word = pp_cov_masks[p % PP_COV_MOD];
+  uint64_t lim = max_m >= 63 ? ~UINT64_C(0)
+                             : ((UINT64_C(1) << (max_m + 1)) - 1);
+  lim &= ~UINT64_C(1);
+
+  for (unsigned qi = 0; qi < PP_COV_NQ; ++qi) {
+    uint64_t field = Tile(word, qi, lim);
+    while (field != 0) {
+      const int m = __builtin_ctzll(field);
+      const uint64_t q = p - (UINT64_C(1) << m);
+      int32_t exp = 0;
+      field &= field - 1;
+      if (q < 2) continue;
+      if (CovExp(qi, q, &exp)) {
+        out[count++] = {m, exp, static_cast<int64_t>(pp_cov_q[qi])};
+      }
+    }
+  }
+
+  uint64_t rest = Tile(word, PP_COV_NQ, lim);
+  while (rest != 0) {
+    const int m = __builtin_ctzll(rest);
+    const uint64_t q = p - (UINT64_C(1) << m);
+    uint64_t base = 0;
+    int32_t exp = 0;
+    rest &= rest - 1;
+    if (q < 2) continue;
+    if (n_is_prime(static_cast<ulong>(q))) {
+      out[count++] = {m, 1, static_cast<int64_t>(q)};
+    } else if (Ppow(q, &base, &exp)) {
+      out[count++] = {m, exp, static_cast<int64_t>(base)};
+    }
+  }
+  return count;
+}
+
+}  // namespace primeparts::nt
 
 extern "C" int luaopen_nt(lua_State *L) {
   sol::state_view lua(L);
