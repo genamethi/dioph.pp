@@ -15,7 +15,7 @@ local M = {}
 
 M.nt = {
   order = {"pi", "nth_prime", "next_prime", "prev_prime", "is_prime",
-           "is_prime_power", "genparts"},
+           "is_prime_power", "genparts", "invgp"},
   pi = "nt.pi(n: int) -> int",
   nth_prime = "nt.nth_prime(n: int) -> int",
   next_prime = "nt.next_prime(n: int) -> int",
@@ -26,6 +26,10 @@ M.nt = {
 nt.genparts(p: int)
   -> {p: int, k: int, partitions: [{m: int, n: int, q: int}]}
   ! pp_process_prime_array]],
+  invgp = [[
+nt.invgp(q: int, hi: int = 2^63-1)
+  -> {q: int, k: int, partitions: [{m: int, n: int, p: int}]}
+  ! q prime, q >= 3, hi >= q]],
 }
 
 M.query = {

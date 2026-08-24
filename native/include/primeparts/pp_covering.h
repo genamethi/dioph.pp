@@ -11,6 +11,8 @@
 
 static const uint64_t pp_cov_q[PP_COV_NQ] = {3ull, 5ull, 7ull, 13ull};
 
+static const int pp_cov_ord[PP_COV_NQ] = {2, 4, 3, 12};
+
 static const uint64_t pp_cov_masks[PP_COV_MOD] = {
   1152640029630136320ull,
   311029853627351554ull,

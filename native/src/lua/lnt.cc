@@ -58,6 +58,31 @@ bool CovExp(unsigned qi, uint64_t q, int32_t* exp) {
   return false;
 }
 
+uint64_t Screen(uint64_t base, int max_m) {
+  uint64_t ok = max_m >= 63 ? ~UINT64_C(0)
+                            : ((UINT64_C(1) << (max_m + 1)) - 1);
+  ok &= ~UINT64_C(1);
+
+  for (unsigned i = 0; i < PP_COV_NQ; ++i) {
+    const uint64_t r = pp_cov_q[i];
+    const uint64_t b = base % r;
+    if (b == 0) continue;
+
+    const int ord = pp_cov_ord[i];
+    uint64_t pw = 1;
+    for (int m0 = 0; m0 < ord; ++m0) {
+      if ((pw + b) % r == 0) {
+        for (int m = m0; m <= max_m; m += ord) {
+          if (base + (UINT64_C(1) << m) != r) ok &= ~(UINT64_C(1) << m);
+        }
+        break;
+      }
+      pw = (pw * 2) % r;
+    }
+  }
+  return ok;
+}
+
 uint64_t Tile(uint64_t word, unsigned field, uint64_t lim) {
   uint64_t x = ((word >> (PP_COV_FIELD * field)) & PP_COV_FIELD_MASK) << 1;
 
@@ -125,31 +150,36 @@ sol::table GenParts(int64_t p, sol::this_state ts) {
   return out;
 }
 
-/* I'll implement this later.
- * it's just q powered up to n and m such that p = 2^m + q^n
- * doesn't surpass the sixty four bit limit.
- * Don't throw anything out. Just be smart.
-sol::table InverseGen(int64_t q, sol::this_state ts) {
+sol::table InvGenParts(int64_t q, sol::optional<int64_t> hi,
+                       sol::this_state ts) {
+  static const char kFn[] = "nt.invgp";
+  if (q < 3) primeparts::lua::Fail(kFn, "q must be at least 3");
+  if (!n_is_prime(static_cast<ulong>(q)))
+    primeparts::lua::Fail(kFn, "q must be prime");
 
+  const int64_t cap = hi.value_or(INT64_MAX);
+  if (cap < q) primeparts::lua::Fail(kFn, "hi must be at least q");
+
+  std::vector<primeparts::nt::Edge> edges;
+  primeparts::nt::InvOf(static_cast<uint64_t>(q), static_cast<uint64_t>(cap),
+                        &edges);
 
   sol::state_view lua(ts);
   sol::table out = lua.create_table();
   out["q"] = q;
-  out["k"] = k;
-  sol::table rows = lua.create_table(k, 0);
+  out["k"] = static_cast<int64_t>(edges.size());
+  sol::table rows = lua.create_table(static_cast<int>(edges.size()), 0);
   int idx = 1;
-  for (int i = 0; i < k; ++i) {
-    const Part& part = parts[i];
+  for (const primeparts::nt::Edge& e : edges) {
     sol::table row = lua.create_table(0, 3);
-    row["m"] = part.m;
-    row["n"] = part.n;
-    row["p"] = part.p;
+    row["m"] = e.m;
+    row["n"] = e.n;
+    row["p"] = e.p;
     rows[idx++] = row;
   }
   out["partitions"] = rows;
   return out;
-
-} */
+}
 
 }  // namespace
 
@@ -194,6 +224,31 @@ int PartsOf(uint64_t p, Part* out) {
   return count;
 }
 
+void InvOf(uint64_t q, uint64_t hi, std::vector<Edge>* out) {
+  out->clear();
+  if (q < 3 || hi < q + 2) return;
+
+  uint64_t base = q;
+  for (int n = 1;; ++n) {
+    if (hi - base < 2) break;
+    const int max_m = 63 - __builtin_clzll(hi - base);
+
+    uint64_t ok = Screen(base, max_m);
+    while (ok != 0) {
+      const int m = __builtin_ctzll(ok);
+      const uint64_t p = base + (UINT64_C(1) << m);
+      ok &= ok - 1;
+      if (n_is_prime(static_cast<ulong>(p))) {
+        out->push_back({m, n, static_cast<int64_t>(p)});
+      }
+    }
+
+    uint64_t next = 0;
+    if (__builtin_mul_overflow(base, q, &next) || next > hi) break;
+    base = next;
+  }
+}
+
 }  // namespace primeparts::nt
 
 extern "C" int luaopen_nt(lua_State *L) {
@@ -206,7 +261,7 @@ extern "C" int luaopen_nt(lua_State *L) {
   nt.set_function("is_prime", &IsPrime);
   nt.set_function("is_prime_power", &IsPrimePower);
   nt.set_function("genparts", &GenParts);
-  //nt.set_function("invgp", &InverseGen);
+  nt.set_function("invgp", &InvGenParts);
   nt.push();
   return 1;
 }
