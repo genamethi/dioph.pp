@@ -67,6 +67,14 @@ Poly Poly::Lift(int64_t v) {
   return out;
 }
 
+Poly Poly::Term(int64_t coeff, int64_t exponent) {
+  Poly out;
+  if (exponent >= 0) {
+    fmpz_poly_set_coeff_si(out.impl_->p, static_cast<slong>(exponent), coeff);
+  }
+  return out;
+}
+
 int64_t Poly::Degree() const { return fmpz_poly_degree(impl_->p); }
 
 bool Poly::IsZero() const { return fmpz_poly_is_zero(impl_->p); }

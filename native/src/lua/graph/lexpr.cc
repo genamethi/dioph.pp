@@ -32,6 +32,11 @@ void BindExpr(sol::table& expr) {
         return out;
       },
       "degree", &Expr::Degree,
+      "ldegree", &Expr::LowDegree,
+      "coeff", &Expr::Coeff,
+      "head", &Expr::Head,
+      "arity", &Expr::Arity,
+      "op", &Expr::Op,
       "subs", sol::overload(
           [](const Expr& self, const std::string& name, int64_t v) {
             return self.Subs(name, v);

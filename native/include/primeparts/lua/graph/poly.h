@@ -28,6 +28,7 @@ class Poly {
   static Poly PowerOfTwo(int32_t m);
   static Poly He(int64_t n);
   static Poly Lift(int64_t v);
+  static Poly Term(int64_t coeff, int64_t exponent);
 
   int64_t Degree() const;
   bool IsZero() const;

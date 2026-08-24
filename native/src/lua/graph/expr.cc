@@ -2,6 +2,7 @@
 
 #include <ginac/ginac.h>
 
+#include <limits>
 #include <map>
 #include <mutex>
 #include <sstream>
@@ -18,6 +19,17 @@ GiNaC::symbol NamedSymbol(const std::string& name) {
   const auto it = table.find(name);
   if (it != table.end()) return it->second;
   return table.emplace(name, GiNaC::symbol(name)).first->second;
+}
+
+bool AsLong(const GiNaC::ex& e, long* out) {
+  if (!GiNaC::is_a<GiNaC::numeric>(e)) return false;
+  const GiNaC::numeric n = GiNaC::ex_to<GiNaC::numeric>(e);
+  if (!n.is_integer()) return false;
+  static const GiNaC::numeric lo(std::numeric_limits<long>::min());
+  static const GiNaC::numeric hi(std::numeric_limits<long>::max());
+  if (n < lo || n > hi) return false;
+  *out = n.to_long();
+  return true;
 }
 
 std::string ExText(const GiNaC::ex& e) {
@@ -119,8 +131,7 @@ Expr Expr::SubsExpr(const std::string& name, const Expr& value) const {
 }
 
 bool Expr::IsNumeric() const {
-  return GiNaC::is_a<GiNaC::numeric>(GiNaC::evalf(impl_->e)) &&
-         GiNaC::is_a<GiNaC::numeric>(impl_->e.expand());
+  return GiNaC::is_a<GiNaC::numeric>(impl_->e.expand());
 }
 
 BigInt Expr::Value(std::string* error) const {
@@ -130,14 +141,14 @@ BigInt Expr::Value(std::string* error) const {
     *error = "expression is not a number; substitute its symbols first";
     return out;
   }
-  const std::string text = ExText(v);
-  try {
-    out.value = std::stoll(text);
+  long fits = 0;
+  if (AsLong(v, &fits)) {
+    out.value = fits;
     out.fits = true;
-  } catch (const std::exception&) {
-    out.fits = false;
-    out.text = text;
+    return out;
   }
+  out.fits = false;
+  out.text = ExText(v);
   return out;
 }
 
@@ -181,6 +192,11 @@ bool Expr::ToPoly(const std::string& name, Poly* out, std::string* error) const 
       return false;
     }
     if (c.is_zero()) continue;
+    long fits = 0;
+    if (AsLong(c, &fits)) {
+      acc = acc.Add(Poly::Term(fits, i));
+      continue;
+    }
     Poly term;
     std::string perr;
     if (!PolyFromDecimal(ExText(c), i, &term, &perr)) {
@@ -191,6 +207,40 @@ bool Expr::ToPoly(const std::string& name, Poly* out, std::string* error) const 
   }
   *out = std::move(acc);
   return true;
+}
+
+int64_t Expr::LowDegree(const std::string& name) const {
+  return impl_->e.expand().ldegree(NamedSymbol(name));
+}
+
+Expr Expr::Coeff(const std::string& name, int64_t power) const {
+  Expr out;
+  out.impl_->e = impl_->e.expand().coeff(NamedSymbol(name),
+                                         static_cast<int>(power));
+  return out;
+}
+
+std::string Expr::Head() const {
+  const GiNaC::ex& e = impl_->e;
+  if (GiNaC::is_a<GiNaC::numeric>(e)) return "numeric";
+  if (GiNaC::is_a<GiNaC::symbol>(e)) return "symbol";
+  if (GiNaC::is_a<GiNaC::add>(e)) return "add";
+  if (GiNaC::is_a<GiNaC::mul>(e)) return "mul";
+  if (GiNaC::is_a<GiNaC::power>(e)) return "power";
+  if (GiNaC::is_a<GiNaC::function>(e)) return "function";
+  return "other";
+}
+
+int64_t Expr::Arity() const { return impl_->e.nops(); }
+
+Expr Expr::Op(int64_t i) const {
+  Expr out;
+  if (i < 0 || static_cast<std::size_t>(i) >= impl_->e.nops()) {
+    out.impl_->e = 0;
+    return out;
+  }
+  out.impl_->e = impl_->e.op(static_cast<std::size_t>(i));
+  return out;
 }
 
 std::string Expr::Text() const { return ExText(impl_->e); }

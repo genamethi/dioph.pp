@@ -207,7 +207,10 @@ M["graph.poly"] = {
 M.Expr = [[
 Expr   symbolic, held unexpanded (GiNaC)
   + - * ^ between Exprs; tostring
-  :text() :expand() :symbols() :degree(sym) :subs(sym, int) :value()
+  :text() :expand() :numeric() :symbols() :subs(sym, int | Expr) :value()
+  :degree(sym) :ldegree(sym) :coeff(sym, k) -> Expr
+  :head() -> "add" | "mul" | "power" | "symbol" | "numeric" | "function"
+  :arity() :op(i) -> Expr    the GiNaC tree, one node at a time
   :poly(sym) -> Poly     :he(sym) -> [{i, c}] Hermite coefficients]]
 
 M.Poly = [[

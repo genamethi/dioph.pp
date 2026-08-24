@@ -39,6 +39,12 @@ class Expr {
 
   std::vector<std::string> Symbols() const;
   int64_t Degree(const std::string& name) const;
+  int64_t LowDegree(const std::string& name) const;
+  Expr Coeff(const std::string& name, int64_t power) const;
+
+  std::string Head() const;
+  int64_t Arity() const;
+  Expr Op(int64_t i) const;
 
   bool ToPoly(const std::string& name, Poly* out, std::string* error) const;
 
