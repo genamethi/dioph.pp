@@ -104,9 +104,10 @@ ICEBERG_SRC_CPPFLAGS := -Ivendor/iceberg-cpp/src
 VERIFY_OBJ := $(BUILD_DIR)/verify.o
 VERIFY_MAIN_OBJ := $(BUILD_DIR)/verify_main.o
 GRAPH_OBJS := $(BUILD_DIR)/g_parts.o $(BUILD_DIR)/g_poly.o $(BUILD_DIR)/g_expr.o \
-  $(BUILD_DIR)/g_twists.o $(BUILD_DIR)/g_walk.o \
+  $(BUILD_DIR)/g_twists.o $(BUILD_DIR)/g_walk.o $(BUILD_DIR)/g_depth.o \
   $(BUILD_DIR)/lg_common.o $(BUILD_DIR)/lg_parts.o $(BUILD_DIR)/lg_poly.o \
-  $(BUILD_DIR)/lg_expr.o $(BUILD_DIR)/lg_twists.o $(BUILD_DIR)/lg_walk.o
+  $(BUILD_DIR)/lg_expr.o $(BUILD_DIR)/lg_twists.o $(BUILD_DIR)/lg_walk.o \
+  $(BUILD_DIR)/lg_depth.o
 
 TEST_SUITE_BIN := $(BUILD_DIR)/primeparts-tests
 TEST_SUITE_OBJS := $(BUILD_DIR)/core_test.o $(BUILD_DIR)/writer_test.o \
@@ -417,6 +418,7 @@ pp-fixture-warehouse: $(BUILD_DIR)/pp-fixture-warehouse
 
 
 GRAPH_HDRS := include/primeparts/lua/graph/bigint.h include/primeparts/lua/graph/parts.h \
+  include/primeparts/lua/graph/depth.h \
   include/primeparts/lua/graph/poly.h include/primeparts/lua/graph/expr.h \
   include/primeparts/lua/graph/twists.h include/primeparts/lua/graph/walk.h
 
@@ -430,6 +432,9 @@ $(BUILD_DIR)/g_expr.o: src/lua/graph/expr.cc include/primeparts/lua/graph/expr.h
 	$(CXX) $(CPPFLAGS) $(GINAC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/g_twists.o: src/lua/graph/twists.cc include/primeparts/lua/graph/twists.h | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/g_depth.o: src/lua/graph/depth.cc include/primeparts/lua/graph/depth.h include/primeparts/lua/graph/parts.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/g_walk.o: src/lua/graph/walk.cc $(GRAPH_HDRS) include/primeparts/lua/lnt.h | $(BUILD_DIR)
@@ -454,6 +459,9 @@ $(BUILD_DIR)/lg_twists.o: src/lua/graph/ltwists.cc $(GRAPH_LUA_HDRS) | $(BUILD_D
 	$(CXX) $(GRAPH_LUA_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/lg_walk.o: src/lua/graph/lwalk.cc $(GRAPH_LUA_HDRS) | $(BUILD_DIR)
+	$(CXX) $(GRAPH_LUA_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/lg_depth.o: src/lua/graph/ldepth.cc include/primeparts/lua/graph/depth.h $(GRAPH_LUA_HDRS) | $(BUILD_DIR)
 	$(CXX) $(GRAPH_LUA_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/lgraph.o: src/lua/lgraph.cc include/primeparts/lua/lgraph.h $(GRAPH_LUA_HDRS) | $(BUILD_DIR)

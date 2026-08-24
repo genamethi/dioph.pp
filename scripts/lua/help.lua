@@ -108,9 +108,10 @@ irc.upper_bound{table: string, field: string}
 }
 
 M.graph = {
-  order = {"parts", "walk", "twists", "expr", "poly"},
+  order = {"parts", "depth", "walk", "twists", "expr", "poly"},
   parts = "graph.parts -> module   of, calls, source",
-  walk = "graph.walk -> module   reach, chains, forms",
+  depth = "graph.depth -> module   of, root, Depth",
+  walk = "graph.walk -> module   reach, chains, forms, skeleton",
   twists = "graph.twists -> module   build, TwistTable",
   expr = "graph.expr -> module   sym, int, pow2, Expr",
   poly = "graph.poly -> module   he, x, const, pow2, Poly",
@@ -123,6 +124,15 @@ graph.parts.of{p: int} | graph.parts{p: int}
   -> {p: int, k: int, partitions: [{p: int, m: int, n: int, q: int}]}]],
   calls = "graph.parts.calls() -> int",
   source = "graph.parts.source() -> string",
+}
+
+M["graph.depth"] = {
+  order = {"of", "root"},
+  of = [[
+graph.depth.of{p: int, depth: int = -1, max_cells: int = 64000000} -> Depth
+graph.depth{p: int, ...} -> Depth
+  ! max_cells exceeded]],
+  root = "graph.depth.root(r: int) -> Depth",
 }
 
 M["graph.walk"] = {
@@ -192,13 +202,20 @@ Poly   exact integer univariate (FLINT)
   + - * and == between Polys; tostring
   :degree() :zero() :text() :mono() :he() :eval(x) :pow(e) :mod(n)]]
 
+M.Depth = [[
+Depth   chains into p by length, per root
+  D(p) = z * sum over q in K(p) of D(q);  D(r) = 1 at a root
+  + between Depths; :shift() multiplies by z
+  :roots() :at(r) -> [int] counts by length  :min(r) :max() :count()
+  :cut(d) :known() -> int, -1 when complete  :complete() :cells()]]
+
 M.TwistTable = [[
 TwistTable   the n >= 2 edges below hi
   :hi() :origin() :count() :has(p) :at(p) :into(q) :rows(limit)]]
 
 local modules = {"nt", "query", "irc", "graph"}
-local submodules = {"graph.parts", "graph.walk", "graph.twists", "graph.expr",
-                    "graph.poly"}
+local submodules = {"graph.parts", "graph.depth", "graph.walk",
+                    "graph.twists", "graph.expr", "graph.poly"}
 
 -- A node renders one entry or a whole module; help.x.y and help(x.y) both
 -- resolve to the same node.

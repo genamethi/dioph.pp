@@ -28,6 +28,7 @@ void SetCall(sol::state_view lua, sol::table target, const sol::object& fn);
 
 extern "C" {
 int luaopen_graph_parts(lua_State* L);
+int luaopen_graph_depth(lua_State* L);
 int luaopen_graph_poly(lua_State* L);
 int luaopen_graph_expr(lua_State* L);
 int luaopen_graph_twists(lua_State* L);

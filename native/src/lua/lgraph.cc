@@ -14,6 +14,7 @@ extern "C" int luaopen_graph(lua_State *L) {
   graph["expr"] = Submodule(L, "graph.expr", &luaopen_graph_expr);
   graph["twists"] = Submodule(L, "graph.twists", &luaopen_graph_twists);
   graph["walk"] = Submodule(L, "graph.walk", &luaopen_graph_walk);
+  graph["depth"] = Submodule(L, "graph.depth", &luaopen_graph_depth);
   graph.push();
   return 1;
 }
