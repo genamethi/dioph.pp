@@ -132,21 +132,22 @@ graph.walk.reach{p: int, depth: int = 8, max_nodes: int = 1000000,
                  twists: TwistTable?}
   -> {levels: [{depth: int, count: int, nodes: [int]}],
       twists: [{p: int, depth: int}],
-      nodes: int, calls: int, complete: bool}]],
+      nodes: int, calls: int}
+  ! max_nodes exceeded]],
   chains = [[
-graph.walk.chains{p: int, depth: int = 8, limit: int = 1000,
-                  sources: bool = false, targets: [int] | [{p: int}] = nil}
+graph.walk.chains{p: int, depth: int = 8, sources: bool = false,
+                  targets: [int] | [{p: int}] = nil}
   -> [{terminal: int, length: int, twists: int, degree: int,
-       edges: [{m, n, q}]}], .meta = {truncated: bool, calls: int}]],
+       edges: [{m, n, q}]}], .meta = {calls: int}]],
   forms = [[
-graph.walk.forms{p: int, depth: int = 8, limit: int = 1000,
-                 sources: bool = false, targets: [int] | [{p: int}] = nil,
+graph.walk.forms{p: int, depth: int = 8, sources: bool = false,
+                 targets: [int] | [{p: int}] = nil,
                  symbol: string = "x", distinct: bool = true}
   -> [{terminal: int, length: int, twists: int, degree: int,
        edges: [{m, n, q}], paths: int, expr: Expr, exact: bool,
        word: {a0: int, blocks: [{n: int, c: int}], skeleton: [int],
               degree: int, grade: int, odd_degree: int, terminal: int}}]
-     .meta = {truncated: bool, calls: int, symbol: string}]],
+     .meta = {calls: int, symbol: string}]],
   skeleton = [[
 graph.walk.skeleton{skeleton: [int], hi: int, roots: [int] | [{p: int}] = nil,
                     symbol: string = "x"}

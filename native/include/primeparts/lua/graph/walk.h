@@ -26,7 +26,6 @@ struct Frontier {
   int64_t node_count = 0;
   int64_t oracle_calls = 0;
   int32_t reached_depth = 0;
-  bool complete = false;
 };
 
 bool Reach(Oracle& oracle, int64_t p, int32_t depth, int64_t max_nodes,
@@ -60,13 +59,11 @@ Expr WordForm(const Word& word, const std::string& symbol);
 
 struct ChainSet {
   std::vector<Chain> chains;
-  bool truncated = false;
   int64_t oracle_calls = 0;
 };
 
 struct ChainOpts {
   int32_t depth = 8;
-  int64_t limit = 1000;
   bool sources_only = false;
   std::vector<int64_t> targets;
 };

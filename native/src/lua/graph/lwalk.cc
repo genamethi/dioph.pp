@@ -35,7 +35,6 @@ using primeparts::lua::Spec;
 using primeparts::lua::StrOr;
 
 constexpr int64_t kDefaultDepth = 8;
-constexpr int64_t kDefaultLimit = 1000;
 constexpr int64_t kDefaultMaxNodes = 1000000;
 
 std::vector<int64_t> IdArray(const sol::table& t, const char* key) {
@@ -124,7 +123,6 @@ sol::table Reach(sol::this_state ts, sol::optional<sol::table> arg) {
   out["nodes"] = frontier.node_count;
   out["calls"] = frontier.oracle_calls;
   out["depth"] = frontier.reached_depth;
-  out["complete"] = frontier.complete;
   return out;
 }
 
@@ -133,7 +131,6 @@ void CollectChains(const sol::table& spec, const char* fn, int64_t* p,
   *p = ReqInt(spec, "p", fn);
   ChainOpts opts;
   opts.depth = static_cast<int32_t>(IntOr(spec, "depth", kDefaultDepth));
-  opts.limit = IntOr(spec, "limit", kDefaultLimit);
   opts.sources_only = BoolOr(spec, "sources", false);
   opts.targets = IdArray(spec, "targets");
   *symbol = StrOr(spec, "symbol", "x");
@@ -164,7 +161,6 @@ sol::table Chains(sol::this_state ts, sol::optional<sol::table> arg) {
     out[idx++] = row;
   }
   sol::table meta = lua.create_table();
-  meta["truncated"] = set.truncated;
   meta["calls"] = set.oracle_calls;
   out["meta"] = meta;
   return out;
@@ -220,7 +216,6 @@ sol::table Forms(sol::this_state ts, sol::optional<sol::table> arg) {
     }
   }
   sol::table meta = lua.create_table();
-  meta["truncated"] = set.truncated;
   meta["calls"] = set.oracle_calls;
   meta["symbol"] = symbol;
   out["meta"] = meta;

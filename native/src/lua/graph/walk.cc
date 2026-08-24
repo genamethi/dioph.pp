@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <string>
 #include <unordered_set>
 #include <utility>
 
@@ -26,7 +27,6 @@ bool Reach(Oracle& oracle, int64_t p, int32_t depth, int64_t max_nodes,
   out->twist_hits.clear();
   out->node_count = 0;
   out->reached_depth = 0;
-  out->complete = true;
 
   std::unordered_set<int64_t> seen;
   std::vector<int64_t> current{p};
@@ -54,13 +54,14 @@ bool Reach(Oracle& oracle, int64_t p, int32_t depth, int64_t max_nodes,
     for (const int64_t node : current) {
       if (!oracle.Parts(node, &parts, error)) return false;
       for (const Part& part : parts) {
-        if (seen.insert(part.q).second) next.push_back(part.q);
-      }
-      if (max_nodes > 0 &&
-          out->node_count + static_cast<int64_t>(next.size()) > max_nodes) {
-        out->complete = false;
-        out->oracle_calls = oracle.Calls() - before;
-        return true;
+        if (!seen.insert(part.q).second) continue;
+        if (max_nodes > 0 &&
+            out->node_count + static_cast<int64_t>(next.size()) >= max_nodes) {
+          *error = "reached the node ceiling of " + std::to_string(max_nodes) +
+                   " at depth " + std::to_string(d + 1);
+          return false;
+        }
+        next.push_back(part.q);
       }
     }
     current = std::move(next);
@@ -98,10 +99,6 @@ struct Walker {
   }
 
   bool Visit(int64_t node, int32_t d) {
-    if (out->chains.size() >= static_cast<std::size_t>(opts->limit)) {
-      out->truncated = true;
-      return true;
-    }
     if (node < floor_p) return true;
 
     std::vector<Part> parts;
@@ -121,7 +118,6 @@ struct Walker {
       const bool ok = Visit(part.q, d + 1);
       path.pop_back();
       if (!ok) return false;
-      if (out->truncated) return true;
     }
     return true;
   }
@@ -135,12 +131,7 @@ bool Chains(Oracle& oracle, int64_t p, const ChainOpts& opts, ChainSet* out,
     *error = "p must be at least 3";
     return false;
   }
-  if (opts.limit <= 0) {
-    *error = "limit must be positive";
-    return false;
-  }
   out->chains.clear();
-  out->truncated = false;
   const int64_t before = oracle.Calls();
 
   ChainOpts sorted = opts;
