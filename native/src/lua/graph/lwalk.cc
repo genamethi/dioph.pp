@@ -243,8 +243,9 @@ sol::table Skeleton(sol::this_state ts, sol::optional<sol::table> arg) {
   sol::table out = lua.create_table(static_cast<int>(set.hits.size()), 0);
   int idx = 1;
   for (const SkelHit& hit : set.hits) {
-    sol::table row = lua.create_table(0, 6);
+    sol::table row = lua.create_table(0, 7);
     row["p"] = hit.p;
+    row["edges"] = EdgeTable(lua, hit.edges);
     row["terminal"] = hit.word.terminal;
     row["degree"] = hit.word.Degree();
     row["word"] = WordTable(lua, hit.word);

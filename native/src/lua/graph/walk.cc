@@ -184,11 +184,12 @@ struct SkelWalk {
   int64_t root = 0;
   int64_t a0 = 0;
   std::vector<Block> blocks;
+  std::vector<Edge> edges;
 
   void Run(std::size_t level, int64_t entry) {
     const int32_t n = (*skel)[level];
     std::vector<int64_t> cone;
-    std::vector<nt::Edge> edges;
+    std::vector<nt::Edge> found;
     Cone(entry, bound[level], &cone);
     out->nodes += static_cast<int64_t>(cone.size());
 
@@ -201,19 +202,22 @@ struct SkelWalk {
       }
 
       nt::InvOf(static_cast<uint64_t>(v),
-                static_cast<uint64_t>(bound[level + 1]), &edges);
-      for (const nt::Edge& e : edges) {
+                static_cast<uint64_t>(bound[level + 1]), &found);
+      for (const nt::Edge& e : found) {
         if (e.n != n) continue;
         blocks.push_back(Block{.n = n, .c = INT64_C(1) << e.m});
+        edges.push_back(e);
         if (level + 1 == skel->size()) {
           Word word;
           word.terminal = root;
           word.a0 = a0;
           word.blocks = blocks;
-          out->hits.push_back(SkelHit{.word = std::move(word), .p = e.p});
+          out->hits.push_back(
+              SkelHit{.word = std::move(word), .edges = edges, .p = e.p});
         } else {
           Run(level + 1, e.p);
         }
+        edges.pop_back();
         blocks.pop_back();
       }
 

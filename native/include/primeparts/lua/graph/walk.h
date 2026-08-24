@@ -65,6 +65,7 @@ struct SkelOpts {
 
 struct SkelHit {
   Word word;
+  std::vector<Edge> edges;
   int64_t p = 0;
 };
 

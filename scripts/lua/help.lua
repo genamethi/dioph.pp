@@ -4,6 +4,8 @@
 --   help.irc          every entry in irc      help(irc)
 --   help.irc.open     one entry               help(irc.open)
 --
+-- Worked examples: scripts/lua/examples/*.lua
+--
 -- A module with one dominant entry is callable directly:
 --   graph.parts{p=...}  graph.depth{p=...}  graph.words{p=...}
 --   graph.twists{hi=...}
