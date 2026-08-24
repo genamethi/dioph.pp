@@ -14,6 +14,7 @@ class Depth {
   static constexpr int32_t kComplete = INT32_MAX;
 
   static Depth Of(int64_t root);
+  static Depth From(int64_t root, std::vector<int64_t> coeffs);
 
   Depth Shift() const;
   Depth Add(const Depth& other) const;

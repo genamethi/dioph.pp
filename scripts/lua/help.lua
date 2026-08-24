@@ -108,9 +108,10 @@ irc.upper_bound{table: string, field: string}
 }
 
 M.graph = {
-  order = {"parts", "depth", "walk", "twists", "expr", "poly"},
+  order = {"parts", "depth", "words", "walk", "twists", "expr", "poly"},
   parts = "graph.parts -> module   of, calls, source",
   depth = "graph.depth -> module   of, root, Depth",
+  words = "graph.words -> module   of, root, Words",
   walk = "graph.walk -> module   reach, chains, forms, skeleton",
   twists = "graph.twists -> module   build, TwistTable",
   expr = "graph.expr -> module   sym, int, pow2, Expr",
@@ -133,6 +134,16 @@ graph.depth.of{p: int, depth: int = -1, max_cells: int = 64000000} -> Depth
 graph.depth{p: int, ...} -> Depth
   ! max_cells exceeded]],
   root = "graph.depth.root(r: int) -> Depth",
+}
+
+M["graph.words"] = {
+  order = {"of", "root"},
+  of = [[
+graph.words.of{p: int, depth: int = -1, max_cells: int = 64000000,
+               targets: [int] | [{p: int}] = nil} -> Words
+graph.words{p: int, ...} -> Words
+  ! max_cells exceeded]],
+  root = "graph.words.root(r: int) -> Words",
 }
 
 M["graph.walk"] = {
@@ -209,13 +220,22 @@ Depth   chains into p by length, per root
   :roots() :at(r) -> [int] counts by length  :min(r) :max() :count()
   :cut(d) :known() -> int, -1 when complete  :complete() :cells()]]
 
+M.Words = [[
+Words   the words of p, graded by chain length
+  W(r) = the empty word at a root
+  W(p) = sum over (m,n,q) in K(p) of W(q):step(m, n)
+  + between Words; :step(m, n) applies one edge
+  :rows(symbol) -> [{word, terminal, degree, expr, paths, by_depth}]
+  :size() :count() :cut(d) :known() :complete() :cells()
+  :grade() -> Depth   forget the word, keep the lengths]]
+
 M.TwistTable = [[
 TwistTable   the n >= 2 edges below hi
   :hi() :origin() :count() :has(p) :at(p) :into(q) :rows(limit)]]
 
 local modules = {"nt", "query", "irc", "graph"}
-local submodules = {"graph.parts", "graph.depth", "graph.walk",
-                    "graph.twists", "graph.expr", "graph.poly"}
+local submodules = {"graph.parts", "graph.depth", "graph.words",
+                    "graph.walk", "graph.twists", "graph.expr", "graph.poly"}
 
 -- A node renders one entry or a whole module; help.x.y and help(x.y) both
 -- resolve to the same node.

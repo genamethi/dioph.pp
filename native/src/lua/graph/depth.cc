@@ -20,6 +20,13 @@ Depth Depth::Of(int64_t root) {
   return out;
 }
 
+Depth Depth::From(int64_t root, std::vector<int64_t> coeffs) {
+  Depth out;
+  while (!coeffs.empty() && coeffs.back() == 0) coeffs.pop_back();
+  if (!coeffs.empty()) out.by_root_.emplace_back(root, std::move(coeffs));
+  return out;
+}
+
 Depth Depth::Shift() const {
   Depth out;
   out.known_ = known_ == kComplete ? kComplete : known_ + 1;

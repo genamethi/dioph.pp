@@ -292,60 +292,13 @@ bool Skeleton(const SkelOpts& opts, SkelSet* out, std::string* error) {
   return true;
 }
 
-int64_t Word::Degree() const {
-  int64_t d = 1;
-  for (const Block& b : blocks) d *= b.n;
-  return d;
-}
-
-int32_t Word::Grade() const { return static_cast<int32_t>(blocks.size()); }
-
-int64_t Word::OddDegree() const {
-  int64_t d = Degree();
-  while (d % 2 == 0) d /= 2;
-  return d;
-}
-
-std::string Word::Key() const {
-  std::string out = std::to_string(terminal) + ":" + std::to_string(a0);
-  for (const Block& b : blocks) {
-    out += "|" + std::to_string(b.n) + "," + std::to_string(b.c);
-  }
-  return out;
-}
-
 Word WordOf(const Chain& chain) {
   Word word;
   word.terminal = chain.terminal;
-  int64_t acc = 0;
   for (auto it = chain.edges.rbegin(); it != chain.edges.rend(); ++it) {
-    const int64_t shift = INT64_C(1) << it->m;
-    if (it->n == 1) {
-      acc += shift;
-      continue;
-    }
-    if (word.blocks.empty()) {
-      word.a0 = acc;
-    } else {
-      word.blocks.back().c = acc;
-    }
-    word.blocks.push_back(Block{.n = it->n, .c = 0});
-    acc = shift;
-  }
-  if (word.blocks.empty()) {
-    word.a0 = acc;
-  } else {
-    word.blocks.back().c = acc;
+    word = word.Step(it->m, it->n);
   }
   return word;
-}
-
-Expr WordForm(const Word& word, const std::string& symbol) {
-  Expr form = Expr::Symbol(symbol).Add(Expr::Int(word.a0));
-  for (const Block& b : word.blocks) {
-    form = form.Pow(b.n).Add(Expr::Int(b.c));
-  }
-  return form;
 }
 
 Expr ChainForm(const std::vector<Edge>& edges, const std::string& symbol) {

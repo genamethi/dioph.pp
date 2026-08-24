@@ -13,6 +13,7 @@ extern "C" int luaopen_graph(lua_State *L) {
   graph["poly"] = Submodule(L, "graph.poly", &luaopen_graph_poly);
   graph["expr"] = Submodule(L, "graph.expr", &luaopen_graph_expr);
   graph["twists"] = Submodule(L, "graph.twists", &luaopen_graph_twists);
+  graph["words"] = Submodule(L, "graph.words", &luaopen_graph_words);
   graph["walk"] = Submodule(L, "graph.walk", &luaopen_graph_walk);
   graph["depth"] = Submodule(L, "graph.depth", &luaopen_graph_depth);
   graph.push();

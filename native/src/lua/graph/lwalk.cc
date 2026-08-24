@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <string>
 #include <utility>
@@ -176,25 +177,20 @@ sol::table Forms(sol::this_state ts, sol::optional<sol::table> arg) {
   CollectChains(spec, kFn, &p, &set, &symbol);
 
   const bool distinct = BoolOr(spec, "distinct", true);
-  std::vector<std::pair<int64_t, std::string>> seen;
+  std::map<Word, int> seen;
   std::vector<int64_t> seen_count;
   sol::table out = lua.create_table(static_cast<int>(set.chains.size()), 0);
   int idx = 1;
   for (const Chain& chain : set.chains) {
     Expr form = primeparts::graph::ChainForm(chain.edges, symbol);
     const Word word = primeparts::graph::WordOf(chain);
-    const std::string key = word.Key();
     if (distinct) {
-      bool dup = false;
-      for (std::size_t s = 0; s < seen.size(); ++s) {
-        if (seen[s].second == key) {
-          seen_count[s]++;
-          dup = true;
-          break;
-        }
+      const auto [at, fresh] =
+          seen.emplace(word, static_cast<int>(seen_count.size()));
+      if (!fresh) {
+        seen_count[at->second]++;
+        continue;
       }
-      if (dup) continue;
-      seen.emplace_back(chain.terminal, key);
       seen_count.push_back(1);
     }
     sol::table row = lua.create_table(0, 8);

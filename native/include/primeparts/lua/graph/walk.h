@@ -7,6 +7,7 @@
 #include "primeparts/lua/graph/expr.h"
 #include "primeparts/lua/graph/parts.h"
 #include "primeparts/lua/graph/twists.h"
+#include "primeparts/lua/graph/word.h"
 
 namespace primeparts::graph {
 
@@ -31,22 +32,6 @@ struct Frontier {
 bool Reach(Oracle& oracle, int64_t p, int32_t depth, int64_t max_nodes,
            const TwistTable* twists, Frontier* out, std::string* error);
 
-struct Block {
-  int32_t n = 0;
-  int64_t c = 0;
-};
-
-struct Word {
-  int64_t a0 = 0;
-  std::vector<Block> blocks;
-  int64_t terminal = 0;
-
-  int64_t Degree() const;
-  int32_t Grade() const;
-  int64_t OddDegree() const;
-  std::string Key() const;
-};
-
 struct Chain {
   std::vector<Edge> edges;
   int64_t terminal = 0;
@@ -55,7 +40,6 @@ struct Chain {
 };
 
 Word WordOf(const Chain& chain);
-Expr WordForm(const Word& word, const std::string& symbol);
 
 struct ChainSet {
   std::vector<Chain> chains;
