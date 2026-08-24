@@ -6,23 +6,21 @@
 #include <string>
 #include <vector>
 
+#include "primeparts/lua/lnt.h"
+
 namespace primeparts::graph {
 
-struct Part {
-  int32_t m = 0;
-  int32_t n = 0;
-  int64_t q = 0;
-};
+using Edge = nt::Edge;
 
 class Oracle {
  public:
   virtual ~Oracle() = default;
-  virtual bool Parts(int64_t p, std::vector<Part>* out, std::string* error) = 0;
+  virtual bool Parts(int64_t p, std::vector<Edge>* out, std::string* error) = 0;
   virtual const char* Name() const = 0;
   virtual int64_t Calls() const = 0;
 };
 
-bool DynamicParts(int64_t p, std::vector<Part>* out, std::string* error);
+bool DynamicParts(int64_t p, std::vector<Edge>* out, std::string* error);
 
 std::unique_ptr<Oracle> MakeDynamicOracle();
 

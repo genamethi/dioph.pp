@@ -19,8 +19,7 @@ Oracle& SharedOracle();
 
 sol::object PushBig(sol::state_view lua, const BigInt& v);
 sol::table CoeffTable(sol::state_view lua, const std::vector<Coeff>& coeffs);
-sol::table PartTable(sol::state_view lua, const std::vector<Part>& parts);
-sol::table TwistRows(sol::state_view lua, const std::vector<TwistRow>& rows);
+sol::table EdgeTable(sol::state_view lua, const std::vector<Edge>& edges);
 
 sol::table Submodule(lua_State* L, const char* name, lua_CFunction opener);
 void SetCall(sol::state_view lua, sol::table target, const sol::object& fn);

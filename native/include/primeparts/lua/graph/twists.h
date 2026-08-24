@@ -9,34 +9,27 @@
 
 namespace primeparts::graph {
 
-struct TwistRow {
-  int64_t p = 0;
-  int32_t m = 0;
-  int32_t n = 0;
-  int64_t q = 0;
-};
-
 class TwistTable {
  public:
   static std::unique_ptr<TwistTable> Build(int64_t hi, std::string* error);
-  static std::unique_ptr<TwistTable> FromRows(std::vector<TwistRow> rows,
+  static std::unique_ptr<TwistTable> FromRows(std::vector<Edge> rows,
                                               int64_t hi, std::string* error);
 
   const char* Origin() const { return origin_; }
 
   int64_t Hi() const { return hi_; }
   std::size_t Count() const { return rows_.size(); }
-  const std::vector<TwistRow>& Rows() const { return rows_; }
+  const std::vector<Edge>& Rows() const { return rows_; }
 
   bool Has(int64_t p) const;
-  std::vector<TwistRow> At(int64_t p) const;
-  std::vector<TwistRow> Into(int64_t q) const;
+  std::vector<Edge> At(int64_t p) const;
+  std::vector<Edge> Into(int64_t q) const;
 
  private:
   int64_t hi_ = 0;
   const char* origin_ = "enumerated";
-  std::vector<TwistRow> rows_;
-  std::vector<TwistRow> by_q_;
+  std::vector<Edge> rows_;
+  std::vector<Edge> by_q_;
 
   void Index();
 };

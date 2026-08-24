@@ -31,28 +31,15 @@ sol::table CoeffTable(sol::state_view lua, const std::vector<Coeff>& coeffs) {
   return out;
 }
 
-sol::table PartTable(sol::state_view lua, const std::vector<Part>& parts) {
-  sol::table out = lua.create_table(static_cast<int>(parts.size()), 0);
+sol::table EdgeTable(sol::state_view lua, const std::vector<Edge>& edges) {
+  sol::table out = lua.create_table(static_cast<int>(edges.size()), 0);
   int idx = 1;
-  for (const Part& p : parts) {
-    sol::table row = lua.create_table(0, 3);
-    row["m"] = p.m;
-    row["n"] = p.n;
-    row["q"] = p.q;
-    out[idx++] = row;
-  }
-  return out;
-}
-
-sol::table TwistRows(sol::state_view lua, const std::vector<TwistRow>& rows) {
-  sol::table out = lua.create_table(static_cast<int>(rows.size()), 0);
-  int idx = 1;
-  for (const TwistRow& r : rows) {
+  for (const Edge& e : edges) {
     sol::table row = lua.create_table(0, 4);
-    row["p"] = r.p;
-    row["m"] = r.m;
-    row["n"] = r.n;
-    row["q"] = r.q;
+    row["p"] = e.p;
+    row["m"] = e.m;
+    row["n"] = e.n;
+    row["q"] = e.q;
     out[idx++] = row;
   }
   return out;

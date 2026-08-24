@@ -50,10 +50,10 @@ bool Reach(Oracle& oracle, int64_t p, int32_t depth, int64_t max_nodes,
     if (d == depth) break;
 
     std::vector<int64_t> next;
-    std::vector<Part> parts;
+    std::vector<Edge> parts;
     for (const int64_t node : current) {
       if (!oracle.Parts(node, &parts, error)) return false;
-      for (const Part& part : parts) {
+      for (const Edge& part : parts) {
         if (!seen.insert(part.q).second) continue;
         if (max_nodes > 0 &&
             out->node_count + static_cast<int64_t>(next.size()) >= max_nodes) {
@@ -79,7 +79,7 @@ struct Walker {
   int64_t floor_p = 0;
   ChainSet* out = nullptr;
   std::string* error = nullptr;
-  std::vector<Part> path;
+  std::vector<Edge> path;
 
   bool Wanted(int64_t node) const {
     return std::binary_search(opts->targets.begin(), opts->targets.end(), node);
@@ -89,7 +89,7 @@ struct Walker {
     Chain chain;
     chain.edges = path;
     chain.terminal = node;
-    for (const Part& e : path) {
+    for (const Edge& e : path) {
       if (e.n > 1) {
         chain.twist_count++;
         chain.degree *= e.n;
@@ -101,7 +101,7 @@ struct Walker {
   bool Visit(int64_t node, int32_t d) {
     if (node < floor_p) return true;
 
-    std::vector<Part> parts;
+    std::vector<Edge> parts;
     if (!oracle->Parts(node, &parts, error)) return false;
     const bool is_source = parts.empty();
 
@@ -113,7 +113,7 @@ struct Walker {
     }
     if (is_source || d >= opts->depth) return true;
 
-    for (const Part& part : parts) {
+    for (const Edge& part : parts) {
       path.push_back(part);
       const bool ok = Visit(part.q, d + 1);
       path.pop_back();
@@ -265,10 +265,10 @@ bool Skeleton(const SkelOpts& opts, SkelSet* out, std::string* error) {
   }
 
   if (opts.roots.empty()) {
-    nt::Part parts[nt::kMaxParts];
+    nt::Edge edges[nt::kMaxEdges];
     for (int64_t r = 3; r <= out->bounds[0]; r += 2) {
       if (n_is_prime(static_cast<ulong>(r)) == 0) continue;
-      if (nt::PartsOf(static_cast<uint64_t>(r), parts) == 0) {
+      if (nt::PartsOf(static_cast<uint64_t>(r), edges) == 0) {
         out->roots.push_back(r);
       }
     }
@@ -348,7 +348,7 @@ Expr WordForm(const Word& word, const std::string& symbol) {
   return form;
 }
 
-Expr ChainForm(const std::vector<Part>& edges, const std::string& symbol) {
+Expr ChainForm(const std::vector<Edge>& edges, const std::string& symbol) {
   Expr form = Expr::Symbol(symbol);
   for (auto it = edges.rbegin(); it != edges.rend(); ++it) {
     form = Expr::PowerOfTwo(it->m).Add(form.Pow(it->n));

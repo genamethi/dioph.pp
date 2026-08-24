@@ -16,7 +16,7 @@
 
 namespace {
 
-using primeparts::nt::Part;
+using primeparts::nt::Edge;
 
 bool ResBit(const uint64_t* words, int modulus, uint64_t x) {
   const unsigned r = static_cast<unsigned>(x % static_cast<unsigned>(modulus));
@@ -126,11 +126,11 @@ sol::table GenParts(int64_t p, sol::this_state ts) {
   const uint64_t input = static_cast<uint64_t>(p);
   if (p < 3) primeparts::lua::Fail("nt.genparts", "p must be at least 3");
 
-  Part parts[primeparts::nt::kMaxParts];
+  Edge parts[primeparts::nt::kMaxEdges];
   const int k = primeparts::nt::PartsOf(input, parts);
 
   std::sort(parts, parts + k,
-            [](const Part& a, const Part& b) { return a.m < b.m; });
+            [](const Edge& a, const Edge& b) { return a.m < b.m; });
 
   sol::state_view lua(ts);
   sol::table out = lua.create_table();
@@ -139,7 +139,7 @@ sol::table GenParts(int64_t p, sol::this_state ts) {
   sol::table rows = lua.create_table(k, 0);
   int idx = 1;
   for (int i = 0; i < k; ++i) {
-    const Part& part = parts[i];
+    const Edge& part = parts[i];
     sol::table row = lua.create_table(0, 3);
     row["m"] = part.m;
     row["n"] = part.n;
@@ -157,7 +157,7 @@ sol::table InvGenParts(int64_t q, sol::optional<int64_t> hi,
 
   const int64_t cap = hi.value_or(INT64_MAX);
 
-  std::vector<primeparts::nt::Edge> edges;
+  std::vector<Edge> edges;
   primeparts::nt::InvOf(static_cast<uint64_t>(q), static_cast<uint64_t>(cap),
                         &edges);
 
@@ -167,7 +167,7 @@ sol::table InvGenParts(int64_t q, sol::optional<int64_t> hi,
   out["k"] = static_cast<int64_t>(edges.size());
   sol::table rows = lua.create_table(static_cast<int>(edges.size()), 0);
   int idx = 1;
-  for (const primeparts::nt::Edge& e : edges) {
+  for (const Edge& e : edges) {
     sol::table row = lua.create_table(0, 3);
     row["m"] = e.m;
     row["n"] = e.n;
@@ -182,7 +182,7 @@ sol::table InvGenParts(int64_t q, sol::optional<int64_t> hi,
 
 namespace primeparts::nt {
 
-int PartsOf(uint64_t p, Part* out) {
+int PartsOf(uint64_t p, Edge* out) {
   int count = 0;
   const int max_m = 63 - __builtin_clzll(p);
   const uint64_t word = pp_cov_masks[p % PP_COV_MOD];
@@ -199,7 +199,8 @@ int PartsOf(uint64_t p, Part* out) {
       field &= field - 1;
       if (q < 2) continue;
       if (CovExp(qi, q, &exp)) {
-        out[count++] = {m, exp, static_cast<int64_t>(pp_cov_q[qi])};
+        out[count++] = {m, exp, static_cast<int64_t>(pp_cov_q[qi]),
+                        static_cast<int64_t>(p)};
       }
     }
   }
@@ -213,9 +214,10 @@ int PartsOf(uint64_t p, Part* out) {
     rest &= rest - 1;
     if (q < 2) continue;
     if (n_is_prime(static_cast<ulong>(q))) {
-      out[count++] = {m, 1, static_cast<int64_t>(q)};
+      out[count++] = {m, 1, static_cast<int64_t>(q), static_cast<int64_t>(p)};
     } else if (Ppow(q, &base, &exp)) {
-      out[count++] = {m, exp, static_cast<int64_t>(base)};
+      out[count++] = {m, exp, static_cast<int64_t>(base),
+                      static_cast<int64_t>(p)};
     }
   }
   return count;
@@ -236,7 +238,8 @@ void InvOf(uint64_t q, uint64_t hi, std::vector<Edge>* out) {
       const uint64_t p = base + (UINT64_C(1) << m);
       ok &= ok - 1;
       if (n_is_prime(static_cast<ulong>(p))) {
-        out->push_back({m, n, static_cast<int64_t>(p)});
+        out->push_back({m, n, static_cast<int64_t>(q),
+                        static_cast<int64_t>(p)});
       }
     }
 

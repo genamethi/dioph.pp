@@ -12,10 +12,10 @@
 
 namespace {
 
-using primeparts::graph::TwistRow;
+using primeparts::graph::Edge;
 using primeparts::graph::TwistTable;
 using primeparts::graph::lua::SetCall;
-using primeparts::graph::lua::TwistRows;
+using primeparts::graph::lua::EdgeTable;
 using primeparts::lua::Fail;
 using primeparts::lua::IntOr;
 using primeparts::lua::ReqInt;
@@ -23,7 +23,7 @@ using primeparts::lua::Spec;
 
 std::shared_ptr<TwistTable> FromRows(const sol::table& rows,
                                      const sol::table& spec, const char* fn) {
-  std::vector<TwistRow> parsed;
+  std::vector<Edge> parsed;
   int64_t hi = IntOr(spec, "hi", 0);
   for (std::size_t i = 1; i <= rows.size(); ++i) {
     sol::optional<sol::table> row = rows[i];
@@ -31,11 +31,11 @@ std::shared_ptr<TwistTable> FromRows(const sol::table& rows,
     const int64_t rp = (*row)["p"].get_or(int64_t{0});
     const int64_t rn = (*row)["n"].get_or(int64_t{0});
     if (rn < 2) continue;
-    parsed.push_back(TwistRow{.p = rp,
-                              .m = static_cast<int32_t>(
-                                  (*row)["m"].get_or(int64_t{0})),
-                              .n = static_cast<int32_t>(rn),
-                              .q = (*row)["q"].get_or(int64_t{0})});
+    parsed.push_back(
+        Edge{.m = static_cast<int32_t>((*row)["m"].get_or(int64_t{0})),
+             .n = static_cast<int32_t>(rn),
+             .q = (*row)["q"].get_or(int64_t{0}),
+             .p = rp});
     if (rp > hi) hi = rp;
   }
   std::string error;
@@ -70,20 +70,20 @@ void BindTable(sol::table& twists) {
       },
       "has", &TwistTable::Has,
       "at", [](const TwistTable& self, int64_t p, sol::this_state ts) {
-        return TwistRows(sol::state_view(ts), self.At(p));
+        return EdgeTable(sol::state_view(ts), self.At(p));
       },
       "into", [](const TwistTable& self, int64_t q, sol::this_state ts) {
-        return TwistRows(sol::state_view(ts), self.Into(q));
+        return EdgeTable(sol::state_view(ts), self.Into(q));
       },
       "rows", [](const TwistTable& self, sol::optional<int64_t> limit,
                  sol::this_state ts) {
-        const std::vector<TwistRow>& all = self.Rows();
+        const std::vector<Edge>& all = self.Rows();
         const std::size_t n =
             limit && *limit > 0
                 ? std::min(all.size(), static_cast<std::size_t>(*limit))
                 : all.size();
-        return TwistRows(sol::state_view(ts),
-                         std::vector<TwistRow>(all.begin(), all.begin() + n));
+        return EdgeTable(sol::state_view(ts),
+                         std::vector<Edge>(all.begin(), all.begin() + n));
       });
 }
 

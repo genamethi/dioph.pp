@@ -24,11 +24,11 @@ M.nt = {
   is_prime_power = "nt.is_prime_power(n: int) -> base: int, exp: int | nil",
   genparts = [[
 nt.genparts(p: int)
-  -> {p: int, k: int, partitions: [{m: int, n: int, q: int}]}
+  -> {p: int, k: int, partitions: [{p: int, m: int, n: int, q: int}]}
   ! pp_process_prime_array]],
   invgp = [[
 nt.invgp(q: int, hi: int = 2^63-1)
-  -> {q: int, k: int, partitions: [{m: int, n: int, p: int}]}
+  -> {q: int, k: int, partitions: [{p: int, m: int, n: int, q: int}]}
   ! q >= 3]],
 }
 
@@ -120,7 +120,7 @@ M["graph.parts"] = {
   order = {"of", "calls", "source"},
   of = [[
 graph.parts.of{p: int} | graph.parts{p: int}
-  -> {p: int, k: int, partitions: [{m: int, n: int, q: int}]}]],
+  -> {p: int, k: int, partitions: [{p: int, m: int, n: int, q: int}]}]],
   calls = "graph.parts.calls() -> int",
   source = "graph.parts.source() -> string",
 }
@@ -138,13 +138,13 @@ graph.walk.reach{p: int, depth: int = 8, max_nodes: int = 1000000,
 graph.walk.chains{p: int, depth: int = 8, sources: bool = false,
                   targets: [int] | [{p: int}] = nil}
   -> [{terminal: int, length: int, twists: int, degree: int,
-       edges: [{m, n, q}]}], .meta = {calls: int}]],
+       edges: [{p, m, n, q}]}], .meta = {calls: int}]],
   forms = [[
 graph.walk.forms{p: int, depth: int = 8, sources: bool = false,
                  targets: [int] | [{p: int}] = nil,
                  symbol: string = "x", distinct: bool = true}
   -> [{terminal: int, length: int, twists: int, degree: int,
-       edges: [{m, n, q}], paths: int, expr: Expr, exact: bool,
+       edges: [{p, m, n, q}], paths: int, expr: Expr, exact: bool,
        word: {a0: int, blocks: [{n: int, c: int}], skeleton: [int],
               degree: int, grade: int, odd_degree: int, terminal: int}}]
      .meta = {calls: int, symbol: string}]],

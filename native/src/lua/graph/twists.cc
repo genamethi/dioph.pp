@@ -1,17 +1,17 @@
 #include "primeparts/lua/graph/twists.h"
 
 #include <algorithm>
+#include <vector>
 
-#include <flint/ulong_extras.h>
 #include <primesieve.h>
 
-#pragma GCC diagnostic ignored "-Wpedantic"
+#include "primeparts/lua/lnt.h"
 
 namespace primeparts::graph {
 
 namespace {
 
-bool LessByP(const TwistRow& a, int64_t p) { return a.p < p; }
+bool LessByP(const Edge& a, int64_t p) { return a.p < p; }
 
 }  // namespace
 
@@ -22,30 +22,17 @@ std::unique_ptr<TwistTable> TwistTable::Build(int64_t hi, std::string* error) {
   }
   auto table = std::unique_ptr<TwistTable>(new TwistTable());
   table->hi_ = hi;
-  const auto bound = static_cast<unsigned __int128>(hi);
+  const uint64_t bound = static_cast<uint64_t>(hi);
 
+  std::vector<Edge> edges;
   primesieve_iterator it;
   primesieve_init(&it);
   for (;;) {
     const uint64_t q = primesieve_next_prime(&it);
-    if (static_cast<unsigned __int128>(q) * q > bound) break;
-    auto power = static_cast<unsigned __int128>(q) * q;
-    for (int n = 2;; ++n) {
-      if (power + 2 > bound) break;
-      const auto qn = static_cast<uint64_t>(power);
-      for (int m = 1; m < 63; ++m) {
-        const auto p = static_cast<unsigned __int128>(qn) +
-                       (static_cast<unsigned __int128>(1) << m);
-        if (p > bound) break;
-        if (n_is_prime(static_cast<uint64_t>(p)) != 0) {
-          table->rows_.push_back(TwistRow{.p = static_cast<int64_t>(p),
-                                          .m = m,
-                                          .n = n,
-                                          .q = static_cast<int64_t>(q)});
-        }
-      }
-      if (power > bound / q) break;
-      power *= q;
+    if (q > bound / q) break;
+    nt::InvOf(q, bound, &edges);
+    for (const Edge& e : edges) {
+      if (e.n >= 2) table->rows_.push_back(e);
     }
   }
   primesieve_free_iterator(&it);
@@ -54,10 +41,10 @@ std::unique_ptr<TwistTable> TwistTable::Build(int64_t hi, std::string* error) {
   return table;
 }
 
-std::unique_ptr<TwistTable> TwistTable::FromRows(std::vector<TwistRow> rows,
+std::unique_ptr<TwistTable> TwistTable::FromRows(std::vector<Edge> rows,
                                                  int64_t hi,
                                                  std::string* error) {
-  for (const TwistRow& r : rows) {
+  for (const Edge& r : rows) {
     if (r.n < 2) {
       *error = "row for p=" + std::to_string(r.p) + " has n=" +
                std::to_string(r.n) + "; a twist needs n >= 2";
@@ -73,12 +60,12 @@ std::unique_ptr<TwistTable> TwistTable::FromRows(std::vector<TwistRow> rows,
 }
 
 void TwistTable::Index() {
-  std::sort(rows_.begin(), rows_.end(), [](const TwistRow& a, const TwistRow& b) {
+  std::sort(rows_.begin(), rows_.end(), [](const Edge& a, const Edge& b) {
     if (a.p != b.p) return a.p < b.p;
     return a.m < b.m;
   });
   by_q_ = rows_;
-  std::sort(by_q_.begin(), by_q_.end(), [](const TwistRow& a, const TwistRow& b) {
+  std::sort(by_q_.begin(), by_q_.end(), [](const Edge& a, const Edge& b) {
     if (a.q != b.q) return a.q < b.q;
     return a.p < b.p;
   });
@@ -89,17 +76,17 @@ bool TwistTable::Has(int64_t p) const {
   return it != rows_.end() && it->p == p;
 }
 
-std::vector<TwistRow> TwistTable::At(int64_t p) const {
-  std::vector<TwistRow> out;
+std::vector<Edge> TwistTable::At(int64_t p) const {
+  std::vector<Edge> out;
   auto it = std::lower_bound(rows_.begin(), rows_.end(), p, LessByP);
   for (; it != rows_.end() && it->p == p; ++it) out.push_back(*it);
   return out;
 }
 
-std::vector<TwistRow> TwistTable::Into(int64_t q) const {
-  std::vector<TwistRow> out;
+std::vector<Edge> TwistTable::Into(int64_t q) const {
+  std::vector<Edge> out;
   auto it = std::lower_bound(by_q_.begin(), by_q_.end(), q,
-                             [](const TwistRow& a, int64_t v) { return a.q < v; });
+                             [](const Edge& a, int64_t v) { return a.q < v; });
   for (; it != by_q_.end() && it->q == q; ++it) out.push_back(*it);
   return out;
 }

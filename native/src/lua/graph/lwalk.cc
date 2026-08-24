@@ -24,7 +24,7 @@ using primeparts::graph::SkelOpts;
 using primeparts::graph::SkelSet;
 using primeparts::graph::TwistTable;
 using primeparts::graph::Word;
-using primeparts::graph::lua::PartTable;
+using primeparts::graph::lua::EdgeTable;
 using primeparts::graph::lua::SharedOracle;
 using primeparts::graph::lua::Submodule;
 using primeparts::lua::BoolOr;
@@ -157,7 +157,7 @@ sol::table Chains(sol::this_state ts, sol::optional<sol::table> arg) {
     row["length"] = static_cast<int64_t>(chain.edges.size());
     row["twists"] = chain.twist_count;
     row["degree"] = chain.degree;
-    row["edges"] = PartTable(lua, chain.edges);
+    row["edges"] = EdgeTable(lua, chain.edges);
     out[idx++] = row;
   }
   sol::table meta = lua.create_table();
@@ -202,7 +202,7 @@ sol::table Forms(sol::this_state ts, sol::optional<sol::table> arg) {
     row["length"] = static_cast<int64_t>(chain.edges.size());
     row["twists"] = chain.twist_count;
     row["degree"] = chain.degree;
-    row["edges"] = PartTable(lua, chain.edges);
+    row["edges"] = EdgeTable(lua, chain.edges);
     row["word"] = WordTable(lua, word);
     row["expr"] = form;
     row["exact"] = form.Subs(symbol, chain.terminal).EqualsInt(p);

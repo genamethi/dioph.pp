@@ -12,7 +12,7 @@ namespace {
 
 class DynamicOracle final : public Oracle {
  public:
-  bool Parts(int64_t p, std::vector<Part>* out, std::string* error) override {
+  bool Parts(int64_t p, std::vector<Edge>* out, std::string* error) override {
     ++calls_;
     return DynamicParts(p, out, error);
   }
@@ -28,7 +28,7 @@ class CachedOracle final : public Oracle {
   CachedOracle(std::unique_ptr<Oracle> inner, std::size_t capacity)
       : inner_(std::move(inner)), capacity_(capacity) {}
 
-  bool Parts(int64_t p, std::vector<Part>* out, std::string* error) override {
+  bool Parts(int64_t p, std::vector<Edge>* out, std::string* error) override {
     const auto it = memo_.find(p);
     if (it != memo_.end()) {
       *out = it->second;
@@ -45,27 +45,23 @@ class CachedOracle final : public Oracle {
  private:
   std::unique_ptr<Oracle> inner_;
   std::size_t capacity_;
-  std::unordered_map<int64_t, std::vector<Part>> memo_;
+  std::unordered_map<int64_t, std::vector<Edge>> memo_;
 };
 
 }  // namespace
 
-bool DynamicParts(int64_t p, std::vector<Part>* out, std::string* error) {
+bool DynamicParts(int64_t p, std::vector<Edge>* out, std::string* error) {
   out->clear();
   if (p < 3) {
     *error = "p must be at least 3";
     return false;
   }
 
-  nt::Part found[nt::kMaxParts];
-  const int count = nt::PartsOf(static_cast<uint64_t>(p), found);
-
-  out->reserve(static_cast<std::size_t>(count));
-  for (int i = 0; i < count; ++i) {
-    out->push_back(Part{.m = found[i].m, .n = found[i].n, .q = found[i].q});
-  }
+  out->resize(nt::kMaxEdges);
+  out->resize(static_cast<std::size_t>(
+      nt::PartsOf(static_cast<uint64_t>(p), out->data())));
   std::sort(out->begin(), out->end(),
-            [](const Part& a, const Part& b) { return a.m < b.m; });
+            [](const Edge& a, const Edge& b) { return a.m < b.m; });
   return true;
 }
 

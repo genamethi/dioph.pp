@@ -48,7 +48,7 @@ struct Word {
 };
 
 struct Chain {
-  std::vector<Part> edges;
+  std::vector<Edge> edges;
   int64_t terminal = 0;
   int32_t twist_count = 0;
   int64_t degree = 1;
@@ -71,7 +71,7 @@ struct ChainOpts {
 bool Chains(Oracle& oracle, int64_t p, const ChainOpts& opts, ChainSet* out,
             std::string* error);
 
-Expr ChainForm(const std::vector<Part>& edges, const std::string& symbol);
+Expr ChainForm(const std::vector<Edge>& edges, const std::string& symbol);
 
 struct SkelOpts {
   std::vector<int32_t> skeleton;

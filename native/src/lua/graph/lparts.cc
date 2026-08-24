@@ -8,8 +8,8 @@
 
 namespace {
 
-using primeparts::graph::Part;
-using primeparts::graph::lua::PartTable;
+using primeparts::graph::Edge;
+using primeparts::graph::lua::EdgeTable;
 using primeparts::graph::lua::SetCall;
 using primeparts::graph::lua::SharedOracle;
 using primeparts::lua::Fail;
@@ -22,14 +22,14 @@ sol::table Of(sol::this_state ts, sol::optional<sol::table> arg) {
   const sol::table spec = Spec(ts, arg);
   const int64_t p = ReqInt(spec, "p", kFn);
 
-  std::vector<Part> parts;
+  std::vector<Edge> parts;
   std::string error;
   if (!SharedOracle().Parts(p, &parts, &error)) Fail(kFn, error);
 
   sol::table out = lua.create_table();
   out["p"] = p;
   out["k"] = static_cast<int64_t>(parts.size());
-  out["partitions"] = PartTable(lua, parts);
+  out["partitions"] = EdgeTable(lua, parts);
   return out;
 }
 
