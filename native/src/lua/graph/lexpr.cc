@@ -74,6 +74,7 @@ extern "C" int luaopen_graph_expr(lua_State* L) {
   expr.set_function("sym", &Expr::Symbol);
   expr.set_function("int", &Expr::Int);
   expr.set_function("pow2", &Expr::PowerOfTwo);
+  expr.set_function("lift", &Expr::Lift);
   BindExpr(expr);
   expr.push();
   return 1;

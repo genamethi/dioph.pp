@@ -31,7 +31,8 @@ struct Word {
 
 bool operator<(const Word& a, const Word& b);
 
-Expr WordForm(const Word& word, const std::string& symbol);
+Expr WordForm(const Word& word, const std::string& symbol,
+              const std::string& base = "");
 
 class Words {
  public:

@@ -59,6 +59,14 @@ Poly Poly::He(int64_t n) {
   return out;
 }
 
+Poly Poly::Lift(int64_t v) {
+  Poly out;
+  for (int m = 0; m < 63; ++m) {
+    if ((v >> m) & 1) fmpz_poly_set_coeff_si(out.impl_->p, m, 1);
+  }
+  return out;
+}
+
 int64_t Poly::Degree() const { return fmpz_poly_degree(impl_->p); }
 
 bool Poly::IsZero() const { return fmpz_poly_is_zero(impl_->p); }
@@ -184,8 +192,8 @@ std::vector<Coeff> Poly::Hermite() const {
   return out;
 }
 
-std::string Poly::Text() const {
-  char* s = fmpz_poly_get_str_pretty(impl_->p, "x");
+std::string Poly::Text(const std::string& var) const {
+  char* s = fmpz_poly_get_str_pretty(impl_->p, var.c_str());
   std::string out = s;
   flint_free(s);
   return out;

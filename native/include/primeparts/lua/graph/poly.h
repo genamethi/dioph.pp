@@ -27,6 +27,7 @@ class Poly {
   static Poly Constant(int64_t c);
   static Poly PowerOfTwo(int32_t m);
   static Poly He(int64_t n);
+  static Poly Lift(int64_t v);
 
   int64_t Degree() const;
   bool IsZero() const;
@@ -45,7 +46,7 @@ class Poly {
   std::vector<Coeff> Monomial() const;
   std::vector<Coeff> Hermite() const;
 
-  std::string Text() const;
+  std::string Text(const std::string& var) const;
 
  private:
   struct Impl;

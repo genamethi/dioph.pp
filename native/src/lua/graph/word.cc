@@ -56,10 +56,14 @@ bool operator<(const Word& a, const Word& b) {
   return false;
 }
 
-Expr WordForm(const Word& word, const std::string& symbol) {
-  Expr form = Expr::Symbol(symbol).Add(Expr::Int(word.a0));
+Expr WordForm(const Word& word, const std::string& symbol,
+              const std::string& base) {
+  const auto konst = [&base](int64_t v) {
+    return base.empty() ? Expr::Int(v) : Expr::Lift(v, base);
+  };
+  Expr form = Expr::Symbol(symbol).Add(konst(word.a0));
   for (const Block& b : word.blocks) {
-    form = form.Pow(b.n).Add(Expr::Int(b.c));
+    form = form.Pow(b.n).Add(konst(b.c));
   }
   return form;
 }

@@ -226,6 +226,7 @@ sol::table Skeleton(sol::this_state ts, sol::optional<sol::table> arg) {
   SkelOpts opts;
   opts.hi = ReqInt(spec, "hi", kFn);
   opts.roots = IdArray(spec, "roots");
+  const std::string base = StrOr(spec, "base", "");
   sol::optional<sol::table> skel = spec["skeleton"];
   if (!skel) Fail(kFn, "skeleton is required");
   for (std::size_t i = 1; i <= skel->size(); ++i) {
@@ -247,7 +248,7 @@ sol::table Skeleton(sol::this_state ts, sol::optional<sol::table> arg) {
     row["terminal"] = hit.word.terminal;
     row["degree"] = hit.word.Degree();
     row["word"] = WordTable(lua, hit.word);
-    const Expr form = primeparts::graph::WordForm(hit.word, symbol);
+    const Expr form = primeparts::graph::WordForm(hit.word, symbol, base);
     row["expr"] = form;
     row["exact"] = form.Subs(symbol, hit.word.terminal).EqualsInt(hit.p);
     out[idx++] = row;

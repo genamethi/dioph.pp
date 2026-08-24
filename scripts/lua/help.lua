@@ -171,7 +171,7 @@ graph.walk.forms{p: int, depth: int = 8, sources: bool = false,
      .meta = {calls: int, symbol: string}]],
   skeleton = [[
 graph.walk.skeleton{skeleton: [int], hi: int, roots: [int] | [{p: int}] = nil,
-                    symbol: string = "x"}
+                    symbol: string = "x", base: string = ""}
   -> [{p: int, terminal: int, degree: int, expr: Expr, exact: bool,
        word: {a0: int, blocks: [{n: int, c: int}], skeleton: [int],
               degree: int, grade: int, odd_degree: int, terminal: int}}]
@@ -188,15 +188,17 @@ graph.twists{...} -> TwistTable]],
 }
 
 M["graph.expr"] = {
-  order = {"sym", "int", "pow2"},
+  order = {"sym", "int", "pow2", "lift"},
   sym = "graph.expr.sym(name: string) -> Expr",
   int = "graph.expr.int(v: int) -> Expr",
   pow2 = "graph.expr.pow2(m: int) -> Expr",
+  lift = "graph.expr.lift(v: int, t: string) -> Expr   v in base t",
 }
 
 M["graph.poly"] = {
-  order = {"he", "x", "const", "pow2"},
+  order = {"he", "lift", "x", "const", "pow2"},
   he = "graph.poly.he(n: int) -> Poly",
+  lift = "graph.poly.lift(v: int) -> Poly   v in base t, binary expansion",
   x = "graph.poly.x() -> Poly",
   const = "graph.poly.const(c: int) -> Poly",
   pow2 = "graph.poly.pow2(m: int) -> Poly",
@@ -211,7 +213,7 @@ Expr   symbolic, held unexpanded (GiNaC)
 M.Poly = [[
 Poly   exact integer univariate (FLINT)
   + - * and == between Polys; tostring
-  :degree() :zero() :text() :mono() :he() :eval(x) :pow(e) :mod(n)]]
+  :degree() :zero() :text(var) :mono() :he() :eval(x) :pow(e) :mod(n)]]
 
 M.Depth = [[
 Depth   chains into p by length, per root
@@ -225,7 +227,8 @@ Words   the words of p, graded by chain length
   W(r) = the empty word at a root
   W(p) = sum over (m,n,q) in K(p) of W(q):step(m, n)
   + between Words; :step(m, n) applies one edge
-  :rows(symbol) -> [{word, terminal, degree, expr, paths, by_depth}]
+  :rows(symbol, base) -> [{word, terminal, degree, expr, paths, by_depth}]
+    base names a symbol for 2, so constants come back as sums of base^m
   :size() :count() :cut(d) :known() :complete() :cells()
   :grade() -> Depth   forget the word, keep the lengths]]
 

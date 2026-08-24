@@ -78,9 +78,10 @@ Words Of(sol::this_state ts, sol::optional<sol::table> arg) {
 }
 
 sol::table Rows(const Words& self, sol::optional<std::string> symbol,
-                sol::this_state ts) {
+                sol::optional<std::string> base, sol::this_state ts) {
   sol::state_view lua(ts);
   const std::string sym = symbol.value_or("x");
+  const std::string bas = base.value_or("");
   sol::table out = lua.create_table(static_cast<int>(self.Size()), 0);
   int idx = 1;
   for (const auto& [word, counts] : self.All()) {
@@ -88,7 +89,7 @@ sol::table Rows(const Words& self, sol::optional<std::string> symbol,
     row["word"] = WordTable(lua, word);
     row["terminal"] = word.terminal;
     row["degree"] = word.Degree();
-    row["expr"] = primeparts::graph::WordForm(word, sym);
+    row["expr"] = primeparts::graph::WordForm(word, sym, bas);
     int64_t paths = 0;
     sol::table by = lua.create_table(static_cast<int>(counts.size()), 0);
     for (std::size_t d = 0; d < counts.size(); ++d) {

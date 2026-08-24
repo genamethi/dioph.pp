@@ -64,6 +64,17 @@ Expr Expr::PowerOfTwo(int32_t m) {
   return out;
 }
 
+Expr Expr::Lift(int64_t v, const std::string& name) {
+  const GiNaC::symbol t = NamedSymbol(name);
+  Expr out;
+  out.impl_->e = 0;
+  for (int m = 0; m < 63; ++m) {
+    if (((v >> m) & 1) == 0) continue;
+    out.impl_->e = out.impl_->e + GiNaC::pow(t, GiNaC::numeric(m));
+  }
+  return out;
+}
+
 Expr Expr::Add(const Expr& other) const {
   Expr out;
   out.impl_->e = impl_->e + other.impl_->e;

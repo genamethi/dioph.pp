@@ -22,6 +22,7 @@ class Expr {
   static Expr Symbol(const std::string& name);
   static Expr Int(int64_t value);
   static Expr PowerOfTwo(int32_t m);
+  static Expr Lift(int64_t v, const std::string& name);
 
   Expr Add(const Expr& other) const;
   Expr Sub(const Expr& other) const;
