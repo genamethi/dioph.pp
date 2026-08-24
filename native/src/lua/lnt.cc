@@ -28,32 +28,28 @@ bool ResBit(const uint64_t* words, int modulus, uint64_t x) {
 }
 
 bool Ppow(uint64_t x, uint64_t* base, int32_t* exp) {
-  const int limit = pp_ppow_exp_at_bits[64 - __builtin_clzll(x)];
+  int32_t total = 1;
 
   for (int i = 0; i < PP_PPOW_NE; ++i) {
     const int n = pp_ppow_exp[i];
-    if (n > limit) break;
-    if (n == 2 && !((pp_ppow_square64 >> (x & 63)) & 1u)) continue;
-    if (!ResBit(pp_ppow_res_a[i], pp_ppow_mod_a[i], x)) continue;
-    if (!ResBit(pp_ppow_res_b[i], pp_ppow_mod_b[i], x)) continue;
+    for (;;) {
+      if (n > pp_ppow_exp_at_bits[64 - __builtin_clzll(x)]) break;
+      if (n == 2 && !((pp_ppow_square64 >> (x & 63)) & 1u)) break;
+      if (!ResBit(pp_ppow_res_a[i], pp_ppow_mod_a[i], x)) break;
+      if (!ResBit(pp_ppow_res_b[i], pp_ppow_mod_b[i], x)) break;
 
-    ulong rem = 0;
-    const ulong root = n_rootrem(&rem, static_cast<ulong>(x), static_cast<ulong>(n));
-    if (rem != 0 || root < PP_PPOW_MIN_BASE) continue;
-    if (n_is_prime(root)) {
-      *base = root;
-      *exp = static_cast<int32_t>(n);
-      return true;
-    }
-    uint64_t sub_base = 0;
-    int32_t sub_exp = 0;
-    if (Ppow(root, &sub_base, &sub_exp)) {
-      *base = sub_base;
-      *exp = sub_exp * static_cast<int32_t>(n);
-      return true;
+      ulong rem = 0;
+      const ulong root = n_rootrem(&rem, static_cast<ulong>(x), static_cast<ulong>(n));
+      if (rem != 0) break;
+      if (root < PP_PPOW_MIN_BASE) return false;
+      x = root;
+      total *= static_cast<int32_t>(n);
     }
   }
-  return false;
+  if (total == 1 || !n_is_prime(static_cast<ulong>(x))) return false;
+  *base = x;
+  *exp = total;
+  return true;
 }
 
 bool CovExp(unsigned qi, uint64_t q, int32_t* exp) {
