@@ -14,10 +14,6 @@ namespace primeparts::graph {
 
 bool Reach(Oracle& oracle, int64_t p, int32_t depth, int64_t max_nodes,
            const TwistTable* twists, Frontier* out, std::string* error) {
-  if (p < 3) {
-    *error = "p must be at least 3";
-    return false;
-  }
   if (depth < 0) {
     *error = "depth must be non-negative";
     return false;
@@ -127,10 +123,6 @@ struct Walker {
 
 bool Chains(Oracle& oracle, int64_t p, const ChainOpts& opts, ChainSet* out,
             std::string* error) {
-  if (p < 3) {
-    *error = "p must be at least 3";
-    return false;
-  }
   out->chains.clear();
   const int64_t before = oracle.Calls();
 

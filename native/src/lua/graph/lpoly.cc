@@ -52,7 +52,10 @@ void BindPoly(sol::table& poly) {
 extern "C" int luaopen_graph_poly(lua_State* L) {
   sol::state_view lua(L);
   sol::table poly = lua.create_table();
-  poly.set_function("he", &Poly::He);
+  poly.set_function("he", [](int64_t n) {
+    if (n < 0) Fail("graph.poly.he", "n must be non-negative");
+    return Poly::He(n);
+  });
   poly.set_function("lift", &Poly::Lift);
   poly.set_function("x", &Poly::X);
   poly.set_function("const", &Poly::Constant);

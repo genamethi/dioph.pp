@@ -141,21 +141,6 @@ BigInt Poly::Eval(int64_t x) const {
   return out;
 }
 
-bool Poly::EvalEquals(int64_t x, int64_t target) const {
-  fmpz_t v, r, t;
-  fmpz_init(v);
-  fmpz_init(r);
-  fmpz_init(t);
-  fmpz_set_si(v, x);
-  fmpz_set_si(t, target);
-  fmpz_poly_evaluate_fmpz(r, impl_->p, v);
-  const bool ok = fmpz_equal(r, t) != 0;
-  fmpz_clear(v);
-  fmpz_clear(r);
-  fmpz_clear(t);
-  return ok;
-}
-
 std::vector<Coeff> Poly::Monomial() const {
   std::vector<Coeff> out;
   const slong len = fmpz_poly_length(impl_->p);

@@ -1,6 +1,8 @@
 #include "primeparts/lua/graph/twists.h"
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <vector>
 
 #include <primesieve.h>
@@ -64,10 +66,13 @@ void TwistTable::Index() {
     if (a.p != b.p) return a.p < b.p;
     return a.m < b.m;
   });
-  by_q_ = rows_;
-  std::sort(by_q_.begin(), by_q_.end(), [](const Edge& a, const Edge& b) {
-    if (a.q != b.q) return a.q < b.q;
-    return a.p < b.p;
+  by_q_.resize(rows_.size());
+  for (std::size_t i = 0; i < rows_.size(); ++i) {
+    by_q_[i] = static_cast<uint32_t>(i);
+  }
+  std::sort(by_q_.begin(), by_q_.end(), [this](uint32_t a, uint32_t b) {
+    if (rows_[a].q != rows_[b].q) return rows_[a].q < rows_[b].q;
+    return rows_[a].p < rows_[b].p;
   });
 }
 
@@ -85,9 +90,10 @@ std::vector<Edge> TwistTable::At(int64_t p) const {
 
 std::vector<Edge> TwistTable::Into(int64_t q) const {
   std::vector<Edge> out;
-  auto it = std::lower_bound(by_q_.begin(), by_q_.end(), q,
-                             [](const Edge& a, int64_t v) { return a.q < v; });
-  for (; it != by_q_.end() && it->q == q; ++it) out.push_back(*it);
+  auto it = std::lower_bound(
+      by_q_.begin(), by_q_.end(), q,
+      [this](uint32_t a, int64_t v) { return rows_[a].q < v; });
+  for (; it != by_q_.end() && rows_[*it].q == q; ++it) out.push_back(rows_[*it]);
   return out;
 }
 

@@ -218,10 +218,6 @@ struct Fold {
 
 bool WordsOf(Oracle& oracle, int64_t p, const WordOpts& opts, Words* out,
              std::string* error) {
-  if (p < 3) {
-    *error = "p must be at least 3";
-    return false;
-  }
   std::vector<int64_t> targets = opts.targets;
   std::sort(targets.begin(), targets.end());
   targets.erase(std::unique(targets.begin(), targets.end()), targets.end());

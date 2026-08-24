@@ -29,7 +29,7 @@ class TwistTable {
   int64_t hi_ = 0;
   const char* origin_ = "enumerated";
   std::vector<Edge> rows_;
-  std::vector<Edge> by_q_;
+  std::vector<uint32_t> by_q_;
 
   void Index();
 };

@@ -4,6 +4,10 @@
 --   help.irc          every entry in irc      help(irc)
 --   help.irc.open     one entry               help(irc.open)
 --
+-- A module with one dominant entry is callable directly:
+--   graph.parts{p=...}  graph.depth{p=...}  graph.words{p=...}
+--   graph.twists{hi=...}
+--
 -- Notation:
 --   f{...}            one table argument      f(...)  positional
 --   name: type        required                name: type = v  default
@@ -114,8 +118,8 @@ M.graph = {
   words = "graph.words -> module   of, root, Words",
   walk = "graph.walk -> module   reach, chains, forms, skeleton",
   twists = "graph.twists -> module   build, TwistTable",
-  expr = "graph.expr -> module   sym, int, pow2, Expr",
-  poly = "graph.poly -> module   he, x, const, pow2, Poly",
+  expr = "graph.expr -> module   sym, int, pow2, lift, Expr",
+  poly = "graph.poly -> module   he, lift, x, const, pow2, Poly",
 }
 
 M["graph.parts"] = {

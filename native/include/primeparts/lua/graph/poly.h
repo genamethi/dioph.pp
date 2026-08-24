@@ -42,7 +42,6 @@ class Poly {
   bool Equals(const Poly& other) const;
 
   BigInt Eval(int64_t x) const;
-  bool EvalEquals(int64_t x, int64_t target) const;
 
   std::vector<Coeff> Monomial() const;
   std::vector<Coeff> Hermite() const;

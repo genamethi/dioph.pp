@@ -177,10 +177,6 @@ struct Fold {
 
 bool DepthOf(Oracle& oracle, int64_t p, int32_t depth, int64_t max_cells,
              Depth* out, std::string* error) {
-  if (p < 3) {
-    *error = "p must be at least 3";
-    return false;
-  }
   Fold fold;
   fold.oracle = &oracle;
   fold.ceiling = max_cells;
