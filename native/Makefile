@@ -269,7 +269,7 @@ $(BUILD_DIR)/lppconv.o: src/lua/lppconv.cc include/primeparts/lua/lppconv.h incl
 $(BUILD_DIR)/lconf.o: src/lua/lconf.cc include/primeparts/lua/lconf.h include/primeparts/lua/lppconv.h include/primeparts/config.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(LUA_CPPFLAGS) $(SOL2_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/lnt.o: src/lua/lnt.cc include/primeparts/lua/lnt.h include/primeparts/lua/lppconv.h include/primeparts/core.h | $(BUILD_DIR)
+$(BUILD_DIR)/lnt.o: src/lua/lnt.cc include/primeparts/lua/lnt.h include/primeparts/lua/lppconv.h include/primeparts/core.h include/primeparts/pp_covering.h include/primeparts/pp_ppow.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(LUA_CPPFLAGS) $(SOL2_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/lquery.o: src/lua/lquery.cc include/primeparts/lua/lquery.h include/primeparts/lua/lppconv.h include/primeparts/query/query_service.h include/primeparts/scan/row_filter.h | $(BUILD_DIR)
