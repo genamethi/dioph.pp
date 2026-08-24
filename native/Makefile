@@ -432,7 +432,7 @@ $(BUILD_DIR)/g_expr.o: src/lua/graph/expr.cc include/primeparts/lua/graph/expr.h
 $(BUILD_DIR)/g_twists.o: src/lua/graph/twists.cc include/primeparts/lua/graph/twists.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/g_walk.o: src/lua/graph/walk.cc $(GRAPH_HDRS) | $(BUILD_DIR)
+$(BUILD_DIR)/g_walk.o: src/lua/graph/walk.cc $(GRAPH_HDRS) include/primeparts/lua/lnt.h | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(GINAC_CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 GRAPH_LUA_CPPFLAGS := $(CPPFLAGS) $(LUA_CPPFLAGS) $(SOL2_CPPFLAGS) $(GINAC_CPPFLAGS) $(ICEBERG_CPPFLAGS)

@@ -19,6 +19,9 @@ using primeparts::graph::ChainOpts;
 using primeparts::graph::ChainSet;
 using primeparts::graph::Expr;
 using primeparts::graph::Frontier;
+using primeparts::graph::SkelHit;
+using primeparts::graph::SkelOpts;
+using primeparts::graph::SkelSet;
 using primeparts::graph::TwistTable;
 using primeparts::graph::Word;
 using primeparts::graph::lua::PartTable;
@@ -224,6 +227,56 @@ sol::table Forms(sol::this_state ts, sol::optional<sol::table> arg) {
   return out;
 }
 
+sol::table Skeleton(sol::this_state ts, sol::optional<sol::table> arg) {
+  static const char kFn[] = "graph.walk.skeleton";
+  sol::state_view lua(ts);
+  const sol::table spec = Spec(ts, arg);
+
+  SkelOpts opts;
+  opts.hi = ReqInt(spec, "hi", kFn);
+  opts.roots = IdArray(spec, "roots");
+  sol::optional<sol::table> skel = spec["skeleton"];
+  if (!skel) Fail(kFn, "skeleton is required");
+  for (std::size_t i = 1; i <= skel->size(); ++i) {
+    sol::optional<int64_t> n = (*skel)[i];
+    if (!n) Fail(kFn, "skeleton[" + std::to_string(i) + "] is not an integer");
+    opts.skeleton.push_back(static_cast<int32_t>(*n));
+  }
+  const std::string symbol = StrOr(spec, "symbol", "x");
+
+  SkelSet set;
+  std::string error;
+  if (!primeparts::graph::Skeleton(opts, &set, &error)) Fail(kFn, error);
+
+  sol::table out = lua.create_table(static_cast<int>(set.hits.size()), 0);
+  int idx = 1;
+  for (const SkelHit& hit : set.hits) {
+    sol::table row = lua.create_table(0, 6);
+    row["p"] = hit.p;
+    row["terminal"] = hit.word.terminal;
+    row["degree"] = hit.word.Degree();
+    row["word"] = WordTable(lua, hit.word);
+    const Expr form = primeparts::graph::WordForm(hit.word, symbol);
+    row["expr"] = form;
+    row["exact"] = form.Subs(symbol, hit.word.terminal).EqualsInt(hit.p);
+    out[idx++] = row;
+  }
+
+  sol::table meta = lua.create_table();
+  sol::table roots = lua.create_table(static_cast<int>(set.roots.size()), 0);
+  int ri = 1;
+  for (const int64_t r : set.roots) roots[ri++] = r;
+  sol::table bounds = lua.create_table(static_cast<int>(set.bounds.size()), 0);
+  int bi = 1;
+  for (const int64_t b : set.bounds) bounds[bi++] = b;
+  meta["roots"] = roots;
+  meta["bounds"] = bounds;
+  meta["nodes"] = set.nodes;
+  meta["symbol"] = symbol;
+  out["meta"] = meta;
+  return out;
+}
+
 }  // namespace
 
 extern "C" int luaopen_graph_walk(lua_State* L) {
@@ -235,6 +288,7 @@ extern "C" int luaopen_graph_walk(lua_State* L) {
   walk.set_function("reach", &Reach);
   walk.set_function("chains", &Chains);
   walk.set_function("forms", &Forms);
+  walk.set_function("skeleton", &Skeleton);
   walk.push();
   return 1;
 }

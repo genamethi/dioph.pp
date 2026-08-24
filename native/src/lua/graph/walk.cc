@@ -3,6 +3,11 @@
 #include <algorithm>
 #include <cstdint>
 #include <unordered_set>
+#include <utility>
+
+#include <flint/ulong_extras.h>
+
+#include "primeparts/lua/lnt.h"
 
 namespace primeparts::graph {
 
@@ -152,6 +157,148 @@ bool Chains(Oracle& oracle, int64_t p, const ChainOpts& opts, ChainSet* out,
   const bool ok = walker.Visit(p, 0);
   out->oracle_calls = oracle.Calls() - before;
   return ok;
+}
+
+namespace {
+
+int64_t Root(int64_t hi, int32_t e) {
+  if (e <= 1) return hi;
+  if (e > 63) return 2;
+  ulong rem = 0;
+  return static_cast<int64_t>(
+      n_rootrem(&rem, static_cast<ulong>(hi), static_cast<ulong>(e)));
+}
+
+void Cone(int64_t start, int64_t cap, std::vector<int64_t>* out) {
+  out->clear();
+  if (start > cap) return;
+
+  std::unordered_set<int64_t> seen{start};
+  std::vector<int64_t> frontier{start};
+  std::vector<nt::Edge> edges;
+  out->push_back(start);
+
+  while (!frontier.empty()) {
+    std::vector<int64_t> next;
+    for (const int64_t q : frontier) {
+      nt::InvOf(static_cast<uint64_t>(q), static_cast<uint64_t>(cap), &edges);
+      for (const nt::Edge& e : edges) {
+        if (e.n != 1) continue;
+        if (seen.insert(e.p).second) {
+          next.push_back(e.p);
+          out->push_back(e.p);
+        }
+      }
+    }
+    frontier = std::move(next);
+  }
+}
+
+struct SkelWalk {
+  const std::vector<int32_t>* skel = nullptr;
+  std::vector<int64_t> bound;
+  SkelSet* out = nullptr;
+  int64_t root = 0;
+  int64_t a0 = 0;
+  std::vector<Block> blocks;
+
+  void Run(std::size_t level, int64_t entry) {
+    const int32_t n = (*skel)[level];
+    std::vector<int64_t> cone;
+    std::vector<nt::Edge> edges;
+    Cone(entry, bound[level], &cone);
+    out->nodes += static_cast<int64_t>(cone.size());
+
+    for (const int64_t v : cone) {
+      const int64_t delta = v - entry;
+      if (level == 0) {
+        a0 = delta;
+      } else {
+        blocks[level - 1].c += delta;
+      }
+
+      nt::InvOf(static_cast<uint64_t>(v),
+                static_cast<uint64_t>(bound[level + 1]), &edges);
+      for (const nt::Edge& e : edges) {
+        if (e.n != n) continue;
+        blocks.push_back(Block{.n = n, .c = INT64_C(1) << e.m});
+        if (level + 1 == skel->size()) {
+          Word word;
+          word.terminal = root;
+          word.a0 = a0;
+          word.blocks = blocks;
+          out->hits.push_back(SkelHit{.word = std::move(word), .p = e.p});
+        } else {
+          Run(level + 1, e.p);
+        }
+        blocks.pop_back();
+      }
+
+      if (level == 0) {
+        a0 = 0;
+      } else {
+        blocks[level - 1].c -= delta;
+      }
+    }
+  }
+};
+
+}  // namespace
+
+bool Skeleton(const SkelOpts& opts, SkelSet* out, std::string* error) {
+  if (opts.skeleton.empty()) {
+    *error = "skeleton must have at least one block";
+    return false;
+  }
+  if (opts.hi < 3) {
+    *error = "hi must be at least 3";
+    return false;
+  }
+  for (const int32_t n : opts.skeleton) {
+    if (n < 2) {
+      *error = "every skeleton entry must be at least 2";
+      return false;
+    }
+  }
+
+  out->hits.clear();
+  out->roots.clear();
+  out->nodes = 0;
+
+  const std::size_t k = opts.skeleton.size();
+  out->bounds.assign(k + 1, opts.hi);
+  int32_t suffix = 1;
+  for (std::size_t i = k; i-- > 0;) {
+    suffix = suffix > 63 / opts.skeleton[i] ? 64 : suffix * opts.skeleton[i];
+    out->bounds[i] = Root(opts.hi, suffix);
+  }
+
+  if (opts.roots.empty()) {
+    nt::Part parts[nt::kMaxParts];
+    for (int64_t r = 3; r <= out->bounds[0]; r += 2) {
+      if (n_is_prime(static_cast<ulong>(r)) == 0) continue;
+      if (nt::PartsOf(static_cast<uint64_t>(r), parts) == 0) {
+        out->roots.push_back(r);
+      }
+    }
+  } else {
+    for (const int64_t r : opts.roots) {
+      if (r >= 3 && r <= out->bounds[0]) out->roots.push_back(r);
+    }
+    std::sort(out->roots.begin(), out->roots.end());
+    out->roots.erase(std::unique(out->roots.begin(), out->roots.end()),
+                     out->roots.end());
+  }
+
+  SkelWalk walk;
+  walk.skel = &opts.skeleton;
+  walk.bound = out->bounds;
+  walk.out = out;
+  for (const int64_t r : out->roots) {
+    walk.root = r;
+    walk.Run(0, r);
+  }
+  return true;
 }
 
 int64_t Word::Degree() const {

@@ -76,4 +76,24 @@ bool Chains(Oracle& oracle, int64_t p, const ChainOpts& opts, ChainSet* out,
 
 Expr ChainForm(const std::vector<Part>& edges, const std::string& symbol);
 
+struct SkelOpts {
+  std::vector<int32_t> skeleton;
+  int64_t hi = 0;
+  std::vector<int64_t> roots;
+};
+
+struct SkelHit {
+  Word word;
+  int64_t p = 0;
+};
+
+struct SkelSet {
+  std::vector<SkelHit> hits;
+  std::vector<int64_t> roots;
+  std::vector<int64_t> bounds;
+  int64_t nodes = 0;
+};
+
+bool Skeleton(const SkelOpts& opts, SkelSet* out, std::string* error);
+
 }  // namespace primeparts::graph

@@ -126,7 +126,7 @@ graph.parts.of{p: int} | graph.parts{p: int}
 }
 
 M["graph.walk"] = {
-  order = {"reach", "chains", "forms"},
+  order = {"reach", "chains", "forms", "skeleton"},
   reach = [[
 graph.walk.reach{p: int, depth: int = 8, max_nodes: int = 1000000,
                  twists: TwistTable?}
@@ -147,6 +147,14 @@ graph.walk.forms{p: int, depth: int = 8, limit: int = 1000,
        word: {a0: int, blocks: [{n: int, c: int}], skeleton: [int],
               degree: int, grade: int, odd_degree: int, terminal: int}}]
      .meta = {truncated: bool, calls: int, symbol: string}]],
+  skeleton = [[
+graph.walk.skeleton{skeleton: [int], hi: int, roots: [int] | [{p: int}] = nil,
+                    symbol: string = "x"}
+  -> [{p: int, terminal: int, degree: int, expr: Expr, exact: bool,
+       word: {a0: int, blocks: [{n: int, c: int}], skeleton: [int],
+              degree: int, grade: int, odd_degree: int, terminal: int}}]
+     .meta = {roots: [int], bounds: [int], nodes: int, symbol: string}
+  ! every skeleton entry >= 2, hi >= 3]],
 }
 
 M["graph.twists"] = {
