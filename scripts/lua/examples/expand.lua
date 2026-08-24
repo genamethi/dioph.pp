@@ -1,5 +1,5 @@
 -- Every word into p, in the Hermite basis.
--- Run: pp scripts/lua/examples/hermite.lua [p]
+-- Run: pp scripts/lua/examples/expand.lua [p]
 
 local p = math.tointeger(tonumber(arg and arg[1] or nil) or 65537)
 

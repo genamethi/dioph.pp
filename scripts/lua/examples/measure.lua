@@ -1,5 +1,5 @@
 -- How far p sits from each of its roots.
--- Run: pp scripts/lua/examples/depth.lua [p]
+-- Run: pp scripts/lua/examples/measure.lua [p]
 
 local p = math.tointeger(tonumber(arg and arg[1] or nil) or 251297)
 

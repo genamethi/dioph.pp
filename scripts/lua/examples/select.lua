@@ -1,5 +1,5 @@
 -- Pick interesting p from the warehouse, then decompose.
--- Run: pp scripts/lua/examples/catalog.lua [hi]
+-- Run: pp scripts/lua/examples/select.lua [hi]
 
 local hi = math.tointeger(tonumber(arg and arg[1] or nil) or 5e5)
 

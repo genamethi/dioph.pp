@@ -1,5 +1,5 @@
 -- Normalized state S = P - p over Z/2^e.
--- Run: pp scripts/lua/examples/state.lua [p] [e]
+-- Run: pp scripts/lua/examples/reduce.lua [p] [e]
 
 local p = math.tointeger(tonumber(arg and arg[1] or nil) or 65537)
 local e = math.tointeger(tonumber(arg and arg[2] or nil) or 5)

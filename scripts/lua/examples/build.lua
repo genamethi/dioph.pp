@@ -1,5 +1,5 @@
 -- Build every chain with a given skeleton.
--- Run: pp scripts/lua/examples/skeleton.lua [4,2] [hi]
+-- Run: pp scripts/lua/examples/build.lua [4,2] [hi]
 
 local spec = (arg and arg[1]) or "4,2"
 local hi = math.tointeger(tonumber(arg and arg[2] or nil) or 1e9)
