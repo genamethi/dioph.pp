@@ -1,11 +1,15 @@
 #include <getopt.h>
 
+#include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
+#include <utility>
 #include <algorithm>
 #include <memory>
 #include <vector>
@@ -33,6 +37,46 @@ struct Options {
   int64_t report_every = 50000000;
   int scan_threads = 8;
   double max_gb = 20.0;
+  std::string exclude_path;
+};
+
+struct Sketch {
+  static constexpr int kBits = 8;
+  static constexpr int kRegs = 1 << kBits;
+  uint8_t reg[kRegs];
+
+  void Clear() { std::memset(reg, 0, sizeof(reg)); }
+
+  void Add(uint64_t x) {
+    x *= 0x9e3779b97f4a7c15ull;
+    x ^= x >> 29;
+    x *= 0xbf58476d1ce4e5b9ull;
+    x ^= x >> 32;
+    const uint32_t i = static_cast<uint32_t>(x >> (64 - kBits));
+    const uint64_t w = x << kBits;
+    const uint8_t rank =
+        static_cast<uint8_t>(w == 0 ? 64 - kBits + 1 : __builtin_clzll(w) + 1);
+    if (rank > reg[i]) reg[i] = rank;
+  }
+
+  void Merge(const Sketch& other) {
+    for (int i = 0; i < kRegs; ++i) {
+      if (other.reg[i] > reg[i]) reg[i] = other.reg[i];
+    }
+  }
+
+  double Estimate() const {
+    double sum = 0;
+    int zeros = 0;
+    for (int i = 0; i < kRegs; ++i) {
+      sum += 1.0 / static_cast<double>(UINT64_C(1) << reg[i]);
+      if (reg[i] == 0) ++zeros;
+    }
+    const double m = kRegs;
+    double est = 0.7213 / (1.0 + 1.079 / m) * m * m / sum;
+    if (est <= 2.5 * m && zeros > 0) est = m * std::log(m / zeros);
+    return est;
+  }
 };
 
 struct Interner {
@@ -72,6 +116,7 @@ struct Cursor {
   std::vector<const int32_t*> cols32;
   std::vector<std::string> names;
   int64_t at = 0;
+  bool done = false;
 
   bool Open(client::Session& session, const std::string& table,
             std::vector<std::string> select,
@@ -87,9 +132,17 @@ struct Cursor {
   }
 
   bool Advance(std::string* error) {
-    while (batch == nullptr || at >= batch->num_rows()) {
-      if (!stream->Next(&batch, error)) return false;
-      if (batch == nullptr) return true;
+    while (!done && (batch == nullptr || at >= batch->num_rows())) {
+      error->clear();
+      if (!stream->Next(&batch, error)) {
+        if (!error->empty()) return false;
+        done = true;
+        return true;
+      }
+      if (batch == nullptr) {
+        done = true;
+        return true;
+      }
       at = 0;
       cols.assign(names.size(), nullptr);
       cols32.assign(names.size(), nullptr);
@@ -104,7 +157,7 @@ struct Cursor {
     return true;
   }
 
-  bool Done() const { return batch == nullptr; }
+  bool Done() const { return done; }
   int64_t P() const { return Col(0); }
   int64_t Col(std::size_t i) const {
     return cols[i] != nullptr ? cols[i][at] : cols32[i][at];
@@ -160,9 +213,29 @@ int Run(const Options& opt) {
                static_cast<long long>(flat.stream->planned_rows()),
                static_cast<long long>(twist.stream->planned_rows()));
 
+  std::unordered_set<int64_t> blocked_roots;
+  if (!opt.exclude_path.empty()) {
+    std::FILE* f = std::fopen(opt.exclude_path.c_str(), "r");
+    if (f == nullptr) {
+      std::fprintf(stderr, "cannot open %s\n", opt.exclude_path.c_str());
+      return 1;
+    }
+    long long v = 0;
+    while (std::fscanf(f, "%lld", &v) == 1) blocked_roots.insert(v);
+    std::fclose(f);
+    std::fprintf(stderr, "excluding %zu roots\n", blocked_roots.size());
+  }
+
+  std::vector<bool> blocked;
   std::unordered_map<int64_t, uint32_t> set_of;
+  std::vector<Sketch> sketch;
+  std::vector<int64_t> sketch_p;
   Interner interner;
   std::vector<uint32_t> parents;
+  Sketch acc;
+  double best_est = 0;
+  int64_t best_p = 0;
+  std::vector<std::pair<double, int64_t>> top;
   int64_t rows = 0, roots = 0, missing = 0, orphan = 0, last_p = 0;
   const double t0 = Now();
   double next_report = opt.report_every;
@@ -177,10 +250,12 @@ int Run(const Options& opt) {
     }
     last_p = p;
 
+    acc.Clear();
     parents.clear();
+    bool block = blocked_roots.count(p) != 0;
     while (!flat.Done() && flat.P() < p) {
       ++flat.at;
-      if (!flat.Advance(&error)) return 1;
+      if (!flat.Advance(&error)) { std::fprintf(stderr, "flat: %s\n", error.c_str()); return 1; }
     }
     if (!flat.Done() && flat.P() == p) {
       primeparts::ForEachPart(p, static_cast<uint64_t>(flat.Col(1)),
@@ -191,31 +266,48 @@ int Run(const Options& opt) {
                                   return;
                                 }
                                 parents.push_back(at->second);
+                                acc.Merge(sketch[at->second]);
+                                if (blocked[at->second]) block = true;
                               });
       ++flat.at;
-      if (!flat.Advance(&error)) return 1;
+      if (!flat.Advance(&error)) { std::fprintf(stderr, "flat: %s\n", error.c_str()); return 1; }
     }
     while (!twist.Done() && twist.P() < p) {
       ++twist.at;
-      if (!twist.Advance(&error)) return 1;
+      if (!twist.Advance(&error)) { std::fprintf(stderr, "twist: %s\n", error.c_str()); return 1; }
     }
     while (!twist.Done() && twist.P() == p) {
       const auto at = set_of.find(twist.Col(1));
-      if (at == set_of.end()) ++missing;
-      else parents.push_back(at->second);
+      if (at == set_of.end()) {
+        ++missing;
+      } else {
+        parents.push_back(at->second);
+        acc.Merge(sketch[at->second]);
+        if (blocked[at->second]) block = true;
+      }
       ++twist.at;
-      if (!twist.Advance(&error)) return 1;
+      if (!twist.Advance(&error)) { std::fprintf(stderr, "twist: %s\n", error.c_str()); return 1; }
     }
 
+    const uint32_t slot = static_cast<uint32_t>(sketch.size());
     if (parents.empty()) {
-      set_of.emplace(p, interner.Singleton(p));
+      acc.Clear();
+      acc.Add(static_cast<uint64_t>(p));
       ++roots;
       if (k != 0) ++orphan;
-    } else {
-      set_of.emplace(p, interner.Union(&parents));
+    }
+    sketch.push_back(acc);
+    sketch_p.push_back(p);
+    blocked.push_back(block);
+    set_of.emplace(p, slot);
+    const double est = block ? 0.0 : acc.Estimate();
+    if (est > best_est) {
+      best_est = est;
+      best_p = p;
+      top.emplace_back(est, p);
     }
 
-    const std::size_t live = set_of.size() * 40 + interner.Count() * 16;
+    const std::size_t live = set_of.size() * 40 + sketch.size() * sizeof(Sketch);
     if (static_cast<double>(live) > opt.max_gb * 1e9) {
       std::fprintf(stderr,
                    "STOP at the %.0f GB budget: p=%lld rows=%lld roots=%lld "
@@ -230,28 +322,31 @@ int Run(const Options& opt) {
       next_report += opt.report_every;
       const std::size_t bytes = live;
       std::fprintf(stderr,
-                   "p=%lld rows=%lld roots=%lld sets=%zu sets/rows=%.4f "
-                   "missing=%lld orphan=%lld ~%s %.0fs\n",
+                   "p=%lld rows=%lld roots=%lld best=%lld (~%.0f roots, "
+                   "%.1f%% of X) missing=%lld ~%s %.0fs\n",
                    static_cast<long long>(p), static_cast<long long>(rows),
-                   static_cast<long long>(roots), interner.Count(),
-                   static_cast<double>(interner.Count()) / rows,
-                   static_cast<long long>(missing),
-                   static_cast<long long>(orphan), Gb(bytes).c_str(),
-                   Now() - t0);
+                   static_cast<long long>(roots),
+                   static_cast<long long>(best_p), best_est,
+                   100.0 * best_est / roots, static_cast<long long>(missing),
+                   Gb(bytes).c_str(), Now() - t0);
     }
     ++primes.at;
-    if (!primes.Advance(&error)) return 1;
+    if (!primes.Advance(&error)) { std::fprintf(stderr, "primes: %s\n", error.c_str()); return 1; }
   }
   if (!error.empty()) {
     std::fprintf(stderr, "scan ended: %s\n", error.c_str());
     return 1;
   }
-  std::fprintf(stderr,
-               "done: rows=%lld roots=%lld sets=%zu missing=%lld orphan=%lld "
-               "%.0fs\n",
+  std::sort(top.begin(), top.end(),
+            [](const auto& a, const auto& b) { return a.first > b.first; });
+  std::fprintf(stderr, "done: rows=%lld roots=%lld missing=%lld %.0fs\n",
                static_cast<long long>(rows), static_cast<long long>(roots),
-               interner.Count(), static_cast<long long>(missing),
-               static_cast<long long>(orphan), Now() - t0);
+               static_cast<long long>(missing), Now() - t0);
+  for (std::size_t i = 0; i < top.size() && i < 12; ++i) {
+    std::fprintf(stderr, "  candidate p=%lld  ~%.0f roots  %.1f%% of X\n",
+                 static_cast<long long>(top[i].second), top[i].first,
+                 100.0 * top[i].first / roots);
+  }
   return 0;
 }
 
@@ -265,14 +360,16 @@ int main(int argc, char** argv) {
       {"report-every", required_argument, nullptr, 'r'},
       {"threads", required_argument, nullptr, 't'},
       {"max-gb", required_argument, nullptr, 'g'},
+      {"exclude", required_argument, nullptr, 'x'},
       {nullptr, 0, nullptr, 0}};
-  for (int c; (c = getopt_long(argc, argv, "c:H:r:t:g:", kLong, nullptr)) != -1;) {
+  for (int c; (c = getopt_long(argc, argv, "c:H:r:t:g:x:", kLong, nullptr)) != -1;) {
     switch (c) {
       case 'c': opt.config_path = optarg; break;
       case 'H': opt.p_hi = std::atoll(optarg); break;
       case 'r': opt.report_every = std::atoll(optarg); break;
       case 't': opt.scan_threads = std::atoi(optarg); break;
       case 'g': opt.max_gb = std::atof(optarg); break;
+      case 'x': opt.exclude_path = optarg; break;
       default:
         std::fprintf(stderr,
                      "usage: %s [-c config] [--p-hi N] [--report-every N] "
