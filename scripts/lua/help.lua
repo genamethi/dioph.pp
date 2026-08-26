@@ -116,7 +116,7 @@ irc.upper_bound{table: string, field: string}
 M.graph = {
   order = {"parts", "depth", "words", "walk", "twists", "expr", "poly"},
   parts = "graph.parts -> module   of, calls, source",
-  depth = "graph.depth -> module   of, root, Depth",
+  depth = "graph.depth -> module   of, roots, root, Depth",
   words = "graph.words -> module   of, root, Words",
   walk = "graph.walk -> module   reach, chains, forms, skeleton",
   twists = "graph.twists -> module   build, TwistTable",
@@ -134,12 +134,18 @@ graph.parts.of{p: int} | graph.parts{p: int}
 }
 
 M["graph.depth"] = {
-  order = {"of", "root"},
+  order = {"of", "roots", "root"},
   of = [[
 graph.depth.of{p: int, depth: int = -1, max_cells: int = 64000000} -> Depth
 graph.depth{p: int, ...} -> Depth
   ! max_cells exceeded]],
   root = "graph.depth.root(r: int) -> Depth",
+  roots = [[
+graph.depth.roots{p: int, max_nodes: int = 40000000}
+  -> [{r: int, n: int | string}], .meta = {ancestors: int, roots: int}
+  Exact chain count per root, by weight propagation down from p.
+  One counter per ancestor, no per-node profile.
+  ! max_nodes exceeded]],
 }
 
 M["graph.words"] = {

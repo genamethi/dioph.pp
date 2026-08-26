@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <unordered_map>
+#include <vector>
 
 namespace primeparts::graph {
 
@@ -124,6 +125,59 @@ int64_t Depth::Cells() const {
     out += static_cast<int64_t>(coeffs.size());
   }
   return out;
+}
+
+namespace {
+
+std::string Text(unsigned __int128 v) {
+  if (v == 0) return "0";
+  char buf[40];
+  int i = 40;
+  while (v != 0) {
+    buf[--i] = static_cast<char>('0' + static_cast<int>(v % 10));
+    v /= 10;
+  }
+  return std::string(buf + i, buf + 40);
+}
+
+}  // namespace
+
+bool RootsOf(Oracle& oracle, int64_t p, int64_t max_nodes, RootSet* out,
+             std::string* error) {
+  out->roots.clear();
+  out->ancestors = 0;
+
+  std::vector<int64_t> order{p};
+  std::unordered_map<int64_t, unsigned __int128> weight;
+  weight.reserve(1 << 16);
+  weight[p] = 1;
+
+  std::vector<Edge> parents;
+  for (std::size_t i = 0; i < order.size(); ++i) {
+    if (!oracle.Parts(order[i], &parents, error)) return false;
+    for (const Edge& e : parents) {
+      if (weight.emplace(e.q, 0).second) {
+        order.push_back(e.q);
+        if (max_nodes > 0 && static_cast<int64_t>(order.size()) > max_nodes) {
+          *error = "reached the node ceiling of " + std::to_string(max_nodes);
+          return false;
+        }
+      }
+    }
+  }
+  out->ancestors = static_cast<int64_t>(order.size());
+
+  std::sort(order.begin(), order.end(), std::greater<int64_t>());
+  for (const int64_t v : order) {
+    if (!oracle.Parts(v, &parents, error)) return false;
+    if (parents.empty()) {
+      out->roots.push_back(RootWeight{.root = v, .chains = Text(weight[v])});
+      continue;
+    }
+    const unsigned __int128 w = weight[v];
+    for (const Edge& e : parents) weight[e.q] += w;
+  }
+  return true;
 }
 
 namespace {

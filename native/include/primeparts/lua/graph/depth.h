@@ -39,4 +39,17 @@ class Depth {
 bool DepthOf(Oracle& oracle, int64_t p, int32_t depth, int64_t max_cells,
              Depth* out, std::string* error);
 
+struct RootWeight {
+  int64_t root = 0;
+  std::string chains;
+};
+
+struct RootSet {
+  std::vector<RootWeight> roots;
+  int64_t ancestors = 0;
+};
+
+bool RootsOf(Oracle& oracle, int64_t p, int64_t max_nodes, RootSet* out,
+             std::string* error);
+
 }  // namespace primeparts::graph

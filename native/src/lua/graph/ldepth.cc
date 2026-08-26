@@ -42,6 +42,36 @@ Depth Of(sol::this_state ts, sol::optional<sol::table> arg) {
   return out;
 }
 
+sol::table Roots(sol::this_state ts, sol::optional<sol::table> arg) {
+  static const char kFn[] = "graph.depth.roots";
+  sol::state_view lua(ts);
+  const sol::table spec = Spec(ts, arg);
+  const int64_t p = ReqInt(spec, "p", kFn);
+  const int64_t ceiling = IntOr(spec, "max_nodes", 40000000);
+
+  primeparts::graph::RootSet set;
+  std::string error;
+  if (!primeparts::graph::RootsOf(SharedOracle(), p, ceiling, &set, &error)) {
+    Fail(kFn, error);
+  }
+
+  sol::table out = lua.create_table(static_cast<int>(set.roots.size()), 0);
+  int idx = 1;
+  for (const auto& rw : set.roots) {
+    sol::table row = lua.create_table(0, 2);
+    row["r"] = rw.root;
+    row["n"] = rw.chains.size() < 19
+                   ? sol::make_object(lua, std::stoll(rw.chains))
+                   : sol::make_object(lua, rw.chains);
+    out[idx++] = row;
+  }
+  sol::table meta = lua.create_table();
+  meta["ancestors"] = set.ancestors;
+  meta["roots"] = static_cast<int64_t>(set.roots.size());
+  out["meta"] = meta;
+  return out;
+}
+
 void Bind(sol::table& depth) {
   depth.new_usertype<Depth>(
       "Depth", sol::no_constructor,
@@ -73,6 +103,7 @@ extern "C" int luaopen_graph_depth(lua_State* L) {
   sol::state_view lua(L);
   sol::table depth = lua.create_table();
   depth.set_function("of", &Of);
+  depth.set_function("roots", &Roots);
   depth.set_function("root", &Depth::Of);
   Bind(depth);
   SetCall(lua, depth,
