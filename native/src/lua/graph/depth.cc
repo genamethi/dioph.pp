@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace primeparts::graph {
@@ -148,18 +149,18 @@ bool RootsOf(Oracle& oracle, int64_t p, int64_t max_nodes, RootSet* out,
   out->ancestors = 0;
 
   std::vector<int64_t> order{p};
-  std::unordered_map<int64_t, unsigned __int128> weight;
-  weight.reserve(1 << 16);
-  weight[p] = 1;
-
   std::vector<Edge> parents;
-  for (std::size_t i = 0; i < order.size(); ++i) {
-    if (!oracle.Parts(order[i], &parents, error)) return false;
-    for (const Edge& e : parents) {
-      if (weight.emplace(e.q, 0).second) {
+  {
+    std::unordered_set<int64_t> seen{p};
+    for (std::size_t i = 0; i < order.size(); ++i) {
+      if (!oracle.Parts(order[i], &parents, error)) return false;
+      for (const Edge& e : parents) {
+        if (!seen.insert(e.q).second) continue;
         order.push_back(e.q);
         if (max_nodes > 0 && static_cast<int64_t>(order.size()) > max_nodes) {
-          *error = "reached the node ceiling of " + std::to_string(max_nodes);
+          *error = "reached the node ceiling of " + std::to_string(max_nodes) +
+                   "; raise max_nodes only if the memory is there, roughly " +
+                   std::to_string(max_nodes / 20000000) + " GB at this size";
           return false;
         }
       }
@@ -168,14 +169,22 @@ bool RootsOf(Oracle& oracle, int64_t p, int64_t max_nodes, RootSet* out,
   out->ancestors = static_cast<int64_t>(order.size());
 
   std::sort(order.begin(), order.end(), std::greater<int64_t>());
-  for (const int64_t v : order) {
-    if (!oracle.Parts(v, &parents, error)) return false;
+  std::vector<unsigned __int128> weight(order.size(), 0);
+  weight[0] = 1;
+
+  for (std::size_t i = 0; i < order.size(); ++i) {
+    if (!oracle.Parts(order[i], &parents, error)) return false;
     if (parents.empty()) {
-      out->roots.push_back(RootWeight{.root = v, .chains = Text(weight[v])});
+      out->roots.push_back(
+          RootWeight{.root = order[i], .chains = Text(weight[i])});
       continue;
     }
-    const unsigned __int128 w = weight[v];
-    for (const Edge& e : parents) weight[e.q] += w;
+    const unsigned __int128 w = weight[i];
+    for (const Edge& e : parents) {
+      const auto at = std::lower_bound(order.begin() + i + 1, order.end(), e.q,
+                                       std::greater<int64_t>());
+      weight[at - order.begin()] += w;
+    }
   }
   return true;
 }

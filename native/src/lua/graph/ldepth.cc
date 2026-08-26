@@ -47,7 +47,7 @@ sol::table Roots(sol::this_state ts, sol::optional<sol::table> arg) {
   sol::state_view lua(ts);
   const sol::table spec = Spec(ts, arg);
   const int64_t p = ReqInt(spec, "p", kFn);
-  const int64_t ceiling = IntOr(spec, "max_nodes", 40000000);
+  const int64_t ceiling = IntOr(spec, "max_nodes", 50000000);
 
   primeparts::graph::RootSet set;
   std::string error;
