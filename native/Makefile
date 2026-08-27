@@ -370,6 +370,18 @@ $(BUILD_DIR)/roots_main.o: src/roots/roots_main.cc include/primeparts/client/ses
 $(BUILD_DIR)/primeparts-roots: $(BUILD_DIR)/roots_main.o $(SESSION_OBJ) $(REST_SCAN_PLAN_OBJ) $(PLAN_STATUS_OBJ) $(CONFIG_OBJS) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(LUA_LDLIBS) -lsqlite3 -pthread -o $@
 
+$(BUILD_DIR)/sweep_main.o: src/roots/sweep_main.cc | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/primeparts-sweep: $(BUILD_DIR)/sweep_main.o
+	$(CXX) $(LDFLAGS) $(EXE_LDFLAGS) $^ -o $@
+
+$(BUILD_DIR)/reverse_main.o: src/roots/reverse_main.cc | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/primeparts-reverse: $(BUILD_DIR)/reverse_main.o
+	$(CXX) $(LDFLAGS) $(EXE_LDFLAGS) $^ -o $@
+
 $(BUILD_DIR)/primeparts-verify: $(VERIFY_MAIN_OBJ) $(VERIFY_OBJ) $(CORE_OBJ) $(HIGHER_SWEEP_OBJ) $(CONFIG_OBJS) $(SOURCE_SCAN_OBJ) $(SCAN_OBJS) $(PP_ICEBERG_REST_OBJ) $(PP_LMDB_STORE_OBJ) $(LMDB_LIB)
 	$(CXX) $(ICEBERG_LDFLAGS) $(LDFLAGS) $(EXE_LDFLAGS) $^ $(LDLIBS) $(SQL_CATALOG_LDLIBS) $(ICEBERG_LDLIBS) $(LUA_LDLIBS) -lsqlite3 -pthread -o $@
 
