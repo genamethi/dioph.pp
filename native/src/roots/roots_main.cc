@@ -173,7 +173,6 @@ struct Cursor {
   }
 };
 
-// sketch_p is sorted ascending, so probe by prime density before bisecting
 inline uint32_t RankIn(const int64_t* at, std::size_t n, int64_t q,
                        bool* found) {
   std::size_t lo = 0, hi = n;
@@ -197,8 +196,6 @@ inline uint32_t RankIn(const int64_t* at, std::size_t n, int64_t q,
   return 0;
 }
 
-// anonymous pages only: mmap'd file pages count in RSS but the kernel can
-// drop them, so budgeting on total RSS stops a run that is not using memory
 std::size_t Rss() {
   std::FILE* f = std::fopen("/proc/self/status", "r");
   if (f == nullptr) return 0;
@@ -235,7 +232,6 @@ int Run(const Options& opt) {
   so.rest_uri = conf.core.rest_uri;
   so.warehouse = conf.core.warehouse;
   so.ns = conf.core.ns_name;
-  // every pass here needs p order, and multi-threaded scans interleave batches
   so.scan_threads = 1;
   (void)opt.scan_threads;
   auto session = client::Session::Open(so, &error);
@@ -315,8 +311,13 @@ int Run(const Options& opt) {
     std::fprintf(stderr, "seeding %zu sources\n", srcs.size());
   }
   std::vector<uint64_t> cov;
+  std::vector<uint64_t> covf;
   std::vector<std::pair<int, int64_t>> cov_top;
   int cov_cut = 2;
+  int64_t twist_only_nodes = 0;
+  int64_t twist_only_bits = 0;
+  int64_t total_bits = 0;
+  std::vector<int64_t> twist_only_src(64, 0);
 
   std::vector<uint32_t> par_flat;
   std::vector<uint32_t> par_start;
@@ -362,9 +363,6 @@ int Run(const Options& opt) {
   std::vector<double> k_chain_sum(kMaxK + 1, 0);
   int64_t merges = 0;
   std::size_t last_rss = 0;
-  // primes as half-gaps rather than values: 2 bytes each instead of 8, which
-  // is what makes 1e12 fit on disk. The cursors only move forward, so a gap
-  // array serves them as well as the values did.
   const uint16_t* gap_map = nullptr;
   std::vector<int64_t> ckpt;
   std::size_t rank_n = 0;
@@ -475,7 +473,6 @@ int Run(const Options& opt) {
     }
   }
 
-  // one forward cursor per m: p rises monotonically, so p - 2^m does too
   std::vector<std::size_t> mcur(64, 0);
   std::vector<int64_t> mval(64, 0);
 
@@ -510,6 +507,7 @@ int Run(const Options& opt) {
     acc.Clear();
     double ch = 0;
     uint64_t cm = 0;
+    uint64_t cmf = 0;
     int par_pop = 0;
     parents.clear();
     bool block = blocked_roots.count(p) != 0;
@@ -554,6 +552,7 @@ int Run(const Options& opt) {
                                 ch += chains[ix];
                                 if (!srcs.empty()) {
                                   cm |= cov[ix];
+                                  cmf |= covf[ix];
                                   const int pp = __builtin_popcountll(cov[ix]);
                                   if (pp > par_pop) par_pop = pp;
                                 }
@@ -570,8 +569,6 @@ int Run(const Options& opt) {
       bool ok = false;
       uint32_t ix = 0;
       if (gap_map != nullptr) {
-        // twist parents are not p - 2^m and do not advance with p, so they
-        // need a real lookup: nearest checkpoint, then walk the gaps
         const int64_t q = twist.Col(1);
         std::size_t lo = 0, hi = ckpt.size();
         while (lo + 1 < hi) {
@@ -617,8 +614,21 @@ int Run(const Options& opt) {
     }
     if (!srcs.empty()) {
       const auto sb = src_bit.find(p);
-      if (sb != src_bit.end()) cm |= UINT64_C(1) << sb->second;
+      if (sb != src_bit.end()) {
+        cm |= UINT64_C(1) << sb->second;
+        cmf |= UINT64_C(1) << sb->second;
+      }
       cov.push_back(cm);
+      covf.push_back(cmf);
+      total_bits += __builtin_popcountll(cm);
+      const uint64_t only = cm & ~cmf;
+      if (only != 0) {
+        ++twist_only_nodes;
+        twist_only_bits += __builtin_popcountll(only);
+        for (int b = 0; b < 64; ++b) {
+          if ((only >> b) & 1) ++twist_only_src[b];
+        }
+      }
       const int pc = __builtin_popcountll(cm);
       if (pc >= cov_cut) {
         cov_top.emplace_back(pc, p);
@@ -793,6 +803,20 @@ int Run(const Options& opt) {
     }
     if (cov_top.empty()) {
       std::fprintf(stderr, "  none cover more than one\n");
+    }
+    std::fprintf(stderr,
+                 "\n(node, source) incidences: %lld\n"
+                 "reached only through a twist: %lld (%.6f%%) at %lld nodes\n",
+                 static_cast<long long>(total_bits),
+                 static_cast<long long>(twist_only_bits),
+                 100.0 * static_cast<double>(twist_only_bits) /
+                     static_cast<double>(total_bits == 0 ? 1 : total_bits),
+                 static_cast<long long>(twist_only_nodes));
+    for (std::size_t i = 0; i < srcs.size(); ++i) {
+      if (twist_only_src[i] == 0) continue;
+      std::fprintf(stderr, "  source %-10lld twist-only at %lld nodes\n",
+                   static_cast<long long>(srcs[i]),
+                   static_cast<long long>(twist_only_src[i]));
     }
   }
 

@@ -20,10 +20,6 @@ constexpr int kBuckets = 16;
 
 }  // namespace
 
-// Turns the forward file (per prime: degree, then parent ranks) into the
-// reverse one (per prime: child count, then child ranks). Parents are
-// partitioned into 16 ranges in a single streaming pass, then each range is
-// counting-sorted in memory, so nothing is ever written randomly.
 int main(int argc, char** argv) {
   std::string in, out;
   static const option kLong[] = {{"in", required_argument, nullptr, 'i'},
@@ -45,7 +41,6 @@ int main(int argc, char** argv) {
   std::FILE* f = std::fopen(in.c_str(), "rb");
   if (f == nullptr) { std::fprintf(stderr, "cannot open %s\n", in.c_str()); return 1; }
 
-  // first pass: how many primes, so the parent range can be split evenly
   uint32_t n = 0;
   {
     std::vector<uint32_t> buf(1 << 20);
@@ -71,7 +66,6 @@ int main(int argc, char** argv) {
     if (part[b] == nullptr) { std::fprintf(stderr, "cannot write part %d\n", b); return 1; }
   }
 
-  // second pass: send each (parent, child) to the bucket owning the parent
   std::rewind(f);
   {
     std::vector<uint32_t> buf(1 << 20);

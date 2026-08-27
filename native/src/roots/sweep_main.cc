@@ -28,7 +28,6 @@ std::size_t Rss() {
   return n == 2 ? static_cast<std::size_t>(resident) * 4096 : 0;
 }
 
-// primes are stored as half-gaps with a checkpoint every 4096
 std::vector<int64_t> g_ckpt;
 
 struct Parts {
@@ -64,7 +63,6 @@ struct Parts {
     return Next();
   }
 
-  // position the stream at a global word offset, across part boundaries
   bool Seek(uint64_t word) {
     std::size_t i = 0;
     while (i + 1 < start.size() && start[i + 1] <= word) ++i;
@@ -142,7 +140,6 @@ int64_t PrimeAt(const std::string& base, uint32_t rank) {
 
 }  // namespace
 
-// rank of a prime in the .p companion, by binary search on the file
 int64_t RankOfPrime(const std::string& base, int64_t q) {
   if (!LoadCkpt(base)) return -1;
   std::size_t lo = 0, hi = g_ckpt.size();
@@ -210,8 +207,6 @@ int main(int argc, char** argv) {
     base = base.substr(0, base.size() - 5);
   }
 
-  // one offset per 4096 records lets the file be walked backward a block at a
-  // time, which is what marking the ancestors of a node needs
   if (do_index) {
     std::FILE* ix = std::fopen((base + ".idx").c_str(), "wb");
     if (ix == nullptr) { std::fprintf(stderr, "cannot write idx\n"); return 1; }
@@ -241,7 +236,6 @@ int main(int argc, char** argv) {
     return 0;
   }
 
-  // mark every ancestor of the seed by walking blocks in reverse
   if (seed != 0) {
     const int64_t sr = RankOfPrime(base, seed);
     if (sr < 0) { std::fprintf(stderr, "seed not found\n"); return 1; }
@@ -287,7 +281,6 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "seed p=%lld rank=%lld: %lld ancestors marked  %.0fs\n",
                  (long long)seed, (long long)sr, (long long)marked, Now() - td);
 
-    // the horizon: smallest source the seed does not reach
     src.Rewind();
     std::vector<uint32_t> b2(1 << 20);
     std::size_t at = 0, have = 0;
@@ -320,8 +313,6 @@ int main(int argc, char** argv) {
     return 0;
   }
 
-  // log10 of the chain count: the values only ever get compared, and a float
-  // holds 4e9 primes in 16 GB where a double needs 33
   std::vector<float> lchains;
   std::vector<uint64_t> at_rank;
   std::vector<uint32_t> at_mask;
